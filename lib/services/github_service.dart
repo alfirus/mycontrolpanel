@@ -80,6 +80,45 @@ class GithubService {
     return out;
   }
 
+  /// Recent workflow runs across one repo (Actions API).
+  /// Maps to DeployItem: app=repo, version=#run+short SHA, env=branch.
+  Future<List<DeployItem>> repoRuns(String repo, {int limit = 8}) async {
+    final r = await http.get(
+      Uri.parse('https://api.github.com/repos/$repo/actions/runs?per_page=$limit'),
+      headers: _headers,
+    );
+    if (r.statusCode != 200) throw Exception(_apiError(r, 'actions runs'));
+    final runs = ((jsonDecode(r.body) as Map)['workflow_runs'] as List?) ?? [];
+    return runs.map((e) {
+      final j = e as Map<String, dynamic>;
+      final status = (j['status'] ?? '').toString(); // queued, in_progress, completed
+      final conclusion = (j['conclusion'] ?? '').toString(); // success, failure, cancelled, skipped
+      final mapped = status != 'completed'
+          ? 'running'
+          : conclusion == 'success'
+              ? 'success'
+              : 'failed';
+      final created = DateTime.tryParse((j['created_at'] ?? '').toString()) ?? DateTime.now();
+      final updated = DateTime.tryParse((j['updated_at'] ?? '').toString()) ?? created;
+      final secs = updated.difference(created).inSeconds;
+      final dur = secs < 60
+          ? '${secs}s'
+          : secs < 3600
+              ? '${secs ~/ 60}m ${secs % 60}s'
+              : '${secs ~/ 3600}h ${(secs % 3600) ~/ 60}m';
+      final sha = (j['head_sha'] ?? '').toString();
+      return DeployItem(
+        app: repo.split('/').last,
+        version: '#${j['run_number']} • ${sha.length >= 7 ? sha.substring(0, 7) : sha}',
+        env: ((j['head_branch'] ?? '').toString().isEmpty ? '—' : (j['head_branch'] as String)),
+        actor: (((j['actor'] as Map?) ?? const {})['login'] ?? ((j['head_commit'] as Map?)?['author']?['name'] ?? 'github-actions')).toString(),
+        time: created,
+        status: mapped,
+        duration: mapped == 'running' ? '…' : dur,
+      );
+    }).toList();
+  }
+
   String? _loginCache;
   Future<String> _login() async {
     if (_loginCache != null) return _loginCache!;

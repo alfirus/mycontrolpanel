@@ -27,11 +27,16 @@ class AppColors {
   static const info = Color(0xFF06B6D4);
 }
 
+class AppFonts {
+  static const String mono = 'JetBrainsMono';
+}
+
 class AppTheme {
   static ThemeData get dark {
     return ThemeData(
       useMaterial3: true,
       brightness: Brightness.dark,
+      fontFamily: AppFonts.mono,
       scaffoldBackgroundColor: AppColors.pitchBlack,
       colorScheme: const ColorScheme.dark(
         primary: AppColors.accentCyan,

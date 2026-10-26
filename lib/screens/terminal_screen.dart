@@ -133,7 +133,7 @@ class TerminalScreenState extends State<TerminalScreen> {
         backgroundColor: AppColors.surface1,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: const BorderSide(color: AppColors.border)),
         title: const Text('Key passphrase', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
-        content: TextField(controller: c, obscureText: true, autofocus: true, style: const TextStyle(fontSize: 12, color: AppColors.textPrimary, fontFamily: 'monospace'), decoration: InputDecoration(hintText: 'Passphrase for private key', hintStyle: const TextStyle(fontSize: 11, color: AppColors.textMuted), filled: true, fillColor: AppColors.surface2, border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.border)), enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.border)), focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.accentCyan)))),
+        content: TextField(controller: c, obscureText: true, autofocus: true, style: const TextStyle(fontSize: 12, color: AppColors.textPrimary, fontFamily: AppFonts.mono), decoration: InputDecoration(hintText: 'Passphrase for private key', hintStyle: const TextStyle(fontSize: 11, color: AppColors.textMuted), filled: true, fillColor: AppColors.surface2, border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.border)), enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.border)), focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.accentCyan)))),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('CANCEL', style: TextStyle(color: AppColors.textSecondary))),
           FilledButton(onPressed: () => Navigator.pop(ctx, c.text), style: FilledButton.styleFrom(backgroundColor: AppColors.accentCyan, foregroundColor: Colors.black), child: const Text('UNLOCK')),
@@ -326,7 +326,7 @@ class TerminalScreenState extends State<TerminalScreen> {
                 child: DropdownButtonFormField<ServerConnection>(
                   initialValue: _selected,
                   dropdownColor: AppColors.surface1,
-                  style: const TextStyle(fontSize: 12, color: AppColors.textPrimary, fontFamily: 'monospace'),
+                  style: const TextStyle(fontSize: 12, color: AppColors.textPrimary, fontFamily: AppFonts.mono),
                   decoration: InputDecoration(filled: true, fillColor: AppColors.surface1, contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10), border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.border)), enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.border))),
                   items: _servers.map((s) => DropdownMenuItem(value: s, child: Text('${s.name} (${s.host})', style: const TextStyle(fontSize: 11)))).toList(),
                   onChanged: (v) { if (_connected) _disconnect(); setState(() => _selected = v); },
@@ -368,7 +368,7 @@ class TerminalScreenState extends State<TerminalScreen> {
               height: 380,
               decoration: BoxDecoration(color: const Color(0xFF050505), borderRadius: BorderRadius.circular(10), border: Border.all(color: AppColors.border)),
               child: _lines.isEmpty
-                  ? const Center(child: Text('No output yet — connect, then run a command.', style: TextStyle(fontSize: 11, color: AppColors.textDim, fontFamily: 'monospace')))
+                  ? const Center(child: Text('No output yet — connect, then run a command.', style: TextStyle(fontSize: 11, color: AppColors.textDim, fontFamily: AppFonts.mono)))
                   : ListView.builder(
                       controller: _scroll,
                       padding: const EdgeInsets.all(10),
@@ -377,23 +377,23 @@ class TerminalScreenState extends State<TerminalScreen> {
                         final l = _lines[i];
                         return Padding(
                           padding: const EdgeInsets.only(bottom: 3),
-                          child: SelectableText(l.text, style: TextStyle(fontSize: 11, height: 1.4, color: l.color, fontFamily: 'monospace', fontWeight: l.isCommand ? FontWeight.w700 : FontWeight.w400)),
+                          child: SelectableText(l.text, style: TextStyle(fontSize: 11, height: 1.4, color: l.color, fontFamily: AppFonts.mono, fontWeight: l.isCommand ? FontWeight.w700 : FontWeight.w400)),
                         );
                       },
                     ),
             ),
             const SizedBox(height: 8),
             Row(children: [
-              Text(_connected ? '${_selected!.username}@${_selected!.host}:\$' : 'local\$', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: AppColors.accentCyan, fontFamily: 'monospace')),
+              Text(_connected ? '${_selected!.username}@${_selected!.host}:\$' : 'local\$', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: AppColors.accentCyan, fontFamily: AppFonts.mono)),
               const SizedBox(width: 8),
               Expanded(
                 child: TextField(
                   controller: _input, focusNode: _focus,
                   onSubmitted: _run,
-                  style: const TextStyle(fontSize: 12, color: AppColors.textPrimary, fontFamily: 'monospace'),
+                  style: const TextStyle(fontSize: 12, color: AppColors.textPrimary, fontFamily: AppFonts.mono),
                   decoration: InputDecoration(
                     hintText: _connected ? 'Run on ${_selected?.host}... (↑/↓ history)' : 'connect, or run local command...',
-                    hintStyle: const TextStyle(fontSize: 11, color: AppColors.textMuted, fontFamily: 'monospace'),
+                    hintStyle: const TextStyle(fontSize: 11, color: AppColors.textMuted, fontFamily: AppFonts.mono),
                     filled: true, fillColor: AppColors.surface2,
                     contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                     border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.border)),

@@ -66,6 +66,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
   bool _ghLoading = false;
   String? _ghError;
   bool get _ghConfigured => _ghToken.isNotEmpty && _ghRepos.isNotEmpty;
+  List<DeployItem> _ghRuns = [];
   String? _terminalServerId;
   String? _terminalPrefill;
   int _terminalKey = 0;
@@ -108,11 +109,17 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
       prs.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
       List<GithubItem> tasks = [];
       try { tasks = await svc.myTasks(_ghRepos); } catch (_) {}
+      final runs = <DeployItem>[];
+      for (final repo in _ghRepos) {
+        try { runs.addAll(await svc.repoRuns(repo)); } catch (_) {}
+      }
+      runs.sort((a, b) => b.time.compareTo(a.time));
       if (!mounted) return;
       setState(() {
         _ghIssues = issues;
         _ghPRs = prs;
         _ghTasks = tasks;
+        _ghRuns = runs.take(12).toList();
         _ghLoading = false;
       });
     } catch (e) {
@@ -261,7 +268,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: const BorderSide(color: AppColors.border)),
             title: Row(children: [const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.accentCyan)), const SizedBox(width: 10), Expanded(child: Text('Installing agent on ${s.host}', style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.textPrimary)))]),
             content: SizedBox(width: 320, child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text(status, style: const TextStyle(fontSize: 11, color: AppColors.textSecondary, fontFamily: 'monospace'), maxLines: 4, overflow: TextOverflow.ellipsis),
+              Text(status, style: const TextStyle(fontSize: 11, color: AppColors.textSecondary, fontFamily: AppFonts.mono), maxLines: 4, overflow: TextOverflow.ellipsis),
               const SizedBox(height: 8),
               const LinearProgressIndicator(color: AppColors.accentCyan, backgroundColor: AppColors.surface2),
               const SizedBox(height: 8),
@@ -286,7 +293,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
           child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
             const Text('Your saved key is encrypted. Enter its passphrase to run the one-click install directly — no terminal needed.', style: TextStyle(fontSize: 11, color: AppColors.textSecondary)),
             const SizedBox(height: 10),
-            TextField(controller: c, obscureText: true, autofocus: true, style: const TextStyle(fontSize: 12, color: AppColors.textPrimary, fontFamily: 'monospace'), decoration: InputDecoration(hintText: 'Key passphrase', hintStyle: const TextStyle(fontSize: 11, color: AppColors.textMuted), filled: true, fillColor: AppColors.surface2, contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10), border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.border)), enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.border)), focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.accentCyan)))),
+            TextField(controller: c, obscureText: true, autofocus: true, style: const TextStyle(fontSize: 12, color: AppColors.textPrimary, fontFamily: AppFonts.mono), decoration: InputDecoration(hintText: 'Key passphrase', hintStyle: const TextStyle(fontSize: 11, color: AppColors.textMuted), filled: true, fillColor: AppColors.surface2, contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10), border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.border)), enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.border)), focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.accentCyan)))),
           ]),
         ),
         actions: [
@@ -322,7 +329,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
               Padding(padding: const EdgeInsets.only(bottom: 6), child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
                 Container(margin: const EdgeInsets.only(top: 2), width: 6, height: 6, decoration: const BoxDecoration(color: AppColors.accentCyan, shape: BoxShape.circle)),
                 const SizedBox(width: 8),
-                Expanded(child: SelectableText(st, style: const TextStyle(fontSize: 11, color: AppColors.textPrimary, fontFamily: 'monospace'))),
+                Expanded(child: SelectableText(st, style: const TextStyle(fontSize: 11, color: AppColors.textPrimary, fontFamily: AppFonts.mono))),
               ])),
             const SizedBox(height: 8),
             const Text('INSTALL COMMAND (tap to copy)', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, letterSpacing: 0.6, color: AppColors.textMuted)),
@@ -338,7 +345,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
                 child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
                   const Icon(Icons.copy, size: 13, color: AppColors.accentCyan),
                   const SizedBox(width: 8),
-                  Expanded(child: Text(script, style: const TextStyle(fontSize: 9, color: Color(0xFFE4E4E7), fontFamily: 'monospace'), maxLines: 6, overflow: TextOverflow.ellipsis)),
+                  Expanded(child: Text(script, style: const TextStyle(fontSize: 9, color: Color(0xFFE4E4E7), fontFamily: AppFonts.mono), maxLines: 6, overflow: TextOverflow.ellipsis)),
                 ]),
               ),
             ),
@@ -384,7 +391,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
       backgroundColor: AppColors.surface1,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: const BorderSide(color: AppColors.border)),
       title: Text('Install log — ${s.host}', style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
-      content: SizedBox(width: 380, height: 300, child: SingleChildScrollView(child: SelectableText(log, style: const TextStyle(fontSize: 10, color: AppColors.textSecondary, fontFamily: 'monospace')))),
+      content: SizedBox(width: 380, height: 300, child: SingleChildScrollView(child: SelectableText(log, style: const TextStyle(fontSize: 10, color: AppColors.textSecondary, fontFamily: AppFonts.mono)))),
       actions: [
         TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('CLOSE', style: TextStyle(color: AppColors.textSecondary))),
         FilledButton(onPressed: () { Navigator.pop(ctx); _installAgent(s); }, style: FilledButton.styleFrom(backgroundColor: AppColors.accentCyan, foregroundColor: Colors.black), child: const Text('RETRY')),
@@ -486,7 +493,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
       backgroundColor: AppColors.surface1,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: const BorderSide(color: AppColors.border)),
       title: Row(children: [Container(width: 30, height: 30, decoration: BoxDecoration(color: AppColors.warning.withValues(alpha: 0.14), borderRadius: BorderRadius.circular(7)), child: const Icon(Icons.radar, size: 15, color: AppColors.warning)), const SizedBox(width: 10), Expanded(child: Text('Agent check — ${c.host}', style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.textPrimary)))]),
-      content: SizedBox(width: 380, child: SelectableText(verdict, style: const TextStyle(fontSize: 11, height: 1.4, color: AppColors.textSecondary, fontFamily: 'monospace'))),
+      content: SizedBox(width: 380, child: SelectableText(verdict, style: const TextStyle(fontSize: 11, height: 1.4, color: AppColors.textSecondary, fontFamily: AppFonts.mono))),
       actions: [
         TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('CLOSE', style: TextStyle(color: AppColors.textSecondary))),
         TextButton.icon(onPressed: () { Navigator.pop(ctx); _openInAppTerminal(c); }, icon: const Icon(Icons.terminal, size: 14), label: const Text('OPEN TERMINAL', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800)), style: TextButton.styleFrom(foregroundColor: AppColors.accentCyan)),
@@ -908,7 +915,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
           columns: const [DataColumn(label: Text('JOB')), DataColumn(label: Text('SCHEDULE')), DataColumn(label: Text('LAST')), DataColumn(label: Text('DUR')), DataColumn(label: Text('STATUS')), DataColumn(label: Text('SERVER'))],
           rows: display.map((c) => DataRow(cells: [
             DataCell(Row(children: [Container(width: 5, height: 5, decoration: BoxDecoration(color: cronColor(c.status), shape: BoxShape.circle)), const SizedBox(width: 5), Text(c.name, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 11))])),
-            DataCell(Text(c.schedule, style: const TextStyle(fontFamily: 'monospace', fontSize: 10, color: AppColors.textSecondary))),
+            DataCell(Text(c.schedule, style: const TextStyle(fontFamily: AppFonts.mono, fontSize: 10, color: AppColors.textSecondary))),
             DataCell(Text(timeAgo(c.lastRun), style: const TextStyle(fontSize: 10, color: AppColors.textSecondary))),
             DataCell(Text(c.duration, style: const TextStyle(fontSize: 10))),
             DataCell(Pill(text: c.status.name.toUpperCase(), color: cronColor(c.status))),
@@ -958,17 +965,17 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
                     Row(children: [
                       Container(width: 6, height: 6, decoration: const BoxDecoration(color: AppColors.success, shape: BoxShape.circle)),
                       const SizedBox(width: 6),
-                      Expanded(child: Text(e.command, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: AppColors.textPrimary, fontFamily: 'monospace'), maxLines: compact ? 1 : 2, overflow: TextOverflow.ellipsis)),
+                      Expanded(child: Text(e.command, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: AppColors.textPrimary, fontFamily: AppFonts.mono), maxLines: compact ? 1 : 2, overflow: TextOverflow.ellipsis)),
                     ]),
                     const SizedBox(height: 4),
                     SingleChildScrollView(
                       scrollDirection: Axis.horizontal,
                       child: Row(children: [
-                        Text(e.schedule, style: const TextStyle(fontSize: 10, color: AppColors.accentCyan, fontFamily: 'monospace')),
+                        Text(e.schedule, style: const TextStyle(fontSize: 10, color: AppColors.accentCyan, fontFamily: AppFonts.mono)),
                         const SizedBox(width: 8),
                         Pill(text: e.serverName.toUpperCase(), color: AppColors.accentBlue),
                         const SizedBox(width: 6),
-                        Text(e.source, style: const TextStyle(fontSize: 9, color: AppColors.textMuted, fontFamily: 'monospace')),
+                        Text(e.source, style: const TextStyle(fontSize: 9, color: AppColors.textMuted, fontFamily: AppFonts.mono)),
                         const SizedBox(width: 6),
                         const Pill(text: 'SCHEDULED', color: AppColors.success),
                       ]),
@@ -1080,7 +1087,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
                           ]),
                         ),
                         const SizedBox(width: 6),
-                        Expanded(child: Text(a.detail, style: const TextStyle(fontSize: 10, color: AppColors.textMuted, fontFamily: 'monospace'), maxLines: 1, overflow: TextOverflow.ellipsis)),
+                        Expanded(child: Text(a.detail, style: const TextStyle(fontSize: 10, color: AppColors.textMuted, fontFamily: AppFonts.mono), maxLines: 1, overflow: TextOverflow.ellipsis)),
                       ]),
                     ])),
                     StatusDot(color: AppColors.success, pulse: false),
@@ -1122,7 +1129,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
             margin: const EdgeInsets.only(bottom: 6), padding: const EdgeInsets.all(8),
             decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(8), border: Border.all(color: AppColors.borderLight)),
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Row(children: [Container(padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1), decoration: BoxDecoration(color: AppColors.surface2, borderRadius: BorderRadius.circular(4), border: Border.all(color: AppColors.border)), child: Text('#${item.number}', style: const TextStyle(fontSize: 9, fontWeight: FontWeight.w700, color: AppColors.textSecondary, fontFamily: 'monospace'))), const SizedBox(width: 5), Expanded(child: Text(item.title, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: AppColors.textPrimary), maxLines: 1, overflow: TextOverflow.ellipsis))]),
+              Row(children: [Container(padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1), decoration: BoxDecoration(color: AppColors.surface2, borderRadius: BorderRadius.circular(4), border: Border.all(color: AppColors.border)), child: Text('#${item.number}', style: const TextStyle(fontSize: 9, fontWeight: FontWeight.w700, color: AppColors.textSecondary, fontFamily: AppFonts.mono))), const SizedBox(width: 5), Expanded(child: Text(item.title, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: AppColors.textPrimary), maxLines: 1, overflow: TextOverflow.ellipsis))]),
               const SizedBox(height: 4),
               Row(children: [Text(item.repo.split('/').last, style: const TextStyle(fontSize: 9, color: AppColors.textMuted)), const Spacer(), Pill(text: item.state.toUpperCase(), color: item.state=='open' ? AppColors.success : AppColors.textMuted)]),
             ]),
@@ -1179,7 +1186,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
               decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(8), border: Border.all(color: AppColors.borderLight)),
               child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                 Row(children: [
-                  Container(padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1), decoration: BoxDecoration(color: AppColors.surface2, borderRadius: BorderRadius.circular(4), border: Border.all(color: AppColors.border)), child: Text('#${item.number}', style: const TextStyle(fontSize: 9, fontWeight: FontWeight.w700, color: AppColors.textSecondary, fontFamily: 'monospace'))),
+                  Container(padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1), decoration: BoxDecoration(color: AppColors.surface2, borderRadius: BorderRadius.circular(4), border: Border.all(color: AppColors.border)), child: Text('#${item.number}', style: const TextStyle(fontSize: 9, fontWeight: FontWeight.w700, color: AppColors.textSecondary, fontFamily: AppFonts.mono))),
                   const SizedBox(width: 5),
                   Expanded(child: Text(item.title, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: AppColors.textPrimary), maxLines: compact ? 1 : 2, overflow: TextOverflow.ellipsis)),
                 ]),
@@ -1341,10 +1348,15 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
   }
 
   Widget _deploysSegment({bool compact = false}) {
+    // Live Actions runs once GitHub is configured.
+    if (_ghConfigured && (_ghRuns.isNotEmpty || _ghLoading || _ghError != null)) return _realDeploysCard(compact: compact);
     final display = compact ? mockDeploys.take(3).toList() : mockDeploys;
     return PitchCard(
-      title: 'CI/CD', subtitle: compact ? '3 of ${mockDeploys.length}' : 'Last 6 deployments',
-      trailing: compact ? InkWell(onTap: () => _goTo(6), child: const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan))) : null,
+      title: 'CI/CD • DEMO', subtitle: compact ? '3 of ${mockDeploys.length} shown' : 'Last 6 deployments',
+      trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+        InkWell(onTap: () => _goTo(10), child: Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), decoration: BoxDecoration(color: AppColors.accentCyan.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(6), border: Border.all(color: AppColors.accentCyan.withValues(alpha: 0.2))), child: const Text('+ CONNECT', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan)))),
+        if (compact) ...[const SizedBox(width: 8), InkWell(onTap: () => _goTo(6), child: const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan)))],
+      ]),
       child: Column(children: display.map((d) => Container(
         margin: EdgeInsets.only(bottom: compact ? 6 : 8), padding: EdgeInsets.all(compact ? 8 : 10),
         decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(8), border: Border.all(color: AppColors.borderLight)),
@@ -1352,11 +1364,67 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
           Container(width: compact ? 26 : 32, height: compact ? 26 : 32, decoration: BoxDecoration(color: d.status=='success' ? AppColors.success.withValues(alpha: 0.12) : AppColors.critical.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(7)), child: Icon(d.status=='success' ? Icons.check : Icons.close, size: compact ? 11 : 14, color: d.status=='success' ? AppColors.success : AppColors.critical)),
           const SizedBox(width: 8),
           Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Row(children: [Text(d.app, style: TextStyle(fontSize: compact ? 11 : 12, fontWeight: FontWeight.w700, color: AppColors.textPrimary)), const SizedBox(width: 5), Text(d.version, style: const TextStyle(fontSize: 10, color: AppColors.accentCyan, fontFamily: 'monospace'))]),
+            Row(children: [Text(d.app, style: TextStyle(fontSize: compact ? 11 : 12, fontWeight: FontWeight.w700, color: AppColors.textPrimary)), const SizedBox(width: 5), Text(d.version, style: const TextStyle(fontSize: 10, color: AppColors.accentCyan, fontFamily: AppFonts.mono))]),
             Text('by ${d.actor} • ${timeAgo(d.time)}', style: const TextStyle(fontSize: 9, color: AppColors.textMuted)),
           ])),
         ]),
       )).toList()),
+    );
+  }
+
+  /// CI/CD rendered from live GitHub Actions runs.
+  Widget _realDeploysCard({bool compact = false}) {
+    final display = compact ? _ghRuns.take(3).toList() : _ghRuns;
+    IconData statusIcon(String s) => s == 'success' ? Icons.check : s == 'failed' ? Icons.close : Icons.sync;
+    Color statusColorFor(String s) => s == 'success' ? AppColors.success : s == 'failed' ? AppColors.critical : AppColors.warning;
+    return PitchCard(
+      title: 'CI/CD • ACTIONS',
+      subtitle: _ghLoading
+          ? 'syncing…'
+          : _ghError != null
+              ? _ghError!
+              : '${_ghRuns.length} runs • ${_ghRepos.length} repo${_ghRepos.length == 1 ? '' : 's'}',
+      trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+        if (_ghLoading) const SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.accentCyan)),
+        if (_ghLoading) const SizedBox(width: 6),
+        InkWell(
+          onTap: () {
+            setState(() { _ghRuns = []; _ghError = null; });
+            _pollGithub();
+          },
+          child: const Row(children: [Icon(Icons.refresh, size: 11, color: AppColors.accentCyan), SizedBox(width: 3), Text('SYNC', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan))]),
+        ),
+        if (compact) ...[const SizedBox(width: 10), InkWell(onTap: () => _goTo(6), child: const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan)))],
+      ]),
+      child: _ghRuns.isEmpty && !_ghLoading
+          ? Padding(
+              padding: const EdgeInsets.all(12),
+              child: Row(children: [
+                Icon(_ghError != null ? Icons.error_outline : Icons.info_outline, size: 15, color: _ghError != null ? AppColors.warning : AppColors.textMuted),
+                const SizedBox(width: 8),
+                Expanded(child: Text(_ghError ?? 'No workflow runs yet — push to a tracked repo to trigger Actions.', style: const TextStyle(fontSize: 11, color: AppColors.textMuted))),
+              ]),
+            )
+          : Column(children: display.map((d) => Container(
+              margin: EdgeInsets.only(bottom: compact ? 6 : 8), padding: EdgeInsets.all(compact ? 8 : 10),
+              decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(8), border: Border.all(color: d.status == 'failed' ? AppColors.critical.withValues(alpha: 0.25) : AppColors.borderLight)),
+              child: Row(children: [
+                Container(width: compact ? 26 : 32, height: compact ? 26 : 32, decoration: BoxDecoration(color: statusColorFor(d.status).withValues(alpha: 0.12), borderRadius: BorderRadius.circular(7), border: Border.all(color: statusColorFor(d.status).withValues(alpha: 0.2))), child: Icon(statusIcon(d.status), size: compact ? 11 : 14, color: statusColorFor(d.status))),
+                const SizedBox(width: 8),
+                Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Row(children: [
+                    Flexible(child: Text(d.app, style: TextStyle(fontSize: compact ? 11 : 12, fontWeight: FontWeight.w700, color: AppColors.textPrimary), overflow: TextOverflow.ellipsis)),
+                    const SizedBox(width: 5),
+                    Text(d.version, style: const TextStyle(fontSize: 10, color: AppColors.accentCyan, fontFamily: AppFonts.mono)),
+                    const SizedBox(width: 5),
+                    Pill(text: d.env.toUpperCase(), color: d.env == 'main' || d.env == 'master' ? AppColors.success : AppColors.warning),
+                  ]),
+                  const SizedBox(height: 2),
+                  Text('by ${d.actor} • ${timeAgo(d.time)} • ${d.duration}', style: const TextStyle(fontSize: 9, color: AppColors.textMuted)),
+                ])),
+                const Icon(Icons.chevron_right, size: 14, color: AppColors.textDim),
+              ]),
+            )).toList()),
     );
   }
 
@@ -1377,7 +1445,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
             return Padding(padding: const EdgeInsets.only(bottom: 2), child: Row(children: [
               Container(padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 1), decoration: BoxDecoration(color: lvlColor.withValues(alpha: 0.14), borderRadius: BorderRadius.circular(3)), child: Text(l.level, style: TextStyle(fontSize: 8, fontWeight: FontWeight.w800, color: lvlColor))),
               const SizedBox(width: 5),
-              Expanded(child: Text(l.message, style: const TextStyle(fontSize: 9, color: Color(0xFFE4E4E7), fontFamily: 'monospace'), maxLines: 1, overflow: TextOverflow.ellipsis)),
+              Expanded(child: Text(l.message, style: const TextStyle(fontSize: 9, color: Color(0xFFE4E4E7), fontFamily: AppFonts.mono), maxLines: 1, overflow: TextOverflow.ellipsis)),
             ]));
           })),
         ]),
