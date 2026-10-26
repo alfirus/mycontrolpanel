@@ -10,6 +10,7 @@ import '../theme/app_theme.dart';
 import '../models/server_connection.dart';
 import '../services/ai_service.dart';
 import '../services/github_service.dart';
+import '../services/gitlab_service.dart';
 import '../services/ssh_key_loader.dart';
 import '../services/update_service.dart';
 import '../widgets/pitch_card.dart';
@@ -37,6 +38,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _githubVerifying = false;
   final _githubTokenCtrl = TextEditingController();
   final _githubRepoCtrl = TextEditingController();
+  // GitLab integration
+  String _gitlabToken = '';
+  String _gitlabUser = '';
+  String _gitlabBaseUrl = 'https://gitlab.com';
+  List<String> _gitlabProjects = [];
+  bool _gitlabVerifying = false;
+  final _gitlabTokenCtrl = TextEditingController();
+  final _gitlabBaseCtrl = TextEditingController(text: 'https://gitlab.com');
+  final _gitlabProjectCtrl = TextEditingController();
   // AI provider
   AiProvider _aiProvider = AiProvider.openai;
   String _aiBaseUrl = AiProvider.openai.defaultBaseUrl;
@@ -68,6 +78,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _githubUser = prefs.getString('github_user') ?? '';
       _githubRepos = (prefs.getStringList('github_repos') ?? []).toList();
       _githubTokenCtrl.text = _githubToken;
+      _gitlabToken = prefs.getString('gitlab_token') ?? '';
+      _gitlabUser = prefs.getString('gitlab_user') ?? '';
+      _gitlabBaseUrl = prefs.getString('gitlab_base_url') ?? 'https://gitlab.com';
+      _gitlabProjects = (prefs.getStringList('gitlab_projects') ?? []).toList();
+      _gitlabTokenCtrl.text = _gitlabToken;
+      _gitlabBaseCtrl.text = _gitlabBaseUrl;
       final aiIdx = prefs.getInt('ai_provider') ?? AiProvider.openai.index;
       _aiProvider = AiProvider.values[aiIdx.clamp(0, AiProvider.values.length - 1)];
       _aiBaseUrl = prefs.getString('ai_base_url') ?? _aiProvider.defaultBaseUrl;
@@ -97,6 +113,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   void dispose() {
     _githubTokenCtrl.dispose();
     _githubRepoCtrl.dispose();
+    _gitlabTokenCtrl.dispose();
+    _gitlabBaseCtrl.dispose();
+    _gitlabProjectCtrl.dispose();
     _aiBaseCtrl.dispose();
     _aiKeyCtrl.dispose();
     _aiModelCtrl.dispose();
@@ -249,6 +268,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
             subtitle: 'Tokens stored locally on this device',
             child: Column(children: [
               _githubSection(),
+              const SizedBox(height: 6),
+              _gitlabSection(),
               const SizedBox(height: 6),
               _aiSection(),
               const SizedBox(height: 6),
@@ -530,6 +551,187 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _githubUser = '';
       _githubRepos = [];
       _githubTokenCtrl.clear();
+    });
+  }
+
+  /// GitLab PAT + self-hosted base URL + tracked projects.
+  Widget _gitlabSection() {
+    final connected = _gitlabToken.isNotEmpty && _gitlabUser.isNotEmpty;
+    return Container(
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(10), border: Border.all(color: connected ? AppColors.accentPurple.withValues(alpha: 0.35) : AppColors.borderLight)),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Container(width: 30, height: 30, decoration: BoxDecoration(color: AppColors.accentPurple.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(7), border: Border.all(color: AppColors.accentPurple.withValues(alpha: 0.25))), child: const Icon(Icons.layers_outlined, size: 14, color: AppColors.accentPurple)),
+          const SizedBox(width: 10),
+          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const Text('GitLab', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+            Text(connected ? '@$_gitlabUser • ${_gitlabProjects.length} project${_gitlabProjects.length == 1 ? '' : 's'}' : 'Not connected — paste a personal access token', style: TextStyle(fontSize: 10, color: connected ? AppColors.accentPurple : AppColors.textMuted, fontFamily: 'monospace'), maxLines: 1, overflow: TextOverflow.ellipsis),
+          ])),
+          Container(width: 8, height: 8, decoration: BoxDecoration(color: connected ? AppColors.accentPurple : AppColors.textDim, shape: BoxShape.circle)),
+        ]),
+        const SizedBox(height: 8),
+        TextField(
+          controller: _gitlabBaseCtrl,
+          onChanged: (v) => _gitlabBaseUrl = v.trim(),
+          style: const TextStyle(fontSize: 11, color: AppColors.textPrimary, fontFamily: 'monospace'),
+          decoration: InputDecoration(
+            labelText: 'Base URL (gitlab.com or self-hosted)',
+            labelStyle: const TextStyle(fontSize: 10, color: AppColors.textMuted),
+            filled: true, fillColor: AppColors.surface2,
+            contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+            border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.border)),
+            enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.border)),
+            focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.accentPurple)),
+          ),
+        ),
+        const SizedBox(height: 8),
+        Row(children: [
+          Expanded(
+            child: TextField(
+              controller: _gitlabTokenCtrl,
+              obscureText: true,
+              style: const TextStyle(fontSize: 11, color: AppColors.textPrimary, fontFamily: 'monospace'),
+              decoration: InputDecoration(
+                hintText: 'glpat-… (needs `api` scope)',
+                hintStyle: const TextStyle(fontSize: 10, color: AppColors.textMuted, fontFamily: 'monospace'),
+                filled: true, fillColor: AppColors.surface2,
+                contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.border)),
+                enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.border)),
+                focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.accentPurple)),
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          FilledButton(
+            onPressed: _gitlabVerifying ? null : _verifyGitlabToken,
+            style: FilledButton.styleFrom(backgroundColor: AppColors.accentPurple, foregroundColor: Colors.white, padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12)),
+            child: _gitlabVerifying
+                ? const SizedBox(width: 13, height: 13, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                : Text(connected ? 'UPDATE' : 'CONNECT', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w800)),
+          ),
+        ]),
+        if (connected) ...[
+          if (_gitlabProjects.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            for (final p in _gitlabProjects)
+              Container(
+                margin: const EdgeInsets.only(bottom: 5),
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                decoration: BoxDecoration(color: AppColors.surface2, borderRadius: BorderRadius.circular(7), border: Border.all(color: AppColors.border)),
+                child: Row(children: [
+                  const Icon(Icons.book_outlined, size: 12, color: AppColors.textSecondary),
+                  const SizedBox(width: 6),
+                  Expanded(child: Text(p, style: const TextStyle(fontSize: 11, color: AppColors.textPrimary, fontFamily: 'monospace'))),
+                  InkWell(onTap: () => _removeGitlabProject(p), child: const Icon(Icons.close, size: 13, color: AppColors.textMuted)),
+                ]),
+              ),
+          ],
+          const SizedBox(height: 6),
+          Row(children: [
+            Expanded(
+              child: TextField(
+                controller: _gitlabProjectCtrl,
+                onSubmitted: (_) => _addGitlabProject(),
+                style: const TextStyle(fontSize: 11, color: AppColors.textPrimary, fontFamily: 'monospace'),
+                decoration: InputDecoration(
+                  hintText: 'group/project or numeric id',
+                  hintStyle: const TextStyle(fontSize: 10, color: AppColors.textMuted, fontFamily: 'monospace'),
+                  filled: true, fillColor: AppColors.surface2,
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.border)),
+                  enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.border)),
+                  focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.accentPurple)),
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            OutlinedButton.icon(onPressed: _addGitlabProject, icon: const Icon(Icons.add, size: 13), label: const Text('ADD', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800)), style: OutlinedButton.styleFrom(foregroundColor: AppColors.accentPurple, side: const BorderSide(color: AppColors.accentPurple), padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 11))),
+          ]),
+          TextButton.icon(
+            onPressed: _disconnectGitlab,
+            icon: const Icon(Icons.link_off, size: 12),
+            label: const Text('Disconnect (delete token)', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600)),
+            style: TextButton.styleFrom(foregroundColor: AppColors.critical),
+          ),
+        ],
+      ]),
+    );
+  }
+
+  Future<void> _verifyGitlabToken() async {
+    final token = _gitlabTokenCtrl.text.trim();
+    final base = _gitlabBaseCtrl.text.trim().isEmpty ? 'https://gitlab.com' : _gitlabBaseCtrl.text.trim();
+    if (token.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(backgroundColor: AppColors.surface1, content: Text('Paste a token first', style: TextStyle(fontSize: 12, color: AppColors.warning))));
+      return;
+    }
+    setState(() => _gitlabVerifying = true);
+    try {
+      final login = await GitlabService(baseUrl: base, token: token).validate();
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('gitlab_token', token);
+      await prefs.setString('gitlab_user', login);
+      await prefs.setString('gitlab_base_url', base);
+      if (!mounted) return;
+      setState(() {
+        _gitlabToken = token;
+        _gitlabUser = login;
+        _gitlabBaseUrl = base;
+        _gitlabBaseCtrl.text = base;
+        _gitlabVerifying = false;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(backgroundColor: AppColors.success.withValues(alpha: 0.14), content: Text('GitLab connected as @$login ✓ — add projects below', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.success))));
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _gitlabVerifying = false);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(backgroundColor: AppColors.critical.withValues(alpha: 0.14), content: Text(e.toString().replaceFirst('Exception: ', '').split('\n').first, style: const TextStyle(fontSize: 12, color: AppColors.critical)), duration: const Duration(seconds: 5)));
+    }
+  }
+
+  Future<void> _addGitlabProject() async {
+    final project = _gitlabProjectCtrl.text.trim();
+    if (project.isEmpty) return;
+    if (_gitlabProjects.contains(project)) return;
+    try {
+      await GitlabService(baseUrl: _gitlabBaseUrl, token: _gitlabToken).projectIssues(project);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(backgroundColor: AppColors.critical.withValues(alpha: 0.14), content: Text('Project not reachable: ${e.toString().replaceFirst('Exception: ', '').split('\n').first}', style: const TextStyle(fontSize: 12, color: AppColors.critical)), duration: const Duration(seconds: 5)));
+      return;
+    }
+    final prefs = await SharedPreferences.getInstance();
+    final next = [..._gitlabProjects, project];
+    await prefs.setStringList('gitlab_projects', next);
+    if (!mounted) return;
+    setState(() {
+      _gitlabProjects = next;
+      _gitlabProjectCtrl.clear();
+    });
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(backgroundColor: AppColors.surface1, content: Text('Tracking $project ✓', style: const TextStyle(fontSize: 12, color: AppColors.success))));
+  }
+
+  Future<void> _removeGitlabProject(String project) async {
+    final prefs = await SharedPreferences.getInstance();
+    final next = _gitlabProjects.where((p) => p != project).toList();
+    await prefs.setStringList('gitlab_projects', next);
+    if (!mounted) return;
+    setState(() => _gitlabProjects = next);
+  }
+
+  Future<void> _disconnectGitlab() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('gitlab_token');
+    await prefs.remove('gitlab_user');
+    await prefs.remove('gitlab_base_url');
+    await prefs.remove('gitlab_projects');
+    if (!mounted) return;
+    setState(() {
+      _gitlabToken = '';
+      _gitlabUser = '';
+      _gitlabProjects = [];
+      _gitlabTokenCtrl.clear();
     });
   }
 

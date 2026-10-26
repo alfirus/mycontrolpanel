@@ -21,6 +21,7 @@ import '../services/update_installer.dart';
 import '../services/update_service.dart';
 import '../services/ai_tools.dart';
 import '../services/github_service.dart';
+import '../services/gitlab_service.dart';
 import '../services/ssh_key_loader.dart';
 import 'server_details_screen.dart';
 import '../widgets/pitch_card.dart';
@@ -87,6 +88,19 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
   String? _ghError;
   bool get _ghConfigured => _ghToken.isNotEmpty && _ghRepos.isNotEmpty;
   List<DeployItem> _ghRuns = [];
+  // GitLab live state (PAT + base URL + projects from Settings)
+  int _gitlabTab = 0; // 0 issues, 1 MRs, 2 tasks
+  String _glToken = '';
+  String _glUser = '';
+  String _glBase = 'https://gitlab.com';
+  List<String> _glProjects = [];
+  List<GithubItem> _glIssues = [];
+  List<GithubItem> _glMrs = [];
+  List<GithubItem> _glTasks = [];
+  List<DeployItem> _glPipes = [];
+  bool _glLoading = false;
+  String? _glError;
+  bool get _glConfigured => _glToken.isNotEmpty && _glProjects.isNotEmpty;
   String? _terminalServerId;
   String? _terminalPrefill;
   int _terminalKey = 0;
@@ -120,9 +134,14 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
       _aiBaseUrl = prefs.getString('ai_base_url') ?? _aiProvider.defaultBaseUrl;
       _aiKey = prefs.getString('ai_key') ?? '';
       _aiConfigured = _aiModelName.isNotEmpty;
+      _glToken = prefs.getString('gitlab_token') ?? '';
+      _glUser = prefs.getString('gitlab_user') ?? '';
+      _glBase = prefs.getString('gitlab_base_url') ?? 'https://gitlab.com';
+      _glProjects = prefs.getStringList('gitlab_projects') ?? [];
     });
     _pollAgents();
     _pollGithub();
+    _pollGitlab();
   }
 
   /// Fetch live GitHub Issues/PRs/Tasks/Runs for tracked repos.
@@ -161,6 +180,44 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
       setState(() {
         _ghLoading = false;
         _ghError = e.toString().replaceFirst('Exception: ', '').split('\n').first;
+      });
+    }
+  }
+
+  /// Fetch live GitLab Issues/MRs/Tasks for tracked projects.
+  Future<void> _pollGitlab() async {
+    if (!_glConfigured || _glLoading) return;
+    setState(() { _glLoading = true; _glError = null; });
+    try {
+      final svc = GitlabService(baseUrl: _glBase, token: _glToken);
+      await svc.validate();
+      final issues = <GithubItem>[], mrs = <GithubItem>[];
+      for (final p in _glProjects) {
+        try { issues.addAll(await svc.projectIssues(p)); } catch (_) {}
+        try { mrs.addAll(await svc.projectMRs(p)); } catch (_) {}
+      }
+      issues.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+      mrs.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+      List<GithubItem> tasks = [];
+      try { tasks = await svc.myTasks(_glProjects); } catch (_) {}
+      final pipes = <DeployItem>[];
+      for (final p in _glProjects) {
+        try { pipes.addAll(await svc.projectPipelines(p)); } catch (_) {}
+      }
+      pipes.sort((a, b) => b.time.compareTo(a.time));
+      if (!mounted) return;
+      setState(() {
+        _glIssues = issues;
+        _glMrs = mrs;
+        _glTasks = tasks;
+        _glPipes = pipes.take(12).toList();
+        _glLoading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _glLoading = false;
+        _glError = e.toString().replaceFirst('Exception: ', '').split('\n').first;
       });
     }
   }
@@ -412,7 +469,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
   // preselected to this server with the install command ready to run.
   void _openInAppTerminal(ServerConnection s) {
     setState(() {
-      _navIndex = 11;
+      _navIndex = 12;
       _terminalServerId = s.id;
       _terminalPrefill = AgentService.manualInstallScript();
       _terminalKey++; // force rebuild with new prefill
@@ -806,7 +863,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
           onOpenTerminal: () {
             Navigator.pop(context); // back to shell first
             setState(() {
-              _navIndex = 11;
+              _navIndex = 12;
               _terminalServerId = serverId;
               _terminalPrefill = null;
               _terminalKey++;
@@ -907,7 +964,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
         baseUrl: base,
         headers: headers,
         model: _aiModelName,
-        system: '${_aiSystemPrompt()}\n\nYou have tools for live data${_aiWriteEnabled ? ' and actions' : ''}. Prefer calling a read tool over guessing.${_aiWriteEnabled ? ' For restart_service, run_ssh_command, rerun_workflow, create_github_issue: the app asks the user to approve first — briefly say what you are about to do, then call the tool.' : ' Write actions are DISABLED by the user — you are read-only. If asked to change anything, explain the manual steps instead of calling a tool.'}',
+        system: '${_aiSystemPrompt()}\n\nYou have tools for live data${_aiWriteEnabled ? ' and actions' : ''}. Prefer calling a read tool over guessing.${_aiWriteEnabled ? ' For restart_service, run_ssh_command, rerun_workflow, retry_gitlab_pipeline, create_github_issue: the app asks the user to approve first — briefly say what you are about to do, then call the tool.' : ' Write actions are DISABLED by the user — you are read-only. If asked to change anything, explain the manual steps instead of calling a tool.'}',
         messages: turns.map((m) => {'role': m['role'].toString(), 'content': (m['content'] ?? '').toString()}).toList(),
         tools: tools,
       );
@@ -1059,6 +1116,9 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
         runs: _ghRuns,
         githubToken: _ghToken,
         githubRepos: _ghRepos,
+        gitlabToken: _glToken,
+        gitlabBaseUrl: _glBase,
+        gitlabProjects: _glProjects,
         agent: _agent,
       );
 
@@ -1194,8 +1254,14 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
         b.writeln('- PR #${p.number}: ${p.title} (${p.repo})');
       }
       if (_ghRuns.isNotEmpty) {
-        b.writeln('RECENT ACTIONS RUNS:');
+        b.writeln('RECENT GITHUB ACTIONS RUNS:');
         for (final r in _ghRuns.take(5)) {
+          b.writeln('- ${r.app} #${r.version} ${r.status} on ${r.env} by ${r.actor}');
+        }
+      }
+      if (_glPipes.isNotEmpty) {
+        b.writeln('RECENT GITLAB PIPELINES:');
+        for (final r in _glPipes.take(5)) {
           b.writeln('- ${r.app} #${r.version} ${r.status} on ${r.env} by ${r.actor}');
         }
       }
@@ -1203,8 +1269,20 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
       b.writeln('GITHUB: not connected (demo data in UI).');
     }
     b.writeln();
+    if (_glConfigured) {
+      b.writeln('GITLAB (@$_glUser on $_glBase, projects: ${_glProjects.join(', ')}): ${_glIssues.length} open issues, ${_glMrs.length} open MRs, ${_glTasks.length} tasks.');
+      for (final i in _glIssues.take(5)) {
+        b.writeln('- issue !${i.number}: ${i.title} (${i.repo})');
+      }
+      for (final m in _glMrs.take(5)) {
+        b.writeln('- MR !${m.number}: ${m.title} (${m.repo})');
+      }
+    } else {
+      b.writeln('GITLAB: not connected (demo data in UI).');
+    }
+    b.writeln();
     if (_aiWriteEnabled) {
-      b.writeln('Write tools are ENABLED: you may restart services, run allowlisted diagnostic commands (incl. directory listings), re-run failed workflows, and file issues via tools. The app asks the user to approve each write before it runs — say what you will do, then call the tool. Never claim inability to act: use the tools.');
+      b.writeln('Write tools are ENABLED: you may restart services, run allowlisted diagnostic commands (incl. directory listings), re-run failed GitHub workflows, retry GitLab pipelines, and file GitHub issues via tools. The app asks the user to approve each write before it runs — say what you will do, then call the tool. Never claim inability to act: use the tools.');
     } else {
       b.writeln('Write tools are DISABLED: you are read-only. If asked to DO something, explain the manual steps and point to the relevant screen/terminal command.');
     }
@@ -1262,7 +1340,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
             Text('$op/${_servers.length} OPERATIONAL${_useRealServers ? '' : ' • DEMO'}', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: AppColors.textSecondary, letterSpacing: 0.5)),
           ]),
         ),
-        IconButton(onPressed: () => _goTo(10), icon: Container(padding: const EdgeInsets.all(6), decoration: BoxDecoration(color: _navIndex==10 ? AppColors.accentCyan.withValues(alpha:0.2) : AppColors.surface1, borderRadius: BorderRadius.circular(8), border: Border.all(color: _navIndex==10 ? AppColors.accentCyan : AppColors.border)), child: Icon(Icons.settings_outlined, size: 16, color: _navIndex==10 ? AppColors.accentCyan : AppColors.textSecondary))),
+        IconButton(onPressed: () => _goTo(11), icon: Container(padding: const EdgeInsets.all(6), decoration: BoxDecoration(color: _navIndex==11 ? AppColors.accentCyan.withValues(alpha:0.2) : AppColors.surface1, borderRadius: BorderRadius.circular(8), border: Border.all(color: _navIndex==11 ? AppColors.accentCyan : AppColors.border)), child: Icon(Icons.settings_outlined, size: 16, color: _navIndex==11 ? AppColors.accentCyan : AppColors.textSecondary))),
         IconButton(onPressed: (){}, icon: const Icon(Icons.notifications_none, size: 18, color: AppColors.textSecondary)),
         const SizedBox(width: 4),
         Builder(builder: (ctx) => IconButton(onPressed: ()=> Scaffold.of(ctx).openEndDrawer(), icon: Container(padding: const EdgeInsets.all(6), decoration: BoxDecoration(color: AppColors.accentCyan, borderRadius: BorderRadius.circular(8)), child: const Icon(Icons.smart_toy_outlined, size: 16, color: Colors.black)))),
@@ -1278,6 +1356,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
       ('Cronjobs', Icons.schedule_outlined, AppColors.accentPurple),
       ('Apps', Icons.apps_outlined, AppColors.accentGreen),
       ('GitHub', Icons.code_outlined, AppColors.textPrimary),
+      ('GitLab', Icons.layers_outlined, AppColors.accentPurple),
       ('Alerts', Icons.warning_amber_outlined, AppColors.warning),
       ('Deploys', Icons.rocket_launch_outlined, AppColors.accentCyan),
       ('Logs', Icons.terminal_outlined, AppColors.textSecondary),
@@ -1378,7 +1457,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
           _bottomItem(1, Icons.dns, 'Servers'),
           _bottomItem(4, Icons.code, 'GitHub'),
           _bottomItem(6, Icons.rocket_launch, 'Deploys'),
-          _bottomItem(10, Icons.settings, 'Settings'),
+          _bottomItem(11, Icons.settings, 'Settings'),
           Builder(builder: (ctx) => GestureDetector(onTap: ()=> Scaffold.of(ctx).openEndDrawer(), child: Container(margin: const EdgeInsets.all(8), width: 44, height: 44, decoration: BoxDecoration(color: AppColors.accentCyan, borderRadius: BorderRadius.circular(12)), child: const Icon(Icons.smart_toy_outlined, size: 18, color: Colors.black)))),
         ])),
       ),
@@ -1397,12 +1476,13 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     if (_navIndex == 2) return SingleChildScrollView(padding: const EdgeInsets.all(12), child: _cronsSegment());
     if (_navIndex == 3) return SingleChildScrollView(padding: const EdgeInsets.all(12), child: _appsSegment());
     if (_navIndex == 4) return SingleChildScrollView(padding: const EdgeInsets.all(12), child: _githubSegment());
-    if (_navIndex == 5) return SingleChildScrollView(padding: const EdgeInsets.all(12), child: _alertsSegment());
-    if (_navIndex == 6) return SingleChildScrollView(padding: const EdgeInsets.all(12), child: _deploysSegment());
-    if (_navIndex == 7) return SingleChildScrollView(padding: const EdgeInsets.all(12), child: _logsSegment());
-    if (_navIndex == 8) return SingleChildScrollView(padding: const EdgeInsets.all(12), child: _metricsSegment());
-    if (_navIndex == 9) return SingleChildScrollView(padding: const EdgeInsets.all(12), child: _securitySegment());
-    if (_navIndex == 10) return const SettingsScreen();
+    if (_navIndex == 5) return SingleChildScrollView(padding: const EdgeInsets.all(12), child: _gitlabSegment());
+    if (_navIndex == 6) return SingleChildScrollView(padding: const EdgeInsets.all(12), child: _alertsSegment());
+    if (_navIndex == 7) return SingleChildScrollView(padding: const EdgeInsets.all(12), child: _deploysSegment());
+    if (_navIndex == 8) return SingleChildScrollView(padding: const EdgeInsets.all(12), child: _logsSegment());
+    if (_navIndex == 9) return SingleChildScrollView(padding: const EdgeInsets.all(12), child: _metricsSegment());
+    if (_navIndex == 10) return SingleChildScrollView(padding: const EdgeInsets.all(12), child: _securitySegment());
+    if (_navIndex == 11) return const SettingsScreen();
     return TerminalScreen(key: ValueKey(_terminalKey), initialServerId: _terminalServerId, prefillCommand: _terminalPrefill);
   }
 
@@ -1446,13 +1526,15 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
         if (isDesktop) ...[
           Row(crossAxisAlignment: CrossAxisAlignment.start, children: [Expanded(child: _serversSegment(compact: true)), const SizedBox(width: gap), Expanded(child: _appsSegment(compact: true))]),
           Row(crossAxisAlignment: CrossAxisAlignment.start, children: [Expanded(child: _cronsSegment(compact: true)), const SizedBox(width: gap), Expanded(child: _alertsSegment(compact: true))]),
-          Row(crossAxisAlignment: CrossAxisAlignment.start, children: [Expanded(child: _githubSegment(compact: true)), const SizedBox(width: gap), Expanded(child: _deploysSegment(compact: true))]),
-          Row(crossAxisAlignment: CrossAxisAlignment.start, children: [Expanded(child: _metricsSegment(compact: true)), const SizedBox(width: gap), Expanded(child: _securitySegment(compact: true))]),
+          Row(crossAxisAlignment: CrossAxisAlignment.start, children: [Expanded(child: _githubSegment(compact: true)), const SizedBox(width: gap), Expanded(child: _gitlabSegment(compact: true))]),
+          Row(crossAxisAlignment: CrossAxisAlignment.start, children: [Expanded(child: _deploysSegment(compact: true)), const SizedBox(width: gap), Expanded(child: _metricsSegment(compact: true))]),
+          _securitySegment(compact: true),
           _logsSegment(compact: true),
         ] else ...[
           _serversSegment(compact: true), _appsSegment(compact: true), _cronsSegment(compact: true),
-          _alertsSegment(compact: true), _githubSegment(compact: true), _deploysSegment(compact: true),
-          _metricsSegment(compact: true), _securitySegment(compact: true), _logsSegment(compact: true),
+          _alertsSegment(compact: true), _githubSegment(compact: true), _gitlabSegment(compact: true),
+          _deploysSegment(compact: true), _metricsSegment(compact: true), _securitySegment(compact: true),
+          _logsSegment(compact: true),
         ],
         const SizedBox(height: 8),
         Text(_useRealServers ? 'MY CONTROL PANEL • ${_servers.length} REAL SERVERS • PITCH BLACK' : 'MY CONTROL PANEL • DEMO DATA • ADD SERVERS IN SETTINGS', style: const TextStyle(fontSize: 9, letterSpacing: 0.7, color: AppColors.textDim, fontWeight: FontWeight.w600)),
@@ -1493,11 +1575,11 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
       trailing: compact
           ? InkWell(onTap: () => _goTo(1), child: const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan)))
           : (_useRealServers
-              ? InkWell(onTap: () => _goTo(10), child: Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), decoration: BoxDecoration(color: AppColors.accentCyan.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(6), border: Border.all(color: AppColors.accentCyan.withValues(alpha: 0.2))), child: const Text('+ MANAGE', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan))))
+              ? InkWell(onTap: () => _goTo(11), child: Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), decoration: BoxDecoration(color: AppColors.accentCyan.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(6), border: Border.all(color: AppColors.accentCyan.withValues(alpha: 0.2))), child: const Text('+ MANAGE', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan))))
               : Wrap(spacing: 6, children: [_filterChip('all','All'),_filterChip('operational','OK'),_filterChip('degraded','Warn'),_filterChip('down','Down')])),
       child: Column(children: [
         if (filtered.isEmpty)
-          Padding(padding: const EdgeInsets.all(16), child: Column(children: [const Icon(Icons.dns_outlined, size: 24, color: AppColors.textMuted), const SizedBox(height: 8), const Text('No servers yet', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: AppColors.textPrimary)), const SizedBox(height: 8), FilledButton(onPressed: () => _goTo(10), style: FilledButton.styleFrom(backgroundColor: AppColors.accentCyan, foregroundColor: Colors.black), child: const Text('ADD SERVER IN SETTINGS', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800)))]))
+          Padding(padding: const EdgeInsets.all(16), child: Column(children: [const Icon(Icons.dns_outlined, size: 24, color: AppColors.textMuted), const SizedBox(height: 8), const Text('No servers yet', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: AppColors.textPrimary)), const SizedBox(height: 8), FilledButton(onPressed: () => _goTo(11), style: FilledButton.styleFrom(backgroundColor: AppColors.accentCyan, foregroundColor: Colors.black), child: const Text('ADD SERVER IN SETTINGS', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800)))]))
         else ...[
           for (final s in display)
             Container(
@@ -1783,7 +1865,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
       title: 'GITHUB • DEMO',
       subtitle: _ghToken.isNotEmpty ? 'Token saved — add repos in Settings to go live' : 'Add a token in Settings to go live',
       trailing: Row(mainAxisSize: MainAxisSize.min, children: [
-        InkWell(onTap: () => _goTo(10), child: Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), decoration: BoxDecoration(color: AppColors.accentCyan.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(6), border: Border.all(color: AppColors.accentCyan.withValues(alpha: 0.2))), child: const Text('+ CONNECT', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan)))),
+        InkWell(onTap: () => _goTo(11), child: Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), decoration: BoxDecoration(color: AppColors.accentCyan.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(6), border: Border.all(color: AppColors.accentCyan.withValues(alpha: 0.2))), child: const Text('+ CONNECT', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan)))),
         if (compact) ...[const SizedBox(width: 8), InkWell(onTap: () => _goTo(4), child: const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan)))],
       ]),
       child: Column(children: [
@@ -1897,6 +1979,125 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     );
   }
 
+  /// Shared issue/MR row builder (GitLab uses the same shape as GitHub items).
+  Widget _vcsRow(GithubItem item, {bool compact = false, Color accent = AppColors.accentCyan}) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 6), padding: const EdgeInsets.all(8),
+      decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(8), border: Border.all(color: AppColors.borderLight)),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Container(padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1), decoration: BoxDecoration(color: AppColors.surface2, borderRadius: BorderRadius.circular(4), border: Border.all(color: AppColors.border)), child: Text(item.number > 0 ? '!${item.number}' : '#${item.number}', style: const TextStyle(fontSize: 9, fontWeight: FontWeight.w700, color: AppColors.textSecondary, fontFamily: AppFonts.mono))),
+          const SizedBox(width: 5),
+          Expanded(child: Text(item.title, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: AppColors.textPrimary), maxLines: compact ? 1 : 2, overflow: TextOverflow.ellipsis)),
+        ]),
+        const SizedBox(height: 5),
+        Row(children: [
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+            decoration: BoxDecoration(color: accent.withValues(alpha: 0.1), borderRadius: BorderRadius.circular(4), border: Border.all(color: accent.withValues(alpha: 0.25))),
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              Icon(Icons.book_outlined, size: 8, color: accent),
+              const SizedBox(width: 3),
+              Text(item.repo.toUpperCase(), style: TextStyle(fontSize: 8, fontWeight: FontWeight.w800, letterSpacing: 0.3, color: accent)),
+            ]),
+          ),
+          const SizedBox(width: 6),
+          const Icon(Icons.person_outline, size: 10, color: AppColors.textMuted),
+          const SizedBox(width: 2),
+          Flexible(child: Text(item.author, style: const TextStyle(fontSize: 10, color: AppColors.textMuted), maxLines: 1, overflow: TextOverflow.ellipsis)),
+          if (item.labels.isNotEmpty) ...[
+            const SizedBox(width: 6),
+            Flexible(child: Text(item.labels.take(2).join(' • '), style: const TextStyle(fontSize: 9, color: AppColors.accentPurple), maxLines: 1, overflow: TextOverflow.ellipsis)),
+          ],
+        ]),
+        const SizedBox(height: 4),
+        Row(children: [
+          Text(timeAgo(item.updatedAt), style: const TextStyle(fontSize: 10, color: AppColors.textDim)),
+          const SizedBox(width: 8),
+          const Icon(Icons.chat_bubble_outline, size: 10, color: AppColors.textDim),
+          Text(' ${item.comments}', style: const TextStyle(fontSize: 10, color: AppColors.textDim)),
+          const Spacer(),
+          Pill(text: item.state.toUpperCase(), color: item.state == 'open' ? AppColors.success : AppColors.textMuted),
+        ]),
+      ]),
+    );
+  }
+
+  Widget _gitlabSegment({bool compact = false}) {
+    if (_glConfigured && (_glIssues.isNotEmpty || _glMrs.isNotEmpty || _glTasks.isNotEmpty || _glLoading || _glError != null)) {
+      return _realGitlabCard(compact: compact);
+    }
+    final data = _gitlabTab == 0 ? mockIssues : _gitlabTab == 1 ? mockPRs : mockTasks;
+    final display = compact ? data.take(2).toList() : data;
+    return PitchCard(
+      title: 'GITLAB • DEMO',
+      subtitle: _glToken.isNotEmpty ? 'Token saved — add projects in Settings to go live' : 'Add a token in Settings to go live',
+      trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+        InkWell(onTap: () => _goTo(11), child: Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), decoration: BoxDecoration(color: AppColors.accentPurple.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(6), border: Border.all(color: AppColors.accentPurple.withValues(alpha: 0.2))), child: const Text('+ CONNECT', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentPurple)))),
+        if (compact) ...[const SizedBox(width: 8), InkWell(onTap: () => _goTo(5), child: const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan)))],
+      ]),
+      child: Column(children: [
+        ToggleButtons(
+          isSelected: [_gitlabTab == 0, _gitlabTab == 1, _gitlabTab == 2], onPressed: (i) => setState(() => _gitlabTab = i),
+          borderRadius: BorderRadius.circular(7), selectedColor: Colors.black, fillColor: AppColors.accentPurple, color: AppColors.textSecondary, borderColor: AppColors.border, selectedBorderColor: AppColors.accentPurple,
+          constraints: const BoxConstraints(minHeight: 24, minWidth: 44),
+          children: const [Text('Issues', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700)), Text('MRs', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700)), Text('Tasks', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700))],
+        ),
+        const SizedBox(height: 8),
+        for (final item in display) _vcsRow(item, compact: compact, accent: AppColors.accentPurple),
+      ]),
+    );
+  }
+
+  /// GitLab rendered from the user's live instance data.
+  Widget _realGitlabCard({bool compact = false}) {
+    final data = _gitlabTab == 0 ? _glIssues : _gitlabTab == 1 ? _glMrs : _glTasks;
+    final display = compact ? data.take(3).toList() : data;
+    final tabName = _gitlabTab == 0 ? 'issues' : _gitlabTab == 1 ? 'MRs' : 'tasks';
+    return PitchCard(
+      title: 'GITLAB • @$_glUser',
+      subtitle: _glLoading
+          ? 'syncing…'
+          : _glError != null
+              ? _glError!
+              : '${_glProjects.length} project${_glProjects.length == 1 ? '' : 's'} • ${_glIssues.length} issues • ${_glMrs.length} MRs • ${_glTasks.length} tasks',
+      trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+        if (_glLoading) const SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.accentPurple)),
+        if (_glLoading) const SizedBox(width: 6),
+        InkWell(
+          onTap: () {
+            setState(() { _glIssues = []; _glMrs = []; _glTasks = []; _glError = null; });
+            _pollGitlab();
+          },
+          child: const Row(children: [Icon(Icons.refresh, size: 11, color: AppColors.accentPurple), SizedBox(width: 3), Text('SYNC', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentPurple))]),
+        ),
+        if (compact) ...[const SizedBox(width: 10), InkWell(onTap: () => _goTo(5), child: const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan)))],
+      ]),
+      child: Column(children: [
+        ToggleButtons(
+          isSelected: [_gitlabTab == 0, _gitlabTab == 1, _gitlabTab == 2], onPressed: (i) => setState(() => _gitlabTab = i),
+          borderRadius: BorderRadius.circular(7), selectedColor: Colors.black, fillColor: AppColors.accentPurple, color: AppColors.textSecondary, borderColor: AppColors.border, selectedBorderColor: AppColors.accentPurple,
+          constraints: const BoxConstraints(minHeight: 24, minWidth: 44),
+          children: [Text('Issues (${_glIssues.length})', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700)), Text('MRs (${_glMrs.length})', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700)), Text('Tasks (${_glTasks.length})', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700))],
+        ),
+        const SizedBox(height: 8),
+        if (data.isEmpty && !_glLoading)
+          Padding(
+            padding: const EdgeInsets.all(12),
+            child: Row(children: [
+              Icon(_glError != null ? Icons.error_outline : Icons.check_circle, size: 15, color: _glError != null ? AppColors.warning : AppColors.success),
+              const SizedBox(width: 8),
+              Expanded(child: Text(_glError ?? 'No open $tabName — queue is clear ✓', style: const TextStyle(fontSize: 11, color: AppColors.textMuted))),
+            ]),
+          )
+        else
+          for (final item in display) _vcsRow(item, compact: compact, accent: AppColors.accentPurple),
+        if (compact && data.length > display.length)
+          Center(child: Text('+ ${data.length - display.length} more • tap VIEW ALL', style: const TextStyle(fontSize: 10, color: AppColors.textMuted, fontWeight: FontWeight.w600))),
+      ]),
+    );
+  }
+
   Widget _alertsSegment({bool compact = false}) {
     // Connected servers ALWAYS get the real card (with server badges) —
     // never demo alerts. Empty/error states explain themselves inside.
@@ -1905,7 +2106,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     return PitchCard(
       title: _useRealServers ? 'ALERTS • SCANNING…' : 'ALERTS • DEMO',
       subtitle: _useRealServers ? 'Harvesting signals from ${_savedServers.length} server${_savedServers.length == 1 ? '' : 's'}…' : '${mockAlerts.where((a)=>a.status=='firing').length} firing',
-      trailing: compact ? InkWell(onTap: () => _goTo(5), child: const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan))) : null,
+      trailing: compact ? InkWell(onTap: () => _goTo(6), child: const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan))) : null,
       child: Column(children: display.map((a) => Container(
         margin: EdgeInsets.only(bottom: compact ? 6 : 8), padding: EdgeInsets.all(compact ? 8 : 10),
         decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(8), border: Border.all(color: a.severity=='critical' ? AppColors.critical.withValues(alpha: 0.3) : AppColors.borderLight)),
@@ -1941,7 +2142,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
           },
           child: const Row(children: [Icon(Icons.refresh, size: 11, color: AppColors.accentCyan), SizedBox(width: 3), Text('RESCAN', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan))]),
         ),
-        if (compact) ...[const SizedBox(width: 10), InkWell(onTap: () => _goTo(5), child: const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan)))],
+        if (compact) ...[const SizedBox(width: 10), InkWell(onTap: () => _goTo(6), child: const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan)))],
       ]),
       child: all.isEmpty
           ? Padding(
@@ -2017,15 +2218,26 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     );
   }
 
+  /// Merged CI/CD timeline: GitHub Actions runs + GitLab pipelines, newest first.
+  List<DeployItem> get _allRuns {
+    final all = [..._ghRuns, ..._glPipes];
+    all.sort((a, b) => b.time.compareTo(a.time));
+    return all;
+  }
+
+  bool get _ciConfigured => _ghConfigured || _glConfigured;
+  bool get _ciLoading => _ghLoading || _glLoading;
+  String? get _ciError => _ghError ?? _glError;
+
   Widget _deploysSegment({bool compact = false}) {
-    // Live Actions runs once GitHub is configured.
-    if (_ghConfigured && (_ghRuns.isNotEmpty || _ghLoading || _ghError != null)) return _realDeploysCard(compact: compact);
+    // Live runs once either VCS is configured.
+    if (_ciConfigured && (_allRuns.isNotEmpty || _ciLoading || _ciError != null)) return _realDeploysCard(compact: compact);
     final display = compact ? mockDeploys.take(3).toList() : mockDeploys;
     return PitchCard(
       title: 'CI/CD • DEMO', subtitle: compact ? '3 of ${mockDeploys.length} shown' : 'Last 6 deployments',
       trailing: Row(mainAxisSize: MainAxisSize.min, children: [
-        InkWell(onTap: () => _goTo(10), child: Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), decoration: BoxDecoration(color: AppColors.accentCyan.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(6), border: Border.all(color: AppColors.accentCyan.withValues(alpha: 0.2))), child: const Text('+ CONNECT', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan)))),
-        if (compact) ...[const SizedBox(width: 8), InkWell(onTap: () => _goTo(6), child: const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan)))],
+        InkWell(onTap: () => _goTo(11), child: Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), decoration: BoxDecoration(color: AppColors.accentCyan.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(6), border: Border.all(color: AppColors.accentCyan.withValues(alpha: 0.2))), child: const Text('+ CONNECT', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan)))),
+        if (compact) ...[const SizedBox(width: 8), InkWell(onTap: () => _goTo(7), child: const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan)))],
       ]),
       child: Column(children: display.map((d) => Container(
         margin: EdgeInsets.only(bottom: compact ? 6 : 8), padding: EdgeInsets.all(compact ? 8 : 10),
@@ -2042,40 +2254,49 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     );
   }
 
-  /// CI/CD rendered from live GitHub Actions runs.
+  /// CI/CD rendered from live runs: GitHub Actions + GitLab pipelines.
   Widget _realDeploysCard({bool compact = false}) {
-    final display = compact ? _ghRuns.take(3).toList() : _ghRuns;
+    final all = _allRuns;
+    final display = compact ? all.take(3).toList() : all;
     IconData statusIcon(String s) => s == 'success' ? Icons.check : s == 'failed' ? Icons.close : Icons.sync;
     Color statusColorFor(String s) => s == 'success' ? AppColors.success : s == 'failed' ? AppColors.critical : AppColors.warning;
+    final sources = [
+      if (_ghConfigured) 'GH:${_ghRuns.length}',
+      if (_glConfigured) 'GL:${_glPipes.length}',
+    ].join(' • ');
     return PitchCard(
-      title: 'CI/CD • ACTIONS',
-      subtitle: _ghLoading
+      title: 'CI/CD • LIVE',
+      subtitle: _ciLoading
           ? 'syncing…'
-          : _ghError != null
-              ? _ghError!
-              : '${_ghRuns.length} runs • ${_ghRepos.length} repo${_ghRepos.length == 1 ? '' : 's'}',
+          : _ciError != null
+              ? _ciError!
+              : '${all.length} runs ($sources)',
       trailing: Row(mainAxisSize: MainAxisSize.min, children: [
-        if (_ghLoading) const SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.accentCyan)),
-        if (_ghLoading) const SizedBox(width: 6),
+        if (_ciLoading) const SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.accentCyan)),
+        if (_ciLoading) const SizedBox(width: 6),
         InkWell(
           onTap: () {
-            setState(() { _ghRuns = []; _ghError = null; });
+            setState(() { _ghRuns = []; _ghError = null; _glPipes = []; _glError = null; });
             _pollGithub();
+            _pollGitlab();
           },
           child: const Row(children: [Icon(Icons.refresh, size: 11, color: AppColors.accentCyan), SizedBox(width: 3), Text('SYNC', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan))]),
         ),
-        if (compact) ...[const SizedBox(width: 10), InkWell(onTap: () => _goTo(6), child: const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan)))],
+        if (compact) ...[const SizedBox(width: 10), InkWell(onTap: () => _goTo(7), child: const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan)))],
       ]),
-      child: _ghRuns.isEmpty && !_ghLoading
+      child: all.isEmpty && !_ciLoading
           ? Padding(
               padding: const EdgeInsets.all(12),
               child: Row(children: [
-                Icon(_ghError != null ? Icons.error_outline : Icons.info_outline, size: 15, color: _ghError != null ? AppColors.warning : AppColors.textMuted),
+                Icon(_ciError != null ? Icons.error_outline : Icons.info_outline, size: 15, color: _ciError != null ? AppColors.warning : AppColors.textMuted),
                 const SizedBox(width: 8),
-                Expanded(child: Text(_ghError ?? 'No workflow runs yet — push to a tracked repo to trigger Actions.', style: const TextStyle(fontSize: 11, color: AppColors.textMuted))),
+                Expanded(child: Text(_ciError ?? 'No runs yet — push to a tracked repo to trigger a build.', style: const TextStyle(fontSize: 11, color: AppColors.textMuted))),
               ]),
             )
-          : Column(children: display.map((d) => Container(
+          : Column(children: display.map((d) {
+              final isGl = d.vcs == 'gitlab';
+              final vcsColor = isGl ? AppColors.accentPurple : AppColors.textPrimary;
+              return Container(
               margin: EdgeInsets.only(bottom: compact ? 6 : 8), padding: EdgeInsets.all(compact ? 8 : 10),
               decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(8), border: Border.all(color: d.status == 'failed' ? AppColors.critical.withValues(alpha: 0.25) : AppColors.borderLight)),
               child: Row(children: [
@@ -2083,6 +2304,12 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
                 const SizedBox(width: 8),
                 Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                   Row(children: [
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                      decoration: BoxDecoration(color: vcsColor.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(3), border: Border.all(color: vcsColor.withValues(alpha: 0.25))),
+                      child: Text(isGl ? 'GL' : 'GH', style: TextStyle(fontSize: 8, fontWeight: FontWeight.w800, letterSpacing: 0.3, color: vcsColor)),
+                    ),
+                    const SizedBox(width: 5),
                     Flexible(child: Text(d.app, style: TextStyle(fontSize: compact ? 11 : 12, fontWeight: FontWeight.w700, color: AppColors.textPrimary), overflow: TextOverflow.ellipsis)),
                     const SizedBox(width: 5),
                     Text(d.version, style: const TextStyle(fontSize: 10, color: AppColors.accentCyan, fontFamily: AppFonts.mono)),
@@ -2094,7 +2321,8 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
                 ])),
                 const Icon(Icons.chevron_right, size: 14, color: AppColors.textDim),
               ]),
-            )).toList()),
+            );
+            }).toList()),
     );
   }
 
@@ -2103,7 +2331,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     final display = compact ? filtered.take(6).toList() : filtered;
     return PitchCard(
       title: 'LIVE LOG TAIL',
-      trailing: compact ? InkWell(onTap: () => _goTo(7), child: const Text('EXPAND →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan))) : null,
+      trailing: compact ? InkWell(onTap: () => _goTo(8), child: const Text('EXPAND →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan))) : null,
       child: Container(
         height: compact ? 160 : 280,
         decoration: BoxDecoration(color: const Color(0xFF050505), borderRadius: BorderRadius.circular(10), border: Border.all(color: AppColors.border)),
@@ -2126,7 +2354,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
   Widget _metricsSegment({bool compact = false}) {
     return PitchCard(
       title: 'METRICS',
-      trailing: compact ? InkWell(onTap: () => _goTo(8), child: const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan))) : null,
+      trailing: compact ? InkWell(onTap: () => _goTo(9), child: const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan))) : null,
       child: Column(children: [
         SizedBox(
           height: compact ? 110 : 160,
@@ -2163,7 +2391,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     final display = compact ? mockSecurity.take(3).toList() : mockSecurity;
     return PitchCard(
       title: 'SECURITY',
-      trailing: compact ? InkWell(onTap: () => _goTo(9), child: const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan))) : null,
+      trailing: compact ? InkWell(onTap: () => _goTo(10), child: const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan))) : null,
       child: Column(children: display.map((s) => Container(
         margin: EdgeInsets.only(bottom: compact ? 6 : 8), padding: EdgeInsets.all(compact ? 8 : 10),
         decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(8), border: Border.all(color: s.severity=='critical' ? AppColors.critical.withValues(alpha: 0.25) : AppColors.borderLight)),
@@ -2198,7 +2426,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
                 Builder(builder: (drawerCtx) => FilledButton.icon(
                       onPressed: () {
                         Navigator.pop(drawerCtx); // close drawer first
-                        _goTo(10); // Settings tab (reloads AI config on return)
+                        _goTo(11); // Settings tab (reloads AI config on return)
                       },
                       icon: const Icon(Icons.settings_outlined, size: 15),
                       label: const Text('CONFIGURE AI PROVIDER', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800)),

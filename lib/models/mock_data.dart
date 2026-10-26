@@ -58,7 +58,10 @@ class DeployItem {
   final String status; // success, failed, running
   final String duration;
   final int? runId; // GitHub Actions run id (live data only)
-  const DeployItem({required this.app, required this.version, required this.env, required this.actor, required this.time, required this.status, required this.duration, this.runId});
+  final String vcs; // 'github' or 'gitlab'
+  final String? glProject; // GitLab project path (live data only)
+  final int? pipelineId; // GitLab pipeline id (live data only)
+  const DeployItem({required this.app, required this.version, required this.env, required this.actor, required this.time, required this.status, required this.duration, this.runId, this.vcs = 'github', this.glProject, this.pipelineId});
 }
 
 class LogLine {
