@@ -56,6 +56,9 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
   Set<String> _alertLoading = {};
   String? _alertError;
   List<AlertEntry> get _realAlerts => _serverAlerts.values.expand((e) => e).toList();
+  // AI provider state (Settings → Integrations)
+  bool _aiConfigured = false;
+  String _aiModelName = '';
   // GitHub live state (PAT + repos from Settings)
   String _ghToken = '';
   String _ghUser = '';
@@ -89,6 +92,8 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
       _ghToken = prefs.getString('github_token') ?? '';
       _ghUser = prefs.getString('github_user') ?? '';
       _ghRepos = prefs.getStringList('github_repos') ?? [];
+      _aiModelName = prefs.getString('ai_model') ?? '';
+      _aiConfigured = _aiModelName.isNotEmpty;
     });
     _pollAgents();
     _pollGithub();
@@ -1513,7 +1518,33 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     return Drawer(
       backgroundColor: const Color(0xFF0A0A0A), width: 380,
       child: SafeArea(child: Column(children: [
-        Container(padding: const EdgeInsets.all(14), decoration: const BoxDecoration(color: AppColors.surface1, border: Border(bottom: BorderSide(color: AppColors.border))), child: Row(children: [Container(width: 36, height: 36, decoration: BoxDecoration(color: AppColors.accentCyan, borderRadius: BorderRadius.circular(8)), child: const Icon(Icons.smart_toy, size: 18, color: Colors.black)), const SizedBox(width: 10), const Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text('AI Assistant', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.textPrimary)), Text('Control center aware', style: TextStyle(fontSize: 10, color: AppColors.textMuted))]))])),
+        Container(padding: const EdgeInsets.all(14), decoration: const BoxDecoration(color: AppColors.surface1, border: Border(bottom: BorderSide(color: AppColors.border))), child: Row(children: [Container(width: 36, height: 36, decoration: BoxDecoration(color: AppColors.accentCyan, borderRadius: BorderRadius.circular(8)), child: const Icon(Icons.smart_toy, size: 18, color: Colors.black)), const SizedBox(width: 10), Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [const Text('AI Assistant', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.textPrimary)), Text(_aiConfigured ? '$_aiModelName • control center aware' : 'No provider configured', style: const TextStyle(fontSize: 10, color: AppColors.textMuted), maxLines: 1, overflow: TextOverflow.ellipsis)]))])),
+        if (!_aiConfigured)
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.all(20),
+              child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+                Container(width: 56, height: 56, decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(14), border: Border.all(color: AppColors.border)), child: const Icon(Icons.smart_toy_outlined, size: 26, color: AppColors.textMuted)),
+                const SizedBox(height: 14),
+                const Text('AI Assistant is offline', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
+                const SizedBox(height: 6),
+                const Text('Connect an AI provider (OpenAI, Anthropic, Gemini, Ollama…) and pick a model to start chatting with your control center.', style: TextStyle(fontSize: 12, height: 1.4, color: AppColors.textSecondary), textAlign: TextAlign.center),
+                const SizedBox(height: 16),
+                Builder(builder: (drawerCtx) => FilledButton.icon(
+                      onPressed: () {
+                        Navigator.pop(drawerCtx); // close drawer first
+                        _goTo(10); // Settings tab (reloads AI config on return)
+                      },
+                      icon: const Icon(Icons.settings_outlined, size: 15),
+                      label: const Text('CONFIGURE AI PROVIDER', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800)),
+                      style: FilledButton.styleFrom(backgroundColor: AppColors.accentCyan, foregroundColor: Colors.black, padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 13)),
+                    )),
+                const SizedBox(height: 8),
+                const Text('Settings → Integrations → AI Provider', style: TextStyle(fontSize: 10, color: AppColors.textDim, fontFamily: AppFonts.mono)),
+              ]),
+            ),
+          )
+        else ...[
         Expanded(child: ListView.builder(controller: _chatScroll, padding: const EdgeInsets.all(12), itemCount: _chatMessages.length, itemBuilder: (_, i) {
           final m = _chatMessages[i]; final isUser = m['role']=='user';
           return Align(alignment: isUser ? Alignment.centerRight : Alignment.centerLeft, child: Container(margin: const EdgeInsets.only(bottom: 8), padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9), constraints: const BoxConstraints(maxWidth: 300), decoration: BoxDecoration(color: isUser ? AppColors.accentCyan : AppColors.surface1, borderRadius: BorderRadius.circular(14), border: Border.all(color: isUser ? AppColors.accentCyan : AppColors.border)), child: Text(m['text']!, style: TextStyle(fontSize: 12, color: isUser ? Colors.black : AppColors.textPrimary))));
@@ -1523,6 +1554,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
           const SizedBox(width: 8),
           FilledButton(onPressed: _sendChat, style: FilledButton.styleFrom(backgroundColor: AppColors.accentCyan, foregroundColor: Colors.black, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)), padding: const EdgeInsets.all(12)), child: const Icon(Icons.send, size: 16)),
         ])),
+        ], // end else (chat UI when provider configured)
       ])),
     );
   }
