@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'package:dartssh2/dartssh2.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
@@ -10,6 +11,7 @@ import '../models/server_connection.dart';
 import '../services/ai_service.dart';
 import '../services/github_service.dart';
 import '../services/ssh_key_loader.dart';
+import '../services/update_service.dart';
 import '../widgets/pitch_card.dart';
 
 class SettingsScreen extends StatefulWidget {
@@ -51,6 +53,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   void initState() {
     super.initState();
     _load();
+    _loadUpdatePrefs();
   }
 
   Future<void> _load() async {
@@ -258,6 +261,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           }
           return Column(children: [prefsCard, integrationsCard]);
         }),
+        _updatesCard(),
         // Danger zone
         PitchCard(
           title: 'DANGER ZONE',
@@ -750,6 +754,119 @@ class _SettingsScreenState extends State<SettingsScreen> {
       OutlinedButton(onPressed: (){}, style: OutlinedButton.styleFrom(side: const BorderSide(color: AppColors.border), foregroundColor: AppColors.textSecondary, padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6)), child: Text(action, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700))),
     ]),
   );
+
+  // --- App updates (GitHub Releases, desktop) ---
+  String _appVersion = '';
+  bool _updChecking = false;
+  bool _updAutoCheck = true;
+  String? _updStatus;
+
+  Future<void> _loadUpdatePrefs() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (!mounted) return;
+    setState(() {
+      _updAutoCheck = prefs.getBool('auto_update_check') ?? true;
+    });
+    try {
+      final v = await UpdateService().currentVersion();
+      if (!mounted) return;
+      setState(() => _appVersion = v);
+    } catch (_) {}
+  }
+
+  Future<void> _setAutoUpdateCheck(bool v) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('auto_update_check', v);
+    if (!mounted) return;
+    setState(() => _updAutoCheck = v);
+  }
+
+  Future<void> _manualCheckUpdates() async {
+    setState(() { _updChecking = true; _updStatus = null; });
+    try {
+      final svc = UpdateService();
+      final rel = await svc.fetchLatest();
+      final cur = _appVersion.isNotEmpty ? _appVersion : await svc.currentVersion();
+      final cmp = UpdateService.compareVersions(cur, rel.version);
+      if (!mounted) return;
+      if (cmp >= 0) {
+        setState(() {
+          _updChecking = false;
+          _updStatus = 'Up to date (v$cur) ✓';
+        });
+        return;
+      }
+      final asset = UpdateService.pickAsset(rel);
+      setState(() {
+        _updChecking = false;
+        _updStatus = asset == null
+            ? 'v${rel.version} available, but no ${Platform.isMacOS ? 'macOS' : Platform.isWindows ? 'Windows' : 'Linux'} build attached to the release.'
+            : 'v${rel.version} available — see the update banner on Overview, or tap below to review + install.';
+      });
+      if (asset != null) {
+        // hand off to the Overview update flow on next visit; also offer now
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          backgroundColor: AppColors.accentCyan.withValues(alpha: 0.14),
+          content: Text('v${rel.version} available — open Overview to update', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.accentCyan)),
+          duration: const Duration(seconds: 4),
+        ));
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _updChecking = false;
+        _updStatus = 'Check failed: ${e.toString().replaceFirst('Exception: ', '').split('\n').first}';
+      });
+    }
+  }
+
+  Future<void> _resetSkippedVersion() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('skipped_update_tag');
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(backgroundColor: AppColors.surface1, content: Text('Skipped versions cleared — next check will prompt again', style: TextStyle(fontSize: 12, color: AppColors.textSecondary))));
+  }
+
+  Widget _updatesCard() {
+    return PitchCard(
+      title: 'APP & UPDATES',
+      subtitle: _appVersion.isEmpty ? 'GitHub Releases • desktop' : 'v$_appVersion • GitHub Releases • desktop',
+      trailing: _updChecking
+          ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.accentCyan))
+          : InkWell(
+              onTap: _manualCheckUpdates,
+              child: const Row(mainAxisSize: MainAxisSize.min, children: [Icon(Icons.system_update, size: 12, color: AppColors.accentCyan), SizedBox(width: 3), Text('CHECK NOW', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan))]),
+            ),
+      child: Column(children: [
+        Row(children: [
+          const Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text('Check on startup', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+            Text('Poll the latest release when the app opens', style: TextStyle(fontSize: 10, color: AppColors.textMuted)),
+          ])),
+          Switch(value: _updAutoCheck, onChanged: _setAutoUpdateCheck, activeTrackColor: AppColors.accentCyan, thumbColor: WidgetStateProperty.all(Colors.black)),
+        ]),
+        if (_updStatus != null) ...[
+          const SizedBox(height: 6),
+          Container(
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(8), border: Border.all(color: AppColors.border)),
+            child: Row(children: [const Icon(Icons.info_outline, size: 13, color: AppColors.accentCyan), const SizedBox(width: 8), Expanded(child: Text(_updStatus!, style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)))]),
+          ),
+        ],
+        const SizedBox(height: 4),
+        Row(children: [
+          const Expanded(child: Text('Releases live at github.com/alfirus/mycontrolpanel/releases — attach per-platform zips manually.', style: TextStyle(fontSize: 10, color: AppColors.textDim))),
+          TextButton(onPressed: _resetSkippedVersion, child: const Text('UNSKIP', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: AppColors.textMuted))),
+        ]),
+        const SizedBox(height: 2),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+          decoration: BoxDecoration(color: AppColors.surface2, borderRadius: BorderRadius.circular(6), border: Border.all(color: AppColors.border)),
+          child: const Text('Expected assets: mycontrolpanel-macos-<v>.zip • mycontrolpanel-windows-<v>.zip • mycontrolpanel-linux-<v>.tar.gz (+ optional SHA256SUMS.txt)', style: TextStyle(fontSize: 9, color: AppColors.textMuted, fontFamily: AppFonts.mono)),
+        ),
+      ]),
+    );
+  }
 
   void _export() {
     ScaffoldMessenger.of(context).showSnackBar(const SnackBar(backgroundColor: AppColors.surface1, content: Text('Export copied to clipboard (JSON)', style: TextStyle(color: AppColors.textPrimary, fontSize: 12))));
