@@ -57,7 +57,8 @@ class DeployItem {
   final DateTime time;
   final String status; // success, failed, running
   final String duration;
-  const DeployItem({required this.app, required this.version, required this.env, required this.actor, required this.time, required this.status, required this.duration});
+  final int? runId; // GitHub Actions run id (live data only)
+  const DeployItem({required this.app, required this.version, required this.env, required this.actor, required this.time, required this.status, required this.duration, this.runId});
 }
 
 class LogLine {

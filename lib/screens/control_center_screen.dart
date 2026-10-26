@@ -3,14 +3,20 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:fl_chart/fl_chart.dart';
+import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:url_launcher/url_launcher.dart';
+import 'package:uuid/uuid.dart';
 import '../theme/app_theme.dart';
 import '../models/mock_data.dart';
 import '../models/alert_entry.dart';
 import '../models/app_entry.dart';
 import '../models/cron_entry.dart';
 import '../models/server_connection.dart';
+import 'dart:convert';
 import '../services/agent_service.dart';
+import '../services/ai_service.dart';
+import '../services/ai_tools.dart';
 import '../services/github_service.dart';
 import '../services/ssh_key_loader.dart';
 import 'server_details_screen.dart';
@@ -31,9 +37,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
   String _serverFilter = 'all';
   final TextEditingController _chatController = TextEditingController();
   final List<Map<String, String>> _chatMessages = [
-    {'role': 'assistant', 'text': 'Control Center AI online. Ask me anything.'},
-    {'role': 'user', 'text': 'Show failed crons'},
-    {'role': 'assistant', 'text': '1 failed in last 24h: purge-sessions on prod-core-01. Want me to tail logs?'},
+    {'role': 'assistant', 'text': 'Control Center AI online. I can see your live servers, alerts, crons, apps, GitHub and deploys — ask me anything, e.g. "which servers need attention?"'},
   ];
   final ScrollController _chatScroll = ScrollController();
   final ScrollController _logScroll = ScrollController();
@@ -56,6 +60,15 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
   Set<String> _alertLoading = {};
   String? _alertError;
   List<AlertEntry> get _realAlerts => _serverAlerts.values.expand((e) => e).toList();
+  // AI provider state (Settings → Integrations)
+  bool _aiConfigured = false;
+  bool _aiWriteEnabled = false; // write tools kill-switch (default OFF)
+  String _aiModelName = '';
+  AiProvider _aiProvider = AiProvider.openai;
+  String _aiBaseUrl = '';
+  String _aiKey = '';
+  bool _aiTyping = false;
+  String _aiSessionId = ''; // stable x-opencode-session for Go/Zen routing + caching
   // GitHub live state (PAT + repos from Settings)
   String _ghToken = '';
   String _ghUser = '';
@@ -89,17 +102,31 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
       _ghToken = prefs.getString('github_token') ?? '';
       _ghUser = prefs.getString('github_user') ?? '';
       _ghRepos = prefs.getStringList('github_repos') ?? [];
+      _aiModelName = prefs.getString('ai_model') ?? '';
+      _aiWriteEnabled = prefs.getBool('ai_write_enabled') ?? false;
+      _aiSessionId = prefs.getString('ai_session_id') ?? '';
+      if (_aiSessionId.isEmpty) {
+        _aiSessionId = const Uuid().v4();
+        unawaited(prefs.setString('ai_session_id', _aiSessionId));
+      }
+      _aiProvider = AiProvider.values[(prefs.getInt('ai_provider') ?? 0).clamp(0, AiProvider.values.length - 1)];
+      _aiBaseUrl = prefs.getString('ai_base_url') ?? _aiProvider.defaultBaseUrl;
+      _aiKey = prefs.getString('ai_key') ?? '';
+      _aiConfigured = _aiModelName.isNotEmpty;
     });
     _pollAgents();
     _pollGithub();
   }
 
-  /// Fetch live GitHub Issues/PRs/Tasks for tracked repos.
+  /// Fetch live GitHub Issues/PRs/Tasks/Runs for tracked repos.
+  /// Validates the token first so auth failures surface instead of
+  /// silently falling back to demo data.
   Future<void> _pollGithub() async {
     if (!_ghConfigured || _ghLoading) return;
     setState(() { _ghLoading = true; _ghError = null; });
     try {
       final svc = GithubService(_ghToken);
+      await svc.validate();
       final issues = <GithubItem>[], prs = <GithubItem>[];
       for (final repo in _ghRepos) {
         try { issues.addAll(await svc.repoIssues(repo)); } catch (_) {}
@@ -549,35 +576,376 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     super.dispose();
   }
 
-  void _sendChat() {
+  void _sendChat() async {
     final t = _chatController.text.trim();
-    if (t.isEmpty) return;
+    if (t.isEmpty || _aiTyping) return;
     setState(() {
       _chatMessages.add({'role': 'user', 'text': t});
-      _chatMessages.add({'role': 'assistant', 'text': _mockAIReply(t)});
       _chatController.clear();
+      _aiTyping = true;
+    });
+    _scrollChatToEnd();
+    if (!_aiConfigured) {
+      setState(() {
+        _chatMessages.add({'role': 'assistant', 'text': 'No AI provider configured — tap CONFIGURE AI PROVIDER above.'});
+        _aiTyping = false;
+      });
+      return;
+    }
+    try {
+      final hist = _chatMessages.where((m) => m['text'] != null && m['text']!.isNotEmpty).toList();
+      final tail = hist.length > 12 ? hist.sublist(hist.length - 12) : hist;
+      final convo = tail.map((m) => {'role': m['role']!, 'content': m['text']!}).toList();
+      final route = AiService.toolRoute(_aiProvider, _aiModelName);
+      if (route == ToolRoute.chat) {
+        await _runToolLoop(convo);
+      } else if (route == ToolRoute.responses) {
+        await _runResponsesLoop(convo);
+      } else {
+        final reply = await AiService().chat(
+          provider: _aiProvider,
+          baseUrl: _aiBaseUrl,
+          apiKey: _aiKey,
+          model: _aiModelName,
+          system: _aiSystemPrompt(),
+          sessionId: _aiSessionId,
+          messages: convo,
+        );
+        if (!mounted) return;
+        setState(() {
+          _chatMessages.add({'role': 'assistant', 'text': reply});
+          _aiTyping = false;
+        });
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _chatMessages.add({'role': 'assistant', 'text': 'AI error: ${e.toString().replaceFirst('Exception: ', '').split('\n').first}\n(Provider: ${_aiProvider.label} • model: $_aiModelName — check Settings → AI Provider.)'});
+        _aiTyping = false;
+      });
+    }
+    _scrollChatToEnd();
+  }
+
+  /// Tool-calling loop (Stage 2): read tools run freely; gated write tools
+  /// pause for an Approve/Deny dialog first.
+  Future<void> _runToolLoop(List<Map<String, String>> convo) async {
+    final svc = AiService();
+    final headers = AiService().openAiHeaders(_aiProvider, _aiKey, _aiSessionId);
+    final base = AiService.chatBase(_aiProvider, _aiBaseUrl);
+    final turns = <Map<String, dynamic>>[
+      for (final m in convo) {'role': m['role']!, 'content': m['content']!},
+    ];
+    for (var i = 0; i < AiTools.maxIterations; i++) {
+      final tools = _aiWriteEnabled
+          ? AiTools.schemas()
+          : AiTools.schemas().where((t) => !AiTools.gated.contains((((t['function'] as Map?)) ?? const {})['name'])).toList();
+      final turn = await svc.chatTurn(
+        baseUrl: base,
+        headers: headers,
+        model: _aiModelName,
+        system: '${_aiSystemPrompt()}\n\nYou have tools for live data${_aiWriteEnabled ? ' and actions' : ''}. Prefer calling a read tool over guessing.${_aiWriteEnabled ? ' For restart_service, run_ssh_command, rerun_workflow, create_github_issue: the app asks the user to approve first — briefly say what you are about to do, then call the tool.' : ' Write actions are DISABLED by the user — you are read-only. If asked to change anything, explain the manual steps instead of calling a tool.'}',
+        messages: turns.map((m) => {'role': m['role'].toString(), 'content': (m['content'] ?? '').toString()}).toList(),
+        tools: tools,
+      );
+      if (turn.text != null && turn.text!.isNotEmpty) {
+        if (!mounted) return;
+        setState(() => _chatMessages.add({'role': 'assistant', 'text': turn.text!}));
+        _scrollChatToEnd();
+      }
+      if (turn.calls.isEmpty) {
+        if (!mounted) return;
+        setState(() => _aiTyping = false);
+        return;
+      }
+      turns.add({
+        'role': 'assistant',
+        'content': turn.text ?? '',
+        'tool_calls': [
+          for (final c in turn.calls)
+            {'id': c.id, 'type': 'function', 'function': {'name': c.name, 'arguments': _argsJson(c.arguments)}},
+        ],
+      });
+      for (final call in turn.calls) {
+        if (AiTools.gated.contains(call.name)) {
+          // Kill-switch: model should not have these schemas when disabled,
+          // but refuse anyway if one arrives.
+          if (!_aiWriteEnabled) {
+            if (!mounted) return;
+            setState(() => _chatMessages.add({'role': 'assistant', 'text': '_Write tools are disabled — enable them above to allow ${call.name}._'}));
+            turns.add({'role': 'tool', 'tool_call_id': call.id, 'content': 'Write tools are disabled by the user. Explain manual steps instead.'});
+            continue;
+          }
+          final approved = await _askToolApproval(call);
+          if (!mounted) return;
+          if (!approved) {
+            setState(() => _chatMessages.add({'role': 'assistant', 'text': '_${call.name} denied by user — I won\'t run it._'}));
+            turns.add({'role': 'tool', 'tool_call_id': call.id, 'content': 'Denied by user. Do not retry this call. Explain the manual alternative instead.'});
+            continue;
+          }
+          setState(() => _chatMessages.add({'role': 'assistant', 'text': '_Running ${call.name}…_'}));
+        }
+        final result = await _safeExecute(call.name, call.arguments);
+        if (!mounted) return;
+        turns.add({'role': 'tool', 'tool_call_id': call.id, 'content': result.output});
+      }
+    }
+    if (!mounted) return;
+    setState(() {
+      _chatMessages.add({'role': 'assistant', 'text': '_Stopped after ${AiTools.maxIterations} tool rounds — ask me to continue if needed._'});
+      _aiTyping = false;
     });
   }
 
-  String _mockAIReply(String q) {
-    q = q.toLowerCase();
-    if (q.contains('server')) {
-      final op = _servers.where((s) => s.status == Status.operational).length;
-      if (!_useRealServers) return '${_servers.length} servers (demo data): $op operational.';
-      final live = _metrics.length;
-      final liveBit = live == _servers.length && live > 0
-          ? ' All reporting live metrics via agent ✓.'
-          : live > 0
-              ? ' $live of ${_servers.length} reporting live; rest need INSTALL AGENT.'
-              : ' No agents reporting yet — tap INSTALL AGENT on a server card.';
-      return '${_servers.length} servers (your saved connections): $op operational.$liveBit';
+  /// Executor guard: no tool exception may escape into the chat loop.
+  Future<ToolResult> _safeExecute(String name, Map<String, dynamic> args) async {
+    try {
+      return await executeTool(name, args, _toolDeps());
+    } catch (e) {
+      return ToolResult('Tool $name crashed: ${e.toString().split('\n').first}');
     }
-    if (q.contains('cron')) return 'Checked 6 crons: 1 failed (purge-sessions). Recommend retry.';
-    if (q.contains('pr') || q.contains('github')) return 'Open: 3 issues, 3 PRs. Latest PR #91 ready for review.';
-    if (q.contains('deploy')) return 'Last deploy: api-gateway v2.14.3 to prod 22m ago - success.';
-    if (q.contains('security')) return '5 findings: 2 critical. Ack the S3 bucket?';
-    if (q.contains('log')) return 'Tailing logs: ${mockLogs.first.message}';
-    return 'I have context on all segments (servers, crons, apps, GitHub, alerts, deploys, logs, metrics, security).';
+  }
+
+  /// Tool loop for Responses-API models (Go/Zen responses family):
+  /// same tools + approval gate, Responses wire format.
+  Future<void> _runResponsesLoop(List<Map<String, String>> convo) async {
+    final svc = AiService();
+    final base = _aiBaseUrl.trim().replaceAll(RegExp(r'/+$'), '');
+    final url = _aiProvider == AiProvider.openCodeGo
+        ? 'https://opencode.ai/inference/go/openai/v1/responses'
+        : '$base/responses';
+    final headers = AiService().openAiHeaders(_aiProvider, _aiKey, _aiSessionId);
+    final tools = _aiWriteEnabled
+        ? AiTools.schemas()
+        : AiTools.schemas().where((t) => !AiTools.gated.contains((((t['function'] as Map?)) ?? const {})['name'])).toList();
+    final instructions =
+        '${_aiSystemPrompt()}\n\nYou have function tools for live data${_aiWriteEnabled ? ' and actions' : ''}. Prefer calling a read tool over guessing.${_aiWriteEnabled ? ' For writes, briefly say what you are about to do, then call the tool — the app asks the user to approve first.' : ' Write actions are DISABLED — you are read-only; explain manual steps instead.'}';
+    var input = <Map<String, dynamic>>[
+      for (final m in convo)
+        {
+          'role': m['role'] == 'assistant' ? 'assistant' : 'user',
+          'content': m['content']!,
+        },
+    ];
+    for (var i = 0; i < AiTools.maxIterations; i++) {
+      final turn = await svc.responsesTurn(
+        url: url,
+        headers: headers,
+        model: _aiModelName,
+        instructions: instructions,
+        input: input,
+        tools: tools,
+      );
+      if (turn.text != null && turn.text!.isNotEmpty) {
+        if (!mounted) return;
+        setState(() => _chatMessages.add({'role': 'assistant', 'text': turn.text!}));
+        _scrollChatToEnd();
+      }
+      if (turn.calls.isEmpty) {
+        if (!mounted) return;
+        setState(() => _aiTyping = false);
+        return;
+      }
+      input = [...input, ...turn.outputItems];
+      for (final call in turn.calls) {
+        if (AiTools.gated.contains(call.name)) {
+          if (!_aiWriteEnabled) {
+            if (!mounted) return;
+            setState(() => _chatMessages.add({'role': 'assistant', 'text': '_Write tools are disabled — enable them above to allow ${call.name}._'}));
+            input.add({'type': 'function_call_output', 'call_id': call.id, 'output': 'Write tools are disabled by the user. Explain manual steps instead.'});
+            continue;
+          }
+          final approved = await _askToolApproval(call);
+          if (!mounted) return;
+          if (!approved) {
+            setState(() => _chatMessages.add({'role': 'assistant', 'text': '_${call.name} denied by user — I won\'t run it._'}));
+            input.add({'type': 'function_call_output', 'call_id': call.id, 'output': 'Denied by user. Do not retry this call. Explain the manual alternative instead.'});
+            continue;
+          }
+          setState(() => _chatMessages.add({'role': 'assistant', 'text': '_Running ${call.name}…_'}));
+        }
+        final result = await _safeExecute(call.name, call.arguments);
+        if (!mounted) return;
+        input.add({'type': 'function_call_output', 'call_id': call.id, 'output': result.output});
+      }
+    }
+    if (!mounted) return;
+    setState(() {
+      _chatMessages.add({'role': 'assistant', 'text': '_Stopped after ${AiTools.maxIterations} tool rounds — ask me to continue if needed._'});
+      _aiTyping = false;
+    });
+  }
+
+  String _argsJson(Map<String, dynamic> args) {
+    try {
+      return const JsonEncoder.withIndent('  ').convert(args);
+    } catch (_) {
+      return args.toString();
+    }
+  }
+
+  ToolDeps _toolDeps() => ToolDeps(
+        servers: _savedServers,
+        metrics: _metrics,
+        crons: _serverCrons,
+        apps: _serverApps,
+        alerts: _serverAlerts,
+        issues: _ghIssues,
+        prs: _ghPRs,
+        tasks: _ghTasks,
+        runs: _ghRuns,
+        githubToken: _ghToken,
+        githubRepos: _ghRepos,
+        agent: _agent,
+      );
+
+  /// Dark pitch-black Markdown theme for assistant replies.
+  MarkdownStyleSheet _chatMarkdownStyle() {
+    const body = TextStyle(fontSize: 12, height: 1.4, color: AppColors.textPrimary, fontFamily: AppFonts.mono);
+    return MarkdownStyleSheet(
+      p: body,
+      pPadding: const EdgeInsets.only(bottom: 6),
+      h1: body.copyWith(fontSize: 15, fontWeight: FontWeight.w800),
+      h1Padding: const EdgeInsets.only(bottom: 6),
+      h2: body.copyWith(fontSize: 13, fontWeight: FontWeight.w800),
+      h2Padding: const EdgeInsets.only(bottom: 5),
+      h3: body.copyWith(fontSize: 12, fontWeight: FontWeight.w800),
+      h3Padding: const EdgeInsets.only(bottom: 4),
+      em: body.copyWith(fontStyle: FontStyle.italic, color: AppColors.textSecondary),
+      strong: body.copyWith(fontWeight: FontWeight.w800),
+      del: body.copyWith(decoration: TextDecoration.lineThrough, color: AppColors.textMuted),
+      a: body.copyWith(color: AppColors.accentCyan, decoration: TextDecoration.underline),
+      code: const TextStyle(fontSize: 11, color: AppColors.accentCyan, fontFamily: AppFonts.mono, backgroundColor: Color(0xFF050505)),
+      codeblockPadding: const EdgeInsets.all(8),
+      codeblockDecoration: BoxDecoration(color: const Color(0xFF050505), borderRadius: BorderRadius.circular(8), border: Border.all(color: AppColors.border)),
+      blockquote: body.copyWith(color: AppColors.textSecondary, fontStyle: FontStyle.italic),
+      blockquoteDecoration: const BoxDecoration(border: Border(left: BorderSide(color: AppColors.accentCyan, width: 2))),
+      blockquotePadding: const EdgeInsets.only(left: 8, top: 2, bottom: 2),
+      listBullet: body.copyWith(color: AppColors.accentCyan),
+      listIndent: 16,
+      listBulletPadding: const EdgeInsets.only(right: 6),
+      tableHead: body.copyWith(fontWeight: FontWeight.w800, fontSize: 11),
+      tableBody: body.copyWith(fontSize: 11),
+      tableHeadAlign: TextAlign.left,
+      tableBorder: TableBorder.all(color: AppColors.border, width: 0.6),
+      tableCellsPadding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+      horizontalRuleDecoration: const BoxDecoration(border: Border(top: BorderSide(color: AppColors.border))),
+      checkbox: body.copyWith(color: AppColors.accentCyan),
+    );
+  }
+
+  /// Approve/Deny gate for write tools. True only on explicit Approve.
+  Future<bool> _askToolApproval(ToolCall call) async {
+    final pretty = _argsJson(call.arguments);
+    final result = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.surface1,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: BorderSide(color: AppColors.warning.withValues(alpha: 0.4))),
+        title: Row(children: [
+          Container(width: 30, height: 30, decoration: BoxDecoration(color: AppColors.warning.withValues(alpha: 0.14), borderRadius: BorderRadius.circular(7)), child: const Icon(Icons.verified_user_outlined, size: 15, color: AppColors.warning)),
+          const SizedBox(width: 10),
+          const Expanded(child: Text('Approve AI action?', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w800, color: AppColors.textPrimary))),
+        ]),
+        content: SizedBox(
+          width: 340,
+          child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              decoration: BoxDecoration(color: AppColors.warning.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(6), border: Border.all(color: AppColors.warning.withValues(alpha: 0.25))),
+              child: Text(call.name, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w800, color: AppColors.warning, fontFamily: AppFonts.mono)),
+            ),
+            const SizedBox(height: 8),
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(color: const Color(0xFF050505), borderRadius: BorderRadius.circular(8), border: Border.all(color: AppColors.border)),
+              child: SingleChildScrollView(child: SelectableText(pretty, style: const TextStyle(fontSize: 11, color: AppColors.textPrimary, fontFamily: AppFonts.mono))),
+            ),
+            const SizedBox(height: 8),
+            const Text('Runs with your saved credentials. Deny if anything looks off.', style: TextStyle(fontSize: 10, color: AppColors.textMuted)),
+          ]),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('DENY', style: TextStyle(color: AppColors.textSecondary, fontWeight: FontWeight.w800))),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), style: FilledButton.styleFrom(backgroundColor: AppColors.warning, foregroundColor: Colors.black), child: const Text('APPROVE & RUN', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800))),
+        ],
+      ),
+    );
+    return result == true;
+  }
+
+  void _scrollChatToEnd() {
+    Future.delayed(const Duration(milliseconds: 100), () {
+      if (_chatScroll.hasClients) {
+        _chatScroll.animateTo(_chatScroll.position.maxScrollExtent + 200,
+            duration: const Duration(milliseconds: 300), curve: Curves.easeOut);
+      }
+    });
+  }
+
+  /// Live control-center snapshot injected as the system prompt.
+  String _aiSystemPrompt() {
+    final b = StringBuffer();
+    b.writeln('You are the AI assistant inside MyControlPanel, an IT control center app.');
+    b.writeln('Reply in GitHub-flavored Markdown (the client renders it): short headings, bullets, tables for comparisons, fenced code blocks for commands/output. Keep it tight.');
+    b.writeln('Use ONLY the live state below for facts about infrastructure. Never invent servers, metrics, or deployments.');
+    b.writeln();
+    b.writeln('SERVERS (${_servers.length}${_useRealServers ? ', user-configured' : ', DEMO data'}):');
+    for (final s in _servers) {
+      final m = _metrics[s.id];
+      final met = m == null
+          ? 'no live metrics'
+          : 'cpu=${((m['cpu'] as num).toDouble() * 100).toInt()}% ram=${((m['ram'] as num).toDouble() * 100).toInt()}% disk=${((m['disk'] as num).toDouble() * 100).toInt()}% up=${m['uptime_days']}d';
+      b.writeln('- ${s.name} (${s.ip}, ${s.region}) status=${s.status.name} $met');
+    }
+    b.writeln();
+    final alerts = _realAlerts.isEmpty && !_useRealServers ? mockAlerts.map((a) => '${a.title} [${a.severity}]').toList() : _realAlerts.map((a) => '${a.title} [${a.severity}] on ${a.serverName}').toList();
+    b.writeln('ALERTS (${alerts.length} firing signals):');
+    for (final a in alerts.take(10)) {
+      b.writeln('- $a');
+    }
+    b.writeln();
+    final crons = _realCrons.isEmpty && !_useRealServers
+        ? mockCrons.map((c) => '${c.name} (${c.schedule}) status=${c.status.name} on ${c.server}').toList()
+        : _realCrons.map((c) => '${c.command} (${c.schedule}) on ${c.serverName} [${c.source}]').toList();
+    b.writeln('CRONJOBS (${crons.length}):');
+    for (final c in crons.take(10)) {
+      b.writeln('- $c');
+    }
+    b.writeln();
+    final apps = _realApps.isEmpty && !_useRealServers
+        ? mockApps.map((a) => '${a.name} ${a.version} [${a.env.name}]').toList()
+        : _realApps.map((a) => '${a.name} (${a.detail}) on ${a.serverName} [${a.source}]').toList();
+    b.writeln('APPS (${apps.length}):');
+    for (final a in apps.take(10)) {
+      b.writeln('- $a');
+    }
+    b.writeln();
+    if (_ghConfigured) {
+      b.writeln('GITHUB (@$_ghUser, repos: ${_ghRepos.join(', ')}): ${_ghIssues.length} open issues, ${_ghPRs.length} open PRs, ${_ghTasks.length} tasks.');
+      for (final i in _ghIssues.take(5)) {
+        b.writeln('- issue #${i.number}: ${i.title} (${i.repo})');
+      }
+      for (final p in _ghPRs.take(5)) {
+        b.writeln('- PR #${p.number}: ${p.title} (${p.repo})');
+      }
+      if (_ghRuns.isNotEmpty) {
+        b.writeln('RECENT ACTIONS RUNS:');
+        for (final r in _ghRuns.take(5)) {
+          b.writeln('- ${r.app} #${r.version} ${r.status} on ${r.env} by ${r.actor}');
+        }
+      }
+    } else {
+      b.writeln('GITHUB: not connected (demo data in UI).');
+    }
+    b.writeln();
+    if (_aiWriteEnabled) {
+      b.writeln('Write tools are ENABLED: you may restart services, run allowlisted diagnostic commands (incl. directory listings), re-run failed workflows, and file issues via tools. The app asks the user to approve each write before it runs — say what you will do, then call the tool. Never claim inability to act: use the tools.');
+    } else {
+      b.writeln('Write tools are DISABLED: you are read-only. If asked to DO something, explain the manual steps and point to the relevant screen/terminal command.');
+    }
+    return b.toString();
   }
 
   @override
@@ -657,38 +1025,76 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     ];
     return Container(
       width: 220, color: AppColors.pitchBlack,
-      child: ListView(
-        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 10),
-        children: [
-          for (int i = 0; i < items.length; i++)
-            Container(
-              margin: const EdgeInsets.only(bottom: 4),
-              decoration: BoxDecoration(color: _navIndex==i ? AppColors.surface1 : Colors.transparent, borderRadius: BorderRadius.circular(10), border: Border.all(color: _navIndex==i ? AppColors.borderLight : Colors.transparent)),
-              child: ListTile(
-                dense: true, onTap: () => _goTo(i),
-                leading: Container(width: 28, height: 28, decoration: BoxDecoration(color: _navIndex==i ? items[i].$3.withValues(alpha: 0.14) : AppColors.surface2, borderRadius: BorderRadius.circular(7), border: Border.all(color: _navIndex==i ? items[i].$3.withValues(alpha: 0.25) : AppColors.border)), child: Icon(items[i].$2, size: 14, color: _navIndex==i ? items[i].$3 : AppColors.textMuted)),
-                title: Text(items[i].$1, style: TextStyle(fontSize: 12, fontWeight: _navIndex==i ? FontWeight.w700 : FontWeight.w500, color: _navIndex==i ? AppColors.textPrimary : AppColors.textSecondary)),
-                trailing: _navIndex==i ? Container(width: 6, height: 6, decoration: BoxDecoration(color: items[i].$3, shape: BoxShape.circle)) : null,
-                contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 0), minLeadingWidth: 28,
+      child: Column(children: [
+        Expanded(
+          child: ListView(
+            padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 10),
+            children: [
+              for (int i = 0; i < items.length; i++)
+                Container(
+                  margin: const EdgeInsets.only(bottom: 4),
+                  decoration: BoxDecoration(color: _navIndex==i ? AppColors.surface1 : Colors.transparent, borderRadius: BorderRadius.circular(10), border: Border.all(color: _navIndex==i ? AppColors.borderLight : Colors.transparent)),
+                  child: ListTile(
+                    dense: true, onTap: () => _goTo(i),
+                    leading: Container(width: 28, height: 28, decoration: BoxDecoration(color: _navIndex==i ? items[i].$3.withValues(alpha: 0.14) : AppColors.surface2, borderRadius: BorderRadius.circular(7), border: Border.all(color: _navIndex==i ? items[i].$3.withValues(alpha: 0.25) : AppColors.border)), child: Icon(items[i].$2, size: 14, color: _navIndex==i ? items[i].$3 : AppColors.textMuted)),
+                    title: Text(items[i].$1, style: TextStyle(fontSize: 12, fontWeight: _navIndex==i ? FontWeight.w700 : FontWeight.w500, color: _navIndex==i ? AppColors.textPrimary : AppColors.textSecondary)),
+                    trailing: _navIndex==i ? Container(width: 6, height: 6, decoration: BoxDecoration(color: items[i].$3, shape: BoxShape.circle)) : null,
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 0), minLeadingWidth: 28,
+                  ),
+                ),
+              const SizedBox(height: 12),
+              const Divider(), const SizedBox(height: 12),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(color: AppColors.surface0, borderRadius: BorderRadius.circular(12), border: Border.all(color: AppColors.border)),
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  const Text('QUICK STATS', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700, letterSpacing: 0.7, color: AppColors.textMuted)),
+                  const SizedBox(height: 10),
+                  _miniStat('Servers', '${_servers.length}${_useRealServers ? ' real' : ' demo'}', AppColors.accentCyan),
+                  _miniStat('Uptime', '99.92%', AppColors.success),
+                  _miniStat('Incidents', '2 firing', AppColors.critical),
+                  _miniStat('PRs open', '3', AppColors.textSecondary),
+                ]),
               ),
-            ),
-          const SizedBox(height: 12),
-          const Divider(), const SizedBox(height: 12),
-          Container(
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(color: AppColors.surface0, borderRadius: BorderRadius.circular(12), border: Border.all(color: AppColors.border)),
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              const Text('QUICK STATS', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700, letterSpacing: 0.7, color: AppColors.textMuted)),
-              const SizedBox(height: 10),
-              _miniStat('Servers', '${_servers.length}${_useRealServers ? ' real' : ' demo'}', AppColors.accentCyan),
-              _miniStat('Uptime', '99.92%', AppColors.success),
-              _miniStat('Incidents', '2 firing', AppColors.critical),
-              _miniStat('PRs open', '3', AppColors.textSecondary),
-            ]),
+            ],
           ),
-        ],
-      ),
+        ),
+        // Buy Me a Coffee — pinned bottom-left
+        Padding(
+          padding: const EdgeInsets.fromLTRB(10, 4, 10, 10),
+          child: InkWell(
+            onTap: _openBuyMeACoffee,
+            borderRadius: BorderRadius.circular(10),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+              decoration: BoxDecoration(color: const Color(0xFFFFDD00).withValues(alpha: 0.1), borderRadius: BorderRadius.circular(10), border: Border.all(color: const Color(0xFFFFDD00).withValues(alpha: 0.35))),
+              child: const Row(children: [
+                Icon(Icons.coffee_outlined, size: 15, color: Color(0xFFFFDD00)),
+                SizedBox(width: 8),
+                Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text('Buy Me a Coffee', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: Color(0xFFFFDD00))),
+                  Text('Support this project', style: TextStyle(fontSize: 9, color: AppColors.textMuted)),
+                ])),
+                Icon(Icons.open_in_new, size: 12, color: AppColors.textMuted),
+              ]),
+            ),
+          ),
+        ),
+      ]),
     );
+  }
+
+  Future<void> _openBuyMeACoffee() async {
+    final uri = Uri.parse('https://buymeacoffee.com/alfirus');
+    try {
+      final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
+      if (!ok && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(backgroundColor: AppColors.surface1, content: Text('Could not open browser — visit buymeacoffee.com/alfirus', style: TextStyle(fontSize: 12, color: AppColors.textSecondary))));
+      }
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(backgroundColor: AppColors.surface1, content: Text('Could not open browser — visit buymeacoffee.com/alfirus', style: TextStyle(fontSize: 12, color: AppColors.textSecondary))));
+    }
   }
 
   Widget _miniStat(String k, String v, Color c) => Padding(
@@ -1513,16 +1919,99 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     return Drawer(
       backgroundColor: const Color(0xFF0A0A0A), width: 380,
       child: SafeArea(child: Column(children: [
-        Container(padding: const EdgeInsets.all(14), decoration: const BoxDecoration(color: AppColors.surface1, border: Border(bottom: BorderSide(color: AppColors.border))), child: Row(children: [Container(width: 36, height: 36, decoration: BoxDecoration(color: AppColors.accentCyan, borderRadius: BorderRadius.circular(8)), child: const Icon(Icons.smart_toy, size: 18, color: Colors.black)), const SizedBox(width: 10), const Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text('AI Assistant', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.textPrimary)), Text('Control center aware', style: TextStyle(fontSize: 10, color: AppColors.textMuted))]))])),
-        Expanded(child: ListView.builder(controller: _chatScroll, padding: const EdgeInsets.all(12), itemCount: _chatMessages.length, itemBuilder: (_, i) {
+        Container(padding: const EdgeInsets.all(14), decoration: const BoxDecoration(color: AppColors.surface1, border: Border(bottom: BorderSide(color: AppColors.border))), child: Row(children: [Container(width: 36, height: 36, decoration: BoxDecoration(color: AppColors.accentCyan, borderRadius: BorderRadius.circular(8)), child: const Icon(Icons.smart_toy, size: 18, color: Colors.black)), const SizedBox(width: 10), Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [const Text('AI Assistant', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.textPrimary)), Text(_aiConfigured ? '$_aiModelName • control center aware' : 'No provider configured', style: const TextStyle(fontSize: 10, color: AppColors.textMuted), maxLines: 1, overflow: TextOverflow.ellipsis)]))])),
+        if (!_aiConfigured)
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.all(20),
+              child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+                Container(width: 56, height: 56, decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(14), border: Border.all(color: AppColors.border)), child: const Icon(Icons.smart_toy_outlined, size: 26, color: AppColors.textMuted)),
+                const SizedBox(height: 14),
+                const Text('AI Assistant is offline', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
+                const SizedBox(height: 6),
+                const Text('Connect an AI provider (OpenAI, Anthropic, Gemini, Ollama…) and pick a model to start chatting with your control center.', style: TextStyle(fontSize: 12, height: 1.4, color: AppColors.textSecondary), textAlign: TextAlign.center),
+                const SizedBox(height: 16),
+                Builder(builder: (drawerCtx) => FilledButton.icon(
+                      onPressed: () {
+                        Navigator.pop(drawerCtx); // close drawer first
+                        _goTo(10); // Settings tab (reloads AI config on return)
+                      },
+                      icon: const Icon(Icons.settings_outlined, size: 15),
+                      label: const Text('CONFIGURE AI PROVIDER', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800)),
+                      style: FilledButton.styleFrom(backgroundColor: AppColors.accentCyan, foregroundColor: Colors.black, padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 13)),
+                    )),
+                const SizedBox(height: 8),
+                const Text('Settings → Integrations → AI Provider', style: TextStyle(fontSize: 10, color: AppColors.textDim, fontFamily: AppFonts.mono)),
+              ]),
+            ),
+          )
+        else ...[
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+          decoration: const BoxDecoration(color: AppColors.surface1, border: Border(bottom: BorderSide(color: AppColors.border))),
+          child: Row(children: [
+            Icon(_aiWriteEnabled ? Icons.edit_note : Icons.visibility_outlined, size: 13, color: _aiWriteEnabled ? AppColors.warning : AppColors.textMuted),
+            const SizedBox(width: 7),
+            const Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text('Write permission', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+              Text('Allow restart, SSH commands, reruns, new issues (each asks first)', style: TextStyle(fontSize: 9, color: AppColors.textMuted)),
+            ])),
+            Switch(
+              value: _aiWriteEnabled,
+              onChanged: (v) async {
+                final prefs = await SharedPreferences.getInstance();
+                await prefs.setBool('ai_write_enabled', v);
+                if (!mounted) return;
+                setState(() => _aiWriteEnabled = v);
+                ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                  backgroundColor: AppColors.surface1,
+                  content: Text(v ? 'Write tools ON — every write still asks for approval' : 'Write tools OFF — assistant is read-only',
+                      style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: v ? AppColors.warning : AppColors.textSecondary)),
+                  duration: const Duration(seconds: 2),
+                ));
+              },
+              activeTrackColor: AppColors.warning,
+              thumbColor: WidgetStateProperty.all(Colors.black),
+            ),
+          ]),
+        ),
+        Expanded(child: ListView.builder(controller: _chatScroll, padding: const EdgeInsets.all(12), itemCount: _chatMessages.length + (_aiTyping ? 1 : 0), itemBuilder: (_, i) {
+          if (_aiTyping && i == _chatMessages.length) {
+            return Align(alignment: Alignment.centerLeft, child: Container(margin: const EdgeInsets.only(bottom: 8), padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10), decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(14), border: Border.all(color: AppColors.border)), child: Row(mainAxisSize: MainAxisSize.min, children: [const SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.accentCyan)), const SizedBox(width: 8), Text('$_aiModelName is thinking…', style: const TextStyle(fontSize: 11, color: AppColors.textMuted))])));
+          }
           final m = _chatMessages[i]; final isUser = m['role']=='user';
-          return Align(alignment: isUser ? Alignment.centerRight : Alignment.centerLeft, child: Container(margin: const EdgeInsets.only(bottom: 8), padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9), constraints: const BoxConstraints(maxWidth: 300), decoration: BoxDecoration(color: isUser ? AppColors.accentCyan : AppColors.surface1, borderRadius: BorderRadius.circular(14), border: Border.all(color: isUser ? AppColors.accentCyan : AppColors.border)), child: Text(m['text']!, style: TextStyle(fontSize: 12, color: isUser ? Colors.black : AppColors.textPrimary))));
+          final isStatus = !isUser && m['text']!.startsWith('_') && m['text']!.endsWith('_');
+          return Align(
+            alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
+            child: Container(
+              margin: const EdgeInsets.only(bottom: 8),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+              constraints: const BoxConstraints(maxWidth: 300),
+              decoration: BoxDecoration(
+                color: isUser ? AppColors.accentCyan : AppColors.surface1,
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: isUser ? AppColors.accentCyan : AppColors.border),
+              ),
+              child: isUser || isStatus
+                  ? SelectableText(m['text']!,
+                      style: TextStyle(fontSize: 12, height: 1.35, fontStyle: isStatus ? FontStyle.italic : FontStyle.normal, color: isUser ? Colors.black : AppColors.textMuted))
+                  : MarkdownBody(
+                      data: m['text']!,
+                      selectable: true,
+                      shrinkWrap: true,
+                      fitContent: false,
+                      styleSheet: _chatMarkdownStyle(),
+                      onTapLink: (text, href, title) {},
+                    ),
+            ),
+          );
         })),
         Container(padding: const EdgeInsets.all(10), decoration: const BoxDecoration(color: AppColors.surface1, border: Border(top: BorderSide(color: AppColors.border))), child: Row(children: [
           Expanded(child: TextField(controller: _chatController, onSubmitted: (_)=> _sendChat(), style: const TextStyle(fontSize: 13, color: AppColors.textPrimary), decoration: InputDecoration(hintText: 'Ask about servers, crons, deploys...', hintStyle: const TextStyle(fontSize: 12, color: AppColors.textMuted), filled: true, fillColor: AppColors.surface2, contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10), border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: AppColors.border)), enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: AppColors.border)), focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: AppColors.accentCyan))))),
           const SizedBox(width: 8),
           FilledButton(onPressed: _sendChat, style: FilledButton.styleFrom(backgroundColor: AppColors.accentCyan, foregroundColor: Colors.black, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)), padding: const EdgeInsets.all(12)), child: const Icon(Icons.send, size: 16)),
         ])),
+        ], // end else (chat UI when provider configured)
       ])),
     );
   }

@@ -446,6 +446,41 @@ WantedBy=multi-user.target
     }
   }
 
+  /// Run one arbitrary command over SSH, return combined stdout (trimmed).
+  /// Used by AI tools (guarded by an allowlist in ai_tools.dart).
+  Future<String> runCommand(ServerConnection s, String cmd, {String? keyPassphrase}) async {
+    List<SSHKeyPair>? keys;
+    String? Function()? passwordCb;
+    if (s.authMethod == AuthMethod.password) {
+      passwordCb = () => s.credential;
+    } else {
+      final loaded = await SshKeyLoader.load(s.credential, passphrase: keyPassphrase);
+      if (loaded.keys == null) {
+        if (loaded.needsPassphrase) {
+          throw Exception('SSH key is encrypted — re-run from the Terminal tab and enter the passphrase there.');
+        }
+        throw Exception(loaded.error ?? 'key load failed');
+      }
+      keys = loaded.keys;
+    }
+    SSHClient? client;
+    try {
+      final socket = await SSHSocket.connect(s.host, s.port, timeout: const Duration(seconds: 10));
+      client = SSHClient(socket, username: s.username, onPasswordRequest: passwordCb, identities: keys ?? const []);
+      await client.authenticated.timeout(const Duration(seconds: 15));
+      final session = await client.execute(cmd);
+      final out = await session.stdout.cast<List<int>>().transform(utf8.decoder).join().timeout(const Duration(seconds: 30));
+      final err = await session.stderr.cast<List<int>>().transform(utf8.decoder).join().timeout(const Duration(seconds: 5));
+      final code = session.exitCode;
+      client.close();
+      final text = (out + (err.isNotEmpty ? '\n[stderr] $err' : '')).trim();
+      return '[exit $code]\n$text';
+    } catch (e) {
+      try { client?.close(); } catch (_) {}
+      rethrow;
+    }
+  }
+
   /// GET http://host:9108/metrics -> {cpu,ram,disk,uptime_days} or null
   Future<Map<String, dynamic>?> fetch(String host) async {
     try {

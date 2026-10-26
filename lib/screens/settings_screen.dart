@@ -7,6 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 import '../theme/app_theme.dart';
 import '../models/server_connection.dart';
+import '../services/ai_service.dart';
 import '../services/github_service.dart';
 import '../services/ssh_key_loader.dart';
 import '../widgets/pitch_card.dart';
@@ -34,6 +35,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _githubVerifying = false;
   final _githubTokenCtrl = TextEditingController();
   final _githubRepoCtrl = TextEditingController();
+  // AI provider
+  AiProvider _aiProvider = AiProvider.openai;
+  String _aiBaseUrl = AiProvider.openai.defaultBaseUrl;
+  String _aiKey = '';
+  String _aiModel = '';
+  List<String> _aiModels = [];
+  bool _aiFetching = false;
+  String? _aiError;
+  final _aiBaseCtrl = TextEditingController();
+  final _aiKeyCtrl = TextEditingController();
+  final _aiModelCtrl = TextEditingController();
 
   @override
   void initState() {
@@ -53,6 +65,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _githubUser = prefs.getString('github_user') ?? '';
       _githubRepos = (prefs.getStringList('github_repos') ?? []).toList();
       _githubTokenCtrl.text = _githubToken;
+      final aiIdx = prefs.getInt('ai_provider') ?? AiProvider.openai.index;
+      _aiProvider = AiProvider.values[aiIdx.clamp(0, AiProvider.values.length - 1)];
+      _aiBaseUrl = prefs.getString('ai_base_url') ?? _aiProvider.defaultBaseUrl;
+      _aiKey = prefs.getString('ai_key') ?? '';
+      _aiModel = prefs.getString('ai_model') ?? '';
+      _aiModels = (prefs.getStringList('ai_models') ?? []).toList();
+      _aiBaseCtrl.text = _aiBaseUrl;
+      _aiKeyCtrl.text = _aiKey;
+      _aiModelCtrl.text = _aiModel;
       _loading = false;
     });
   }
@@ -73,6 +94,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   void dispose() {
     _githubTokenCtrl.dispose();
     _githubRepoCtrl.dispose();
+    _aiBaseCtrl.dispose();
+    _aiKeyCtrl.dispose();
+    _aiModelCtrl.dispose();
     super.dispose();
   }
 
@@ -223,7 +247,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
             child: Column(children: [
               _githubSection(),
               const SizedBox(height: 6),
-              _integrationRow('AI Provider', 'sk-••••••••••••', Icons.smart_toy_outlined, AppColors.accentCyan, 'Configure'),
+              _aiSection(),
+              const SizedBox(height: 6),
               _integrationRow('Sentry / Datadog', 'Not connected', Icons.bug_report_outlined, AppColors.textMuted, 'Add'),
             ]),
             footer: const Text('Server creds + tokens live in SharedPreferences on-device (no cloud). Move secrets to flutter_secure_storage for production.', style: TextStyle(fontSize: 10, color: AppColors.textDim)),
@@ -501,6 +526,218 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _githubUser = '';
       _githubRepos = [];
       _githubTokenCtrl.clear();
+    });
+  }
+
+  /// AI provider: preset + base URL + key, model list auto-fetched
+  /// from the API (/models, /api/tags, …) into a chooser.
+  Widget _aiSection() {
+    final configured = _aiModel.isNotEmpty;
+    return Container(
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(10), border: Border.all(color: configured ? AppColors.accentCyan.withValues(alpha: 0.3) : AppColors.borderLight)),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Container(width: 30, height: 30, decoration: BoxDecoration(color: AppColors.accentCyan.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(7), border: Border.all(color: AppColors.accentCyan.withValues(alpha: 0.2))), child: const Icon(Icons.smart_toy_outlined, size: 14, color: AppColors.accentCyan)),
+          const SizedBox(width: 10),
+          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const Text('AI Provider', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+            Text(configured ? '${_aiProvider.label} • $_aiModel' : 'Pick a provider, add key, fetch models', style: TextStyle(fontSize: 10, color: configured ? AppColors.accentCyan : AppColors.textMuted, fontFamily: 'monospace'), maxLines: 1, overflow: TextOverflow.ellipsis),
+          ])),
+          Container(width: 8, height: 8, decoration: BoxDecoration(color: configured ? AppColors.accentCyan : AppColors.textDim, shape: BoxShape.circle)),
+        ]),
+        const SizedBox(height: 8),
+        // provider preset
+        DropdownButtonFormField<AiProvider>(
+          initialValue: _aiProvider,
+          dropdownColor: AppColors.surface1,
+          style: const TextStyle(fontSize: 12, color: AppColors.textPrimary, fontFamily: 'monospace'),
+          decoration: InputDecoration(labelText: 'Provider', labelStyle: const TextStyle(fontSize: 10, color: AppColors.textMuted), filled: true, fillColor: AppColors.surface2, contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10), border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.border)), enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.border))),
+          items: AiProvider.values.map((p) => DropdownMenuItem(value: p, child: Text(p.label, style: const TextStyle(fontSize: 11)))).toList(),
+          onChanged: (p) {
+            if (p == null) return;
+            setState(() {
+              _aiProvider = p;
+              _aiBaseUrl = p.defaultBaseUrl;
+              _aiBaseCtrl.text = _aiBaseUrl;
+              _aiModels = [];
+              _aiError = null;
+            });
+          },
+        ),
+        const SizedBox(height: 8),
+        Row(children: [
+          Expanded(
+            child: TextField(
+              controller: _aiBaseCtrl,
+              onChanged: (v) => _aiBaseUrl = v.trim(),
+              style: const TextStyle(fontSize: 11, color: AppColors.textPrimary, fontFamily: 'monospace'),
+              decoration: InputDecoration(
+                labelText: 'Base URL', labelStyle: const TextStyle(fontSize: 10, color: AppColors.textMuted),
+                filled: true, fillColor: AppColors.surface2,
+                contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.border)),
+                enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.border)),
+                focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.accentCyan)),
+              ),
+            ),
+          ),
+          if (_aiProvider == AiProvider.openaiCompatible) ...[
+            const SizedBox(width: 8),
+            const Tooltip(message: 'Any OpenAI-compatible endpoint: Together, Groq, Mistral, llama.cpp, vLLM…', child: Icon(Icons.info_outline, size: 14, color: AppColors.textMuted)),
+          ],
+        ]),
+        const SizedBox(height: 8),
+        // key + fetch
+        Row(children: [
+          Expanded(
+            child: TextField(
+              controller: _aiKeyCtrl,
+              obscureText: true,
+              onChanged: (v) => _aiKey = v,
+              style: const TextStyle(fontSize: 11, color: AppColors.textPrimary, fontFamily: 'monospace'),
+              decoration: InputDecoration(
+                labelText: _aiProvider.needsKey ? 'API key' : 'API key (not needed)',
+                hintText: _aiProvider.keyHint,
+                labelStyle: const TextStyle(fontSize: 10, color: AppColors.textMuted),
+                hintStyle: const TextStyle(fontSize: 10, color: AppColors.textMuted, fontFamily: 'monospace'),
+                filled: true, fillColor: AppColors.surface2,
+                contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.border)),
+                enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.border)),
+                focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.accentCyan)),
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          FilledButton(
+            onPressed: _aiFetching ? null : _fetchAiModels,
+            style: FilledButton.styleFrom(backgroundColor: AppColors.accentCyan, foregroundColor: Colors.black, padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12)),
+            child: _aiFetching
+                ? const SizedBox(width: 13, height: 13, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black))
+                : const Text('FETCH MODELS', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800)),
+          ),
+        ]),
+        if (_aiError != null) ...[
+          const SizedBox(height: 6),
+          Row(children: [const Icon(Icons.error_outline, size: 12, color: AppColors.critical), const SizedBox(width: 6), Expanded(child: Text(_aiError!, style: const TextStyle(fontSize: 10, color: AppColors.critical)))]),
+        ],
+        if (_aiModels.isNotEmpty) ...[
+          const SizedBox(height: 8),
+          DropdownButtonFormField<String>(
+            initialValue: _aiModels.contains(_aiModel) ? _aiModel : null,
+            dropdownColor: AppColors.surface1,
+            style: const TextStyle(fontSize: 11, color: AppColors.textPrimary, fontFamily: 'monospace'),
+            decoration: InputDecoration(labelText: 'Model (${_aiModels.length} from API)', labelStyle: const TextStyle(fontSize: 10, color: AppColors.accentCyan, fontWeight: FontWeight.w700), filled: true, fillColor: AppColors.surface2, contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10), border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.accentCyan)), enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.accentCyan))),
+            items: _aiModels.map((m) => DropdownMenuItem(value: m, child: Text(m, style: const TextStyle(fontSize: 11), overflow: TextOverflow.ellipsis))).toList(),
+            onChanged: (m) { if (m != null) _saveAiModel(m); },
+          ),
+        ],
+        // manual model entry (always available — e.g. new releases, Anthropic)
+        const SizedBox(height: 8),
+        Row(children: [
+          Expanded(
+            child: TextField(
+              controller: _aiModelCtrl,
+              onSubmitted: (v) { if (v.trim().isNotEmpty) _saveAiModel(v.trim()); },
+              style: const TextStyle(fontSize: 11, color: AppColors.textPrimary, fontFamily: 'monospace'),
+              decoration: InputDecoration(
+                labelText: 'Or type model ID manually',
+                labelStyle: const TextStyle(fontSize: 10, color: AppColors.textMuted),
+                filled: true, fillColor: AppColors.surface2,
+                contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.border)),
+                enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.border)),
+                focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.accentCyan)),
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          OutlinedButton(onPressed: () { final v = _aiModelCtrl.text.trim(); if (v.isNotEmpty) _saveAiModel(v); }, style: OutlinedButton.styleFrom(foregroundColor: AppColors.accentCyan, side: const BorderSide(color: AppColors.accentCyan), padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 11)), child: const Text('USE', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800))),
+        ]),
+        if (configured) ...[
+          TextButton.icon(
+            onPressed: _disconnectAi,
+            icon: const Icon(Icons.link_off, size: 12),
+            label: const Text('Disconnect provider', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600)),
+            style: TextButton.styleFrom(foregroundColor: AppColors.critical),
+          ),
+        ],
+      ]),
+    );
+  }
+
+  Future<void> _fetchAiModels() async {
+    if (_aiProvider.needsKey && _aiKeyCtrl.text.trim().isEmpty) {
+      setState(() => _aiError = 'API key required for ${_aiProvider.label} (Ollama / LM Studio need none).');
+      return;
+    }
+    setState(() { _aiFetching = true; _aiError = null; });
+    _aiKey = _aiKeyCtrl.text.trim();
+    _aiBaseUrl = _aiBaseCtrl.text.trim().isEmpty ? _aiProvider.defaultBaseUrl : _aiBaseCtrl.text.trim();
+    try {
+      final models = await AiService().listModels(provider: _aiProvider, baseUrl: _aiBaseUrl, apiKey: _aiKey);
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setInt('ai_provider', _aiProvider.index);
+      await prefs.setString('ai_base_url', _aiBaseUrl);
+      await prefs.setString('ai_key', _aiKey);
+      await prefs.setStringList('ai_models', models);
+      // keep current model if still valid, else auto-pick first
+      String model = _aiModel;
+      if (!models.contains(model)) {
+        model = models.first;
+        await prefs.setString('ai_model', model);
+      }
+      if (!mounted) return;
+      setState(() {
+        _aiModels = models;
+        _aiModel = model;
+        _aiModelCtrl.text = model;
+        _aiFetching = false;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(backgroundColor: AppColors.success.withValues(alpha: 0.14), content: Text('${models.length} models from ${_aiProvider.label} ✓ — using $model', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.success))));
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _aiFetching = false;
+        _aiError = e.toString().replaceFirst('Exception: ', '').split('\n').first;
+      });
+    }
+  }
+
+  Future<void> _saveAiModel(String model) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt('ai_provider', _aiProvider.index);
+    await prefs.setString('ai_base_url', _aiBaseUrl);
+    await prefs.setString('ai_key', _aiKeyCtrl.text.trim());
+    await prefs.setString('ai_model', model);
+    if (!mounted) return;
+    setState(() {
+      _aiModel = model;
+      _aiKey = _aiKeyCtrl.text.trim();
+      _aiModelCtrl.text = model;
+    });
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(backgroundColor: AppColors.surface1, content: Text('AI model: $model ✓ (chatbox will use it next)', style: const TextStyle(fontSize: 12, color: AppColors.accentCyan)), duration: const Duration(seconds: 2)));
+  }
+
+  Future<void> _disconnectAi() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('ai_provider');
+    await prefs.remove('ai_base_url');
+    await prefs.remove('ai_key');
+    await prefs.remove('ai_model');
+    await prefs.remove('ai_models');
+    if (!mounted) return;
+    setState(() {
+      _aiProvider = AiProvider.openai;
+      _aiBaseUrl = _aiProvider.defaultBaseUrl;
+      _aiBaseCtrl.text = _aiBaseUrl;
+      _aiKey = '';
+      _aiKeyCtrl.clear();
+      _aiModel = '';
+      _aiModelCtrl.clear();
+      _aiModels = [];
+      _aiError = null;
     });
   }
 

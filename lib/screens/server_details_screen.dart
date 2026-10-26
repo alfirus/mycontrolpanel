@@ -34,6 +34,7 @@ class _ServerDetailsScreenState extends State<ServerDetailsScreen> {
   bool _cronsBusy = false;
   bool _appsBusy = false;
   bool _alertsBusy = false;
+  String? _keyPass; // encrypted-key passphrase, asked once per visit
   bool _installing = false;
   String? _metricsError;
   String? _cronsError;
@@ -82,18 +83,10 @@ class _ServerDetailsScreenState extends State<ServerDetailsScreen> {
     if (c == null) return;
     setState(() { _cronsBusy = true; _cronsError = null; });
     try {
-      String? pass;
-      if (c.authMethod != AuthMethod.password) {
-        final pre = await SshKeyLoader.load(c.credential);
-        if (pre.keys == null && pre.needsPassphrase) {
-          pass = await _askPassphrase();
-          if (pass == null) {
-            if (mounted) setState(() => _cronsBusy = false);
-            return;
-          }
-        } else if (pre.keys == null) {
-          throw Exception(pre.error ?? 'key load failed');
-        }
+      final (proceed, pass) = await _keyPassphrase();
+      if (!proceed) {
+        if (mounted) setState(() => _cronsBusy = false);
+        return;
       }
       final entries = await _agent.fetchCrons(c, keyPassphrase: pass);
       if (!mounted) return;
@@ -109,18 +102,10 @@ class _ServerDetailsScreenState extends State<ServerDetailsScreen> {
     if (c == null) return;
     setState(() { _appsBusy = true; _appsError = null; });
     try {
-      String? pass;
-      if (c.authMethod != AuthMethod.password) {
-        final pre = await SshKeyLoader.load(c.credential);
-        if (pre.keys == null && pre.needsPassphrase) {
-          pass = await _askPassphrase();
-          if (pass == null) {
-            if (mounted) setState(() => _appsBusy = false);
-            return;
-          }
-        } else if (pre.keys == null) {
-          throw Exception(pre.error ?? 'key load failed');
-        }
+      final (proceed, pass) = await _keyPassphrase();
+      if (!proceed) {
+        if (mounted) setState(() => _appsBusy = false);
+        return;
       }
       final entries = await _agent.fetchApps(c, keyPassphrase: pass);
       if (!mounted) return;
@@ -136,18 +121,10 @@ class _ServerDetailsScreenState extends State<ServerDetailsScreen> {
     if (c == null) return;
     setState(() { _alertsBusy = true; _alertsError = null; });
     try {
-      String? pass;
-      if (c.authMethod != AuthMethod.password) {
-        final pre = await SshKeyLoader.load(c.credential);
-        if (pre.keys == null && pre.needsPassphrase) {
-          pass = await _askPassphrase();
-          if (pass == null) {
-            if (mounted) setState(() => _alertsBusy = false);
-            return;
-          }
-        } else if (pre.keys == null) {
-          throw Exception(pre.error ?? 'key load failed');
-        }
+      final (proceed, pass) = await _keyPassphrase();
+      if (!proceed) {
+        if (mounted) setState(() => _alertsBusy = false);
+        return;
       }
       final entries = await _agent.fetchAlerts(c, keyPassphrase: pass);
       if (!mounted) return;
@@ -156,6 +133,21 @@ class _ServerDetailsScreenState extends State<ServerDetailsScreen> {
       if (!mounted) return;
       setState(() { _alertsBusy = false; _alertsError = e.toString().split('\n').first; });
     }
+  }
+
+  /// Resolve key passphrase once per visit (cached for crons/apps/alerts/install).
+  /// Returns (proceed, passphrase). proceed=false means user cancelled.
+  Future<(bool, String?)> _keyPassphrase() async {
+    final c = _conn;
+    if (c == null || c.authMethod == AuthMethod.password) return (true, null);
+    if (_keyPass != null) return (true, _keyPass);
+    final pre = await SshKeyLoader.load(c.credential);
+    if (pre.keys != null) return (true, null);
+    if (!pre.needsPassphrase) throw Exception(pre.error ?? 'key load failed');
+    final pass = await _askPassphrase();
+    if (pass == null) return (false, null);
+    _keyPass = pass;
+    return (true, pass);
   }
 
   Future<String?> _askPassphrase() async {
@@ -180,15 +172,9 @@ class _ServerDetailsScreenState extends State<ServerDetailsScreen> {
     if (c == null) return;
     String? pass;
     if (c.authMethod != AuthMethod.password) {
-      final pre = await SshKeyLoader.load(c.credential);
-      if (pre.keys == null && pre.needsPassphrase) {
-        pass = await _askPassphrase();
-        if (pass == null || pass.isEmpty) return;
-      } else if (pre.keys == null) {
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(backgroundColor: AppColors.critical.withValues(alpha: 0.14), content: Text('Key issue: ${pre.error}', style: const TextStyle(fontSize: 12, color: AppColors.critical)), duration: const Duration(seconds: 5)));
-        return;
-      }
+      final (proceed, cached) = await _keyPassphrase();
+      if (!proceed) return;
+      pass = cached;
     }
     setState(() => _installing = true);
     final lines = <String>[];
