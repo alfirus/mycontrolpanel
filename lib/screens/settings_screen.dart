@@ -7,6 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 import '../theme/app_theme.dart';
 import '../models/server_connection.dart';
+import '../services/github_service.dart';
 import '../services/ssh_key_loader.dart';
 import '../widgets/pitch_card.dart';
 
@@ -26,6 +27,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _notifications = true;
   bool _biometrics = false;
   String _selectedTheme = 'Pitch Black';
+  // GitHub integration
+  String _githubToken = '';
+  String _githubUser = '';
+  List<String> _githubRepos = [];
+  bool _githubVerifying = false;
+  final _githubTokenCtrl = TextEditingController();
+  final _githubRepoCtrl = TextEditingController();
 
   @override
   void initState() {
@@ -41,6 +49,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _autoRefresh = prefs.getBool('auto_refresh') ?? true;
       _refreshInterval = prefs.getDouble('refresh_interval') ?? 15;
       _notifications = prefs.getBool('notifications') ?? true;
+      _githubToken = prefs.getString('github_token') ?? '';
+      _githubUser = prefs.getString('github_user') ?? '';
+      _githubRepos = (prefs.getStringList('github_repos') ?? []).toList();
+      _githubTokenCtrl.text = _githubToken;
       _loading = false;
     });
   }
@@ -55,6 +67,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
     await prefs.setBool('auto_refresh', _autoRefresh);
     await prefs.setDouble('refresh_interval', _refreshInterval);
     await prefs.setBool('notifications', _notifications);
+  }
+
+  @override
+  void dispose() {
+    _githubTokenCtrl.dispose();
+    _githubRepoCtrl.dispose();
+    super.dispose();
   }
 
   void _addOrEdit({ServerConnection? existing}) async {
@@ -200,13 +219,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
           );
           final integrationsCard = PitchCard(
             title: 'INTEGRATIONS',
-            subtitle: 'Tokens stored locally (Keychain)',
+            subtitle: 'Tokens stored locally on this device',
             child: Column(children: [
-              _integrationRow('GitHub', 'ghp_••••••••••••', Icons.code, AppColors.textPrimary, 'Connect'),
+              _githubSection(),
+              const SizedBox(height: 6),
               _integrationRow('AI Provider', 'sk-••••••••••••', Icons.smart_toy_outlined, AppColors.accentCyan, 'Configure'),
               _integrationRow('Sentry / Datadog', 'Not connected', Icons.bug_report_outlined, AppColors.textMuted, 'Add'),
             ]),
-            footer: const Text('Credentials are encrypted via shared_preferences + OS keychain on mobile', style: TextStyle(fontSize: 10, color: AppColors.textDim)),
+            footer: const Text('Server creds + tokens live in SharedPreferences on-device (no cloud). Move secrets to flutter_secure_storage for production.', style: TextStyle(fontSize: 10, color: AppColors.textDim)),
           );
           if (isWide) {
             return Row(crossAxisAlignment: CrossAxisAlignment.start, children: [Expanded(child: prefsCard), const SizedBox(width: 12), Expanded(child: integrationsCard)]);
@@ -318,6 +338,171 @@ class _SettingsScreenState extends State<SettingsScreen> {
       Slider(value: val, min: min, max: max, divisions: 11, activeColor: AppColors.accentCyan, inactiveColor: AppColors.surface2, onChanged: onChanged),
     ]),
   );
+
+  /// GitHub PAT + tracked repos. Verifies via GET /user, stores locally.
+  Widget _githubSection() {
+    final connected = _githubToken.isNotEmpty && _githubUser.isNotEmpty;
+    return Container(
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(10), border: Border.all(color: connected ? AppColors.success.withValues(alpha: 0.3) : AppColors.borderLight)),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Container(width: 30, height: 30, decoration: BoxDecoration(color: AppColors.textPrimary.withValues(alpha: 0.1), borderRadius: BorderRadius.circular(7), border: Border.all(color: AppColors.border)), child: const Icon(Icons.code, size: 14, color: AppColors.textPrimary)),
+          const SizedBox(width: 10),
+          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const Text('GitHub', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+            Text(connected ? '@$_githubUser • ${_githubRepos.length} repo${_githubRepos.length == 1 ? '' : 's'}' : 'Not connected — paste a personal access token', style: TextStyle(fontSize: 10, color: connected ? AppColors.success : AppColors.textMuted, fontFamily: 'monospace')),
+          ])),
+          Container(width: 8, height: 8, decoration: BoxDecoration(color: connected ? AppColors.success : AppColors.textDim, shape: BoxShape.circle)),
+        ]),
+        const SizedBox(height: 8),
+        Row(children: [
+          Expanded(
+            child: TextField(
+              controller: _githubTokenCtrl,
+              obscureText: true,
+              style: const TextStyle(fontSize: 11, color: AppColors.textPrimary, fontFamily: 'monospace'),
+              decoration: InputDecoration(
+                hintText: 'ghp_… / github_pat_… (needs `repo` scope)',
+                hintStyle: const TextStyle(fontSize: 10, color: AppColors.textMuted, fontFamily: 'monospace'),
+                filled: true, fillColor: AppColors.surface2,
+                contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.border)),
+                enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.border)),
+                focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.accentCyan)),
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          FilledButton(
+            onPressed: _githubVerifying ? null : _verifyGithubToken,
+            style: FilledButton.styleFrom(backgroundColor: AppColors.accentCyan, foregroundColor: Colors.black, padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12)),
+            child: _githubVerifying
+                ? const SizedBox(width: 13, height: 13, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black))
+                : Text(connected ? 'UPDATE' : 'CONNECT', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w800)),
+          ),
+        ]),
+        if (connected) ...[
+          if (_githubRepos.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            for (final r in _githubRepos)
+              Container(
+                margin: const EdgeInsets.only(bottom: 5),
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                decoration: BoxDecoration(color: AppColors.surface2, borderRadius: BorderRadius.circular(7), border: Border.all(color: AppColors.border)),
+                child: Row(children: [
+                  const Icon(Icons.book_outlined, size: 12, color: AppColors.textSecondary),
+                  const SizedBox(width: 6),
+                  Expanded(child: Text(r, style: const TextStyle(fontSize: 11, color: AppColors.textPrimary, fontFamily: 'monospace'))),
+                  InkWell(onTap: () => _removeGithubRepo(r), child: const Icon(Icons.close, size: 13, color: AppColors.textMuted)),
+                ]),
+              ),
+          ],
+          const SizedBox(height: 6),
+          Row(children: [
+            Expanded(
+              child: TextField(
+                controller: _githubRepoCtrl,
+                onSubmitted: (_) => _addGithubRepo(),
+                style: const TextStyle(fontSize: 11, color: AppColors.textPrimary, fontFamily: 'monospace'),
+                decoration: InputDecoration(
+                  hintText: 'owner/repo  (e.g. alfirus/mycontrolpanel)',
+                  hintStyle: const TextStyle(fontSize: 10, color: AppColors.textMuted, fontFamily: 'monospace'),
+                  filled: true, fillColor: AppColors.surface2,
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.border)),
+                  enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.border)),
+                  focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.accentCyan)),
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            OutlinedButton.icon(onPressed: _addGithubRepo, icon: const Icon(Icons.add, size: 13), label: const Text('ADD', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800)), style: OutlinedButton.styleFrom(foregroundColor: AppColors.accentCyan, side: const BorderSide(color: AppColors.accentCyan), padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 11))),
+          ]),
+          TextButton.icon(
+            onPressed: _disconnectGithub,
+            icon: const Icon(Icons.link_off, size: 12),
+            label: const Text('Disconnect (delete token)', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600)),
+            style: TextButton.styleFrom(foregroundColor: AppColors.critical),
+          ),
+        ],
+      ]),
+    );
+  }
+
+  Future<void> _verifyGithubToken() async {
+    final token = _githubTokenCtrl.text.trim();
+    if (token.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(backgroundColor: AppColors.surface1, content: Text('Paste a token first', style: TextStyle(fontSize: 12, color: AppColors.warning))));
+      return;
+    }
+    setState(() => _githubVerifying = true);
+    try {
+      final login = await GithubService(token).validate();
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('github_token', token);
+      await prefs.setString('github_user', login);
+      if (!mounted) return;
+      setState(() {
+        _githubToken = token;
+        _githubUser = login;
+        _githubVerifying = false;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(backgroundColor: AppColors.success.withValues(alpha: 0.14), content: Text('GitHub connected as @$login ✓ — add repos below', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.success))));
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _githubVerifying = false);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(backgroundColor: AppColors.critical.withValues(alpha: 0.14), content: Text(e.toString().replaceFirst('Exception: ', '').split('\n').first, style: const TextStyle(fontSize: 12, color: AppColors.critical)), duration: const Duration(seconds: 5)));
+    }
+  }
+
+  Future<void> _addGithubRepo() async {
+    final repo = _githubRepoCtrl.text.trim();
+    if (!RegExp(r'^[\w.\-]+/[\w.\-]+$').hasMatch(repo)) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(backgroundColor: AppColors.surface1, content: Text('Use owner/repo format', style: TextStyle(fontSize: 12, color: AppColors.warning))));
+      return;
+    }
+    if (_githubRepos.contains(repo)) return;
+    // verify repo is reachable with the token before adding
+    try {
+      await GithubService(_githubToken).repoIssues(repo);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(backgroundColor: AppColors.critical.withValues(alpha: 0.14), content: Text('Repo not reachable: ${e.toString().replaceFirst('Exception: ', '').split('\n').first}', style: const TextStyle(fontSize: 12, color: AppColors.critical)), duration: const Duration(seconds: 5)));
+      return;
+    }
+    final prefs = await SharedPreferences.getInstance();
+    final next = [..._githubRepos, repo];
+    await prefs.setStringList('github_repos', next);
+    if (!mounted) return;
+    setState(() {
+      _githubRepos = next;
+      _githubRepoCtrl.clear();
+    });
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(backgroundColor: AppColors.surface1, content: Text('Tracking $repo ✓', style: const TextStyle(fontSize: 12, color: AppColors.success))));
+  }
+
+  Future<void> _removeGithubRepo(String repo) async {
+    final prefs = await SharedPreferences.getInstance();
+    final next = _githubRepos.where((r) => r != repo).toList();
+    await prefs.setStringList('github_repos', next);
+    if (!mounted) return;
+    setState(() => _githubRepos = next);
+  }
+
+  Future<void> _disconnectGithub() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('github_token');
+    await prefs.remove('github_user');
+    await prefs.remove('github_repos');
+    if (!mounted) return;
+    setState(() {
+      _githubToken = '';
+      _githubUser = '';
+      _githubRepos = [];
+      _githubTokenCtrl.clear();
+    });
+  }
 
   Widget _integrationRow(String name, String masked, IconData icon, Color c, String action) => Padding(
     padding: const EdgeInsets.only(bottom: 10),

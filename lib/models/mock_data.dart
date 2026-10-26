@@ -41,7 +41,8 @@ class GithubItem {
   final List<String> labels;
   final DateTime updatedAt;
   final int comments;
-  const GithubItem({required this.title, required this.repo, required this.author, required this.number, required this.state, required this.labels, required this.updatedAt, required this.comments});
+  final List<String> assignees;
+  const GithubItem({required this.title, required this.repo, required this.author, required this.number, required this.state, required this.labels, required this.updatedAt, required this.comments, this.assignees = const []});
 }
 
 class AlertItem {

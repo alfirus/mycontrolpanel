@@ -11,6 +11,7 @@ import '../models/app_entry.dart';
 import '../models/cron_entry.dart';
 import '../models/server_connection.dart';
 import '../services/agent_service.dart';
+import '../services/github_service.dart';
 import '../services/ssh_key_loader.dart';
 import 'server_details_screen.dart';
 import '../widgets/pitch_card.dart';
@@ -55,6 +56,16 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
   Set<String> _alertLoading = {};
   String? _alertError;
   List<AlertEntry> get _realAlerts => _serverAlerts.values.expand((e) => e).toList();
+  // GitHub live state (PAT + repos from Settings)
+  String _ghToken = '';
+  String _ghUser = '';
+  List<String> _ghRepos = [];
+  List<GithubItem> _ghIssues = [];
+  List<GithubItem> _ghPRs = [];
+  List<GithubItem> _ghTasks = [];
+  bool _ghLoading = false;
+  String? _ghError;
+  bool get _ghConfigured => _ghToken.isNotEmpty && _ghRepos.isNotEmpty;
   String? _terminalServerId;
   String? _terminalPrefill;
   int _terminalKey = 0;
@@ -72,8 +83,45 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     final prefs = await SharedPreferences.getInstance();
     final raw = prefs.getString('server_connections');
     if (!mounted) return;
-    setState(() => _savedServers = raw == null ? [] : ServerConnection.decodeList(raw));
+    setState(() {
+      _savedServers = raw == null ? [] : ServerConnection.decodeList(raw);
+      _ghToken = prefs.getString('github_token') ?? '';
+      _ghUser = prefs.getString('github_user') ?? '';
+      _ghRepos = prefs.getStringList('github_repos') ?? [];
+    });
     _pollAgents();
+    _pollGithub();
+  }
+
+  /// Fetch live GitHub Issues/PRs/Tasks for tracked repos.
+  Future<void> _pollGithub() async {
+    if (!_ghConfigured || _ghLoading) return;
+    setState(() { _ghLoading = true; _ghError = null; });
+    try {
+      final svc = GithubService(_ghToken);
+      final issues = <GithubItem>[], prs = <GithubItem>[];
+      for (final repo in _ghRepos) {
+        try { issues.addAll(await svc.repoIssues(repo)); } catch (_) {}
+        try { prs.addAll(await svc.repoPRs(repo)); } catch (_) {}
+      }
+      issues.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+      prs.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+      List<GithubItem> tasks = [];
+      try { tasks = await svc.myTasks(_ghRepos); } catch (_) {}
+      if (!mounted) return;
+      setState(() {
+        _ghIssues = issues;
+        _ghPRs = prs;
+        _ghTasks = tasks;
+        _ghLoading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _ghLoading = false;
+        _ghError = e.toString().replaceFirst('Exception: ', '').split('\n').first;
+      });
+    }
   }
 
   Future<void> _pollAgents() async {
@@ -1048,11 +1096,19 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
   }
 
   Widget _githubSegment({bool compact = false}) {
+    // Live data once a PAT + repos are configured in Settings.
+    if (_ghConfigured && (_ghIssues.isNotEmpty || _ghPRs.isNotEmpty || _ghTasks.isNotEmpty || _ghLoading || _ghError != null)) {
+      return _realGithubCard(compact: compact);
+    }
     final data = _githubTab==0 ? mockIssues : _githubTab==1 ? mockPRs : mockTasks;
     final display = compact ? data.take(2).toList() : data;
     return PitchCard(
-      title: 'GITHUB',
-      trailing: InkWell(onTap: () => _goTo(4), child: compact ? const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan)) : const Text('OPEN →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan))),
+      title: 'GITHUB • DEMO',
+      subtitle: _ghToken.isNotEmpty ? 'Token saved — add repos in Settings to go live' : 'Add a token in Settings to go live',
+      trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+        InkWell(onTap: () => _goTo(10), child: Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), decoration: BoxDecoration(color: AppColors.accentCyan.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(6), border: Border.all(color: AppColors.accentCyan.withValues(alpha: 0.2))), child: const Text('+ CONNECT', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan)))),
+        if (compact) ...[const SizedBox(width: 8), InkWell(onTap: () => _goTo(4), child: const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan)))],
+      ]),
       child: Column(children: [
         ToggleButtons(
           isSelected: [_githubTab==0, _githubTab==1, _githubTab==2], onPressed: (i)=> setState(()=> _githubTab=i),
@@ -1071,6 +1127,95 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
               Row(children: [Text(item.repo.split('/').last, style: const TextStyle(fontSize: 9, color: AppColors.textMuted)), const Spacer(), Pill(text: item.state.toUpperCase(), color: item.state=='open' ? AppColors.success : AppColors.textMuted)]),
             ]),
           ),
+      ]),
+    );
+  }
+
+  /// GitHub rendered from the user's live API data.
+  Widget _realGithubCard({bool compact = false}) {
+    final data = _githubTab == 0 ? _ghIssues : _githubTab == 1 ? _ghPRs : _ghTasks;
+    final display = compact ? data.take(3).toList() : data;
+    final tabName = _githubTab == 0 ? 'issues' : _githubTab == 1 ? 'PRs' : 'tasks';
+    return PitchCard(
+      title: 'GITHUB • @$_ghUser',
+      subtitle: _ghLoading
+          ? 'syncing…'
+          : _ghError != null
+              ? _ghError!
+              : '${_ghRepos.length} repo${_ghRepos.length == 1 ? '' : 's'} • ${_ghIssues.length} issues • ${_ghPRs.length} PRs • ${_ghTasks.length} tasks',
+      trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+        if (_ghLoading) const SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.accentCyan)),
+        if (_ghLoading) const SizedBox(width: 6),
+        InkWell(
+          onTap: () {
+            setState(() { _ghIssues = []; _ghPRs = []; _ghTasks = []; _ghError = null; });
+            _pollGithub();
+          },
+          child: const Row(children: [Icon(Icons.refresh, size: 11, color: AppColors.accentCyan), SizedBox(width: 3), Text('SYNC', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan))]),
+        ),
+        if (compact) ...[const SizedBox(width: 10), InkWell(onTap: () => _goTo(4), child: const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan)))],
+      ]),
+      child: Column(children: [
+        ToggleButtons(
+          isSelected: [_githubTab==0, _githubTab==1, _githubTab==2], onPressed: (i)=> setState(()=> _githubTab=i),
+          borderRadius: BorderRadius.circular(7), selectedColor: Colors.black, fillColor: AppColors.accentCyan, color: AppColors.textSecondary, borderColor: AppColors.border, selectedBorderColor: AppColors.accentCyan,
+          constraints: const BoxConstraints(minHeight: 24, minWidth: 44),
+          children: [Text('Issues (${_ghIssues.length})', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700)), Text('PRs (${_ghPRs.length})', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700)), Text('Tasks (${_ghTasks.length})', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700))],
+        ),
+        const SizedBox(height: 8),
+        if (data.isEmpty && !_ghLoading)
+          Padding(
+            padding: const EdgeInsets.all(12),
+            child: Row(children: [
+              Icon(_ghError != null ? Icons.error_outline : Icons.check_circle, size: 15, color: _ghError != null ? AppColors.warning : AppColors.success),
+              const SizedBox(width: 8),
+              Expanded(child: Text(_ghError ?? 'No open $tabName — queue is clear ✓', style: const TextStyle(fontSize: 11, color: AppColors.textMuted))),
+            ]),
+          )
+        else
+          for (final item in display)
+            Container(
+              margin: const EdgeInsets.only(bottom: 6), padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(8), border: Border.all(color: AppColors.borderLight)),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Row(children: [
+                  Container(padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1), decoration: BoxDecoration(color: AppColors.surface2, borderRadius: BorderRadius.circular(4), border: Border.all(color: AppColors.border)), child: Text('#${item.number}', style: const TextStyle(fontSize: 9, fontWeight: FontWeight.w700, color: AppColors.textSecondary, fontFamily: 'monospace'))),
+                  const SizedBox(width: 5),
+                  Expanded(child: Text(item.title, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: AppColors.textPrimary), maxLines: compact ? 1 : 2, overflow: TextOverflow.ellipsis)),
+                ]),
+                const SizedBox(height: 5),
+                Row(children: [
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                    decoration: BoxDecoration(color: AppColors.accentCyan.withValues(alpha: 0.1), borderRadius: BorderRadius.circular(4), border: Border.all(color: AppColors.accentCyan.withValues(alpha: 0.25))),
+                    child: Row(mainAxisSize: MainAxisSize.min, children: [
+                      const Icon(Icons.book_outlined, size: 8, color: AppColors.accentCyan),
+                      const SizedBox(width: 3),
+                      Text(item.repo.toUpperCase(), style: const TextStyle(fontSize: 8, fontWeight: FontWeight.w800, letterSpacing: 0.3, color: AppColors.accentCyan)),
+                    ]),
+                  ),
+                  const SizedBox(width: 6),
+                  const Icon(Icons.person_outline, size: 10, color: AppColors.textMuted),
+                  const SizedBox(width: 2),
+                  Flexible(child: Text(item.author, style: const TextStyle(fontSize: 10, color: AppColors.textMuted), maxLines: 1, overflow: TextOverflow.ellipsis)),
+                  if (item.labels.isNotEmpty) ...[
+                    const SizedBox(width: 6),
+                    Flexible(child: Text(item.labels.take(2).join(' • '), style: const TextStyle(fontSize: 9, color: AppColors.accentPurple), maxLines: 1, overflow: TextOverflow.ellipsis)),
+                  ],
+                ]),
+                const SizedBox(height: 4),
+                Row(children: [
+                  Text(timeAgo(item.updatedAt), style: const TextStyle(fontSize: 10, color: AppColors.textDim)),
+                  const SizedBox(width: 8),
+                  const Icon(Icons.chat_bubble_outline, size: 10, color: AppColors.textDim),
+                  Text(' ${item.comments}', style: const TextStyle(fontSize: 10, color: AppColors.textDim)),
+                  const Spacer(),
+                  Pill(text: item.state.toUpperCase(), color: item.state == 'open' ? AppColors.success : AppColors.textMuted),
+                ]),
+              ]),
+            ),
+        if (compact && data.length > display.length)
+          Center(child: Text('+ ${data.length - display.length} more • tap VIEW ALL', style: const TextStyle(fontSize: 10, color: AppColors.textMuted, fontWeight: FontWeight.w600))),
       ]),
     );
   }
