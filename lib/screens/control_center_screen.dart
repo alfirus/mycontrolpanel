@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:uuid/uuid.dart';
 import '../theme/app_theme.dart';
 import '../models/mock_data.dart';
@@ -1024,38 +1025,76 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     ];
     return Container(
       width: 220, color: AppColors.pitchBlack,
-      child: ListView(
-        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 10),
-        children: [
-          for (int i = 0; i < items.length; i++)
-            Container(
-              margin: const EdgeInsets.only(bottom: 4),
-              decoration: BoxDecoration(color: _navIndex==i ? AppColors.surface1 : Colors.transparent, borderRadius: BorderRadius.circular(10), border: Border.all(color: _navIndex==i ? AppColors.borderLight : Colors.transparent)),
-              child: ListTile(
-                dense: true, onTap: () => _goTo(i),
-                leading: Container(width: 28, height: 28, decoration: BoxDecoration(color: _navIndex==i ? items[i].$3.withValues(alpha: 0.14) : AppColors.surface2, borderRadius: BorderRadius.circular(7), border: Border.all(color: _navIndex==i ? items[i].$3.withValues(alpha: 0.25) : AppColors.border)), child: Icon(items[i].$2, size: 14, color: _navIndex==i ? items[i].$3 : AppColors.textMuted)),
-                title: Text(items[i].$1, style: TextStyle(fontSize: 12, fontWeight: _navIndex==i ? FontWeight.w700 : FontWeight.w500, color: _navIndex==i ? AppColors.textPrimary : AppColors.textSecondary)),
-                trailing: _navIndex==i ? Container(width: 6, height: 6, decoration: BoxDecoration(color: items[i].$3, shape: BoxShape.circle)) : null,
-                contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 0), minLeadingWidth: 28,
+      child: Column(children: [
+        Expanded(
+          child: ListView(
+            padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 10),
+            children: [
+              for (int i = 0; i < items.length; i++)
+                Container(
+                  margin: const EdgeInsets.only(bottom: 4),
+                  decoration: BoxDecoration(color: _navIndex==i ? AppColors.surface1 : Colors.transparent, borderRadius: BorderRadius.circular(10), border: Border.all(color: _navIndex==i ? AppColors.borderLight : Colors.transparent)),
+                  child: ListTile(
+                    dense: true, onTap: () => _goTo(i),
+                    leading: Container(width: 28, height: 28, decoration: BoxDecoration(color: _navIndex==i ? items[i].$3.withValues(alpha: 0.14) : AppColors.surface2, borderRadius: BorderRadius.circular(7), border: Border.all(color: _navIndex==i ? items[i].$3.withValues(alpha: 0.25) : AppColors.border)), child: Icon(items[i].$2, size: 14, color: _navIndex==i ? items[i].$3 : AppColors.textMuted)),
+                    title: Text(items[i].$1, style: TextStyle(fontSize: 12, fontWeight: _navIndex==i ? FontWeight.w700 : FontWeight.w500, color: _navIndex==i ? AppColors.textPrimary : AppColors.textSecondary)),
+                    trailing: _navIndex==i ? Container(width: 6, height: 6, decoration: BoxDecoration(color: items[i].$3, shape: BoxShape.circle)) : null,
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 0), minLeadingWidth: 28,
+                  ),
+                ),
+              const SizedBox(height: 12),
+              const Divider(), const SizedBox(height: 12),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(color: AppColors.surface0, borderRadius: BorderRadius.circular(12), border: Border.all(color: AppColors.border)),
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  const Text('QUICK STATS', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700, letterSpacing: 0.7, color: AppColors.textMuted)),
+                  const SizedBox(height: 10),
+                  _miniStat('Servers', '${_servers.length}${_useRealServers ? ' real' : ' demo'}', AppColors.accentCyan),
+                  _miniStat('Uptime', '99.92%', AppColors.success),
+                  _miniStat('Incidents', '2 firing', AppColors.critical),
+                  _miniStat('PRs open', '3', AppColors.textSecondary),
+                ]),
               ),
-            ),
-          const SizedBox(height: 12),
-          const Divider(), const SizedBox(height: 12),
-          Container(
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(color: AppColors.surface0, borderRadius: BorderRadius.circular(12), border: Border.all(color: AppColors.border)),
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              const Text('QUICK STATS', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700, letterSpacing: 0.7, color: AppColors.textMuted)),
-              const SizedBox(height: 10),
-              _miniStat('Servers', '${_servers.length}${_useRealServers ? ' real' : ' demo'}', AppColors.accentCyan),
-              _miniStat('Uptime', '99.92%', AppColors.success),
-              _miniStat('Incidents', '2 firing', AppColors.critical),
-              _miniStat('PRs open', '3', AppColors.textSecondary),
-            ]),
+            ],
           ),
-        ],
-      ),
+        ),
+        // Buy Me a Coffee — pinned bottom-left
+        Padding(
+          padding: const EdgeInsets.fromLTRB(10, 4, 10, 10),
+          child: InkWell(
+            onTap: _openBuyMeACoffee,
+            borderRadius: BorderRadius.circular(10),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+              decoration: BoxDecoration(color: const Color(0xFFFFDD00).withValues(alpha: 0.1), borderRadius: BorderRadius.circular(10), border: Border.all(color: const Color(0xFFFFDD00).withValues(alpha: 0.35))),
+              child: const Row(children: [
+                Icon(Icons.coffee_outlined, size: 15, color: Color(0xFFFFDD00)),
+                SizedBox(width: 8),
+                Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text('Buy Me a Coffee', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: Color(0xFFFFDD00))),
+                  Text('Support this project', style: TextStyle(fontSize: 9, color: AppColors.textMuted)),
+                ])),
+                Icon(Icons.open_in_new, size: 12, color: AppColors.textMuted),
+              ]),
+            ),
+          ),
+        ),
+      ]),
     );
+  }
+
+  Future<void> _openBuyMeACoffee() async {
+    final uri = Uri.parse('https://buymeacoffee.com/alfirus');
+    try {
+      final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
+      if (!ok && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(backgroundColor: AppColors.surface1, content: Text('Could not open browser — visit buymeacoffee.com/alfirus', style: TextStyle(fontSize: 12, color: AppColors.textSecondary))));
+      }
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(backgroundColor: AppColors.surface1, content: Text('Could not open browser — visit buymeacoffee.com/alfirus', style: TextStyle(fontSize: 12, color: AppColors.textSecondary))));
+    }
   }
 
   Widget _miniStat(String k, String v, Color c) => Padding(
