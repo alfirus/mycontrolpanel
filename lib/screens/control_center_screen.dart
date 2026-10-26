@@ -1,0 +1,1316 @@
+import 'dart:async';
+import 'dart:io';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:fl_chart/fl_chart.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import '../theme/app_theme.dart';
+import '../models/mock_data.dart';
+import '../models/alert_entry.dart';
+import '../models/app_entry.dart';
+import '../models/cron_entry.dart';
+import '../models/server_connection.dart';
+import '../services/agent_service.dart';
+import '../services/ssh_key_loader.dart';
+import 'server_details_screen.dart';
+import '../widgets/pitch_card.dart';
+import 'settings_screen.dart';
+import 'terminal_screen.dart';
+
+class ControlCenterScreen extends StatefulWidget {
+  const ControlCenterScreen({super.key});
+  @override
+  State<ControlCenterScreen> createState() => _ControlCenterScreenState();
+}
+
+class _ControlCenterScreenState extends State<ControlCenterScreen> {
+  int _navIndex = 0;
+  int _githubTab = 0;
+  String _logFilter = 'ALL';
+  String _serverFilter = 'all';
+  final TextEditingController _chatController = TextEditingController();
+  final List<Map<String, String>> _chatMessages = [
+    {'role': 'assistant', 'text': 'Control Center AI online. Ask me anything.'},
+    {'role': 'user', 'text': 'Show failed crons'},
+    {'role': 'assistant', 'text': '1 failed in last 24h: purge-sessions on prod-core-01. Want me to tail logs?'},
+  ];
+  final ScrollController _chatScroll = ScrollController();
+  final ScrollController _logScroll = ScrollController();
+  Timer? _logTimer;
+  List<LogLine> _liveLogs = List.of(mockLogs);
+  List<ServerConnection> _savedServers = [];
+  bool get _useRealServers => _savedServers.isNotEmpty;
+  final _agent = AgentService();
+  Map<String, Map<String, dynamic>> _metrics = {}; // server id -> {cpu,ram,disk,uptime_days}
+  Set<String> _installing = {};
+  Set<String> _checking = {};
+  Map<String, List<CronEntry>> _serverCrons = {}; // server id -> discovered crons
+  Set<String> _cronLoading = {};
+  String? _cronError;
+  Map<String, List<AppEntry>> _serverApps = {}; // server id -> discovered apps
+  Set<String> _appLoading = {};
+  String? _appError;
+  List<AppEntry> get _realApps => _serverApps.values.expand((e) => e).toList();
+  Map<String, List<AlertEntry>> _serverAlerts = {}; // server id -> harvested alerts
+  Set<String> _alertLoading = {};
+  String? _alertError;
+  List<AlertEntry> get _realAlerts => _serverAlerts.values.expand((e) => e).toList();
+  String? _terminalServerId;
+  String? _terminalPrefill;
+  int _terminalKey = 0;
+
+  List<ServerInfo> get _servers => _useRealServers
+      ? _savedServers.map((c) => ServerInfo(
+            id: c.id, name: c.name, ip: c.host, region: c.region, os: c.os,
+            cpu: 0, ram: 0, disk: 0, latencyMs: 0,
+            status: c.enabled ? Status.operational : Status.maintenance,
+            uptimeDays: 0, sparkline: const [0,0,0,0,0,0,0,0,0],
+          )).toList()
+      : mockServers;
+
+  Future<void> _loadSavedServers() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString('server_connections');
+    if (!mounted) return;
+    setState(() => _savedServers = raw == null ? [] : ServerConnection.decodeList(raw));
+    _pollAgents();
+  }
+
+  Future<void> _pollAgents() async {
+    for (final c in _savedServers) {
+      final m = await _agent.fetch(c.host);
+      if (!mounted) return;
+      if (m != null) setState(() => _metrics[c.id] = m);
+    }
+    _pollCrons();
+    _pollApps();
+    _pollAlerts();
+  }
+
+  /// Harvest alert signals from all saved servers (best-effort).
+  Future<void> _pollAlerts() async {
+    for (final c in _savedServers) {
+      if (_alertLoading.contains(c.id) || _serverAlerts.containsKey(c.id)) continue;
+      setState(() => _alertLoading.add(c.id));
+      try {
+        final entries = await _agent.fetchAlerts(c);
+        if (!mounted) return;
+        setState(() {
+          _serverAlerts[c.id] = entries;
+          _alertLoading.remove(c.id);
+        });
+      } catch (e) {
+        if (!mounted) return;
+        setState(() {
+          _alertLoading.remove(c.id);
+          _alertError = e.toString().split('\n').first;
+        });
+      }
+    }
+  }
+
+  /// Discover apps on all saved servers (best-effort, silent on failure).
+  Future<void> _pollApps() async {
+    for (final c in _savedServers) {
+      if (_appLoading.contains(c.id) || _serverApps.containsKey(c.id)) continue;
+      setState(() => _appLoading.add(c.id));
+      try {
+        final entries = await _agent.fetchApps(c);
+        if (!mounted) return;
+        setState(() {
+          _serverApps[c.id] = entries;
+          _appLoading.remove(c.id);
+        });
+      } catch (e) {
+        if (!mounted) return;
+        setState(() {
+          _appLoading.remove(c.id);
+          _appError = e.toString().split('\n').first;
+        });
+      }
+    }
+  }
+
+  /// Discover crontabs on all saved servers (best-effort, silent on failure).
+  Future<void> _pollCrons() async {
+    for (final c in _savedServers) {
+      if (_cronLoading.contains(c.id) || _serverCrons.containsKey(c.id)) continue;
+      setState(() => _cronLoading.add(c.id));
+      try {
+        final entries = await _agent.fetchCrons(c);
+        if (!mounted) return;
+        setState(() {
+          _serverCrons[c.id] = entries;
+          _cronLoading.remove(c.id);
+        });
+      } catch (e) {
+        if (!mounted) return;
+        setState(() {
+          _cronLoading.remove(c.id);
+          _cronError = e.toString().split('\n').first;
+        });
+      }
+    }
+  }
+
+  Future<void> _installAgent(ServerConnection s) async {
+    // Key auth: resolve the key first (passphrase prompt if encrypted).
+    // Only falls back to the guided manual install when the key can't be
+    // loaded at all (e.g. unreadable path). Otherwise one-click runs directly.
+    String? keyPassphrase;
+    if (s.authMethod != AuthMethod.password) {
+      final pre = await SshKeyLoader.load(s.credential);
+      if (pre.keys == null && pre.needsPassphrase) {
+        keyPassphrase = await _askKeyPassphrase(s);
+        if (keyPassphrase == null || keyPassphrase.isEmpty) return; // cancelled
+      } else if (pre.keys == null) {
+        _showManualInstall(s);
+        return;
+      }
+    }
+    setState(() => _installing.add(s.id));
+    final logLines = <String>[];
+    String status = 'Starting...';
+    // progress dialog
+    if (mounted) {
+      showDialog(
+        context: context, barrierDismissible: false,
+        builder: (ctx) => StatefulBuilder(builder: (ctx, setD) {
+          void onLog(String l) { logLines.add(l); setD(() => status = l.split('\n').last); }
+          // kick off install once
+          if (logLines.isEmpty) {
+            _agent.install(s, onLog, keyPassphrase: keyPassphrase).then((r) async {
+              if (!mounted) return;
+              if (r.success) {
+                final m = await _agent.fetch(s.host);
+                if (m != null && mounted) setState(() => _metrics[s.id] = m);
+              }
+              if (context.mounted) Navigator.pop(context);
+              setState(() => _installing.remove(s.id));
+              if (!mounted) return;
+              ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                backgroundColor: r.success ? AppColors.success.withValues(alpha: 0.14) : AppColors.critical.withValues(alpha: 0.14),
+                content: Text(r.success ? 'Agent installed on ${s.host} — live metrics flowing ✓' : 'Install failed on ${s.host}. Tap INSTALL AGENT to see log.',
+                    style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: r.success ? AppColors.success : AppColors.critical)),
+                duration: const Duration(seconds: 4),
+              ));
+              if (!r.success) {
+                if (r.log == 'SSH_KEY_AUTH') {
+                  _showManualInstall(s);
+                } else if (r.log == 'SSH_KEY_NEEDS_PASSPHRASE') {
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(backgroundColor: AppColors.surface1, content: Text('Key needs a passphrase — enter it to retry one-click, or use manual install.', style: TextStyle(fontSize: 12, color: AppColors.warning)), duration: Duration(seconds: 4)));
+                  }
+                  _showManualInstall(s);
+                } else {
+                  _showInstallLog(s, r.log);
+                }
+              }
+            });
+          }
+          return AlertDialog(
+            backgroundColor: AppColors.surface1,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: const BorderSide(color: AppColors.border)),
+            title: Row(children: [const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.accentCyan)), const SizedBox(width: 10), Expanded(child: Text('Installing agent on ${s.host}', style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.textPrimary)))]),
+            content: SizedBox(width: 320, child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(status, style: const TextStyle(fontSize: 11, color: AppColors.textSecondary, fontFamily: 'monospace'), maxLines: 4, overflow: TextOverflow.ellipsis),
+              const SizedBox(height: 8),
+              const LinearProgressIndicator(color: AppColors.accentCyan, backgroundColor: AppColors.surface2),
+              const SizedBox(height: 8),
+              const Text('Uploads /opt/mcp-agent/agent.py + systemd unit, opens TCP 9108.', style: TextStyle(fontSize: 10, color: AppColors.textDim)),
+            ])),
+          );
+        }),
+      );
+    }
+  }
+
+  Future<String?> _askKeyPassphrase(ServerConnection s) async {
+    final c = TextEditingController();
+    return showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.surface1,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: BorderSide(color: AppColors.accentCyan.withValues(alpha: 0.3))),
+        title: Text('Key passphrase — ${s.host}', style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+        content: SizedBox(
+          width: 320,
+          child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const Text('Your saved key is encrypted. Enter its passphrase to run the one-click install directly — no terminal needed.', style: TextStyle(fontSize: 11, color: AppColors.textSecondary)),
+            const SizedBox(height: 10),
+            TextField(controller: c, obscureText: true, autofocus: true, style: const TextStyle(fontSize: 12, color: AppColors.textPrimary, fontFamily: 'monospace'), decoration: InputDecoration(hintText: 'Key passphrase', hintStyle: const TextStyle(fontSize: 11, color: AppColors.textMuted), filled: true, fillColor: AppColors.surface2, contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10), border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.border)), enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.border)), focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.accentCyan)))),
+          ]),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('CANCEL', style: TextStyle(color: AppColors.textSecondary))),
+          FilledButton(onPressed: () => Navigator.pop(ctx, c.text), style: FilledButton.styleFrom(backgroundColor: AppColors.accentCyan, foregroundColor: Colors.black), child: const Text('INSTALL NOW', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800))),
+        ],
+      ),
+    );
+  }
+
+  /// Guided manual install for SSH-key / non-password connections.
+  /// Shows steps + copyable one-liner + Open Terminal + Verify buttons.
+  void _showManualInstall(ServerConnection s) {
+    final script = AgentService.manualInstallScript();
+    final steps = AgentService.manualSteps(s);
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.surface1,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: const BorderSide(color: AppColors.border)),
+        title: Row(children: [
+          Container(width: 30, height: 30, decoration: BoxDecoration(color: AppColors.warning.withValues(alpha: 0.14), borderRadius: BorderRadius.circular(7)), child: const Icon(Icons.terminal, size: 15, color: AppColors.warning)),
+          const SizedBox(width: 10),
+          Expanded(child: Text('Manual install — ${s.host}', style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.textPrimary))),
+          IconButton(onPressed: () => Navigator.pop(ctx), icon: const Icon(Icons.close, size: 16, color: AppColors.textMuted)),
+        ]),
+        content: SizedBox(
+          width: 460, height: 420,
+          child: SingleChildScrollView(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Container(padding: const EdgeInsets.all(8), decoration: BoxDecoration(color: AppColors.warning.withValues(alpha: 0.08), borderRadius: BorderRadius.circular(8), border: Border.all(color: AppColors.warning.withValues(alpha: 0.2))), child: const Text('One-click install needs password auth. Your connection uses SSH key — follow the guided steps below (60 seconds).', style: TextStyle(fontSize: 11, color: AppColors.textSecondary))),
+            const SizedBox(height: 10),
+            for (final st in steps)
+              Padding(padding: const EdgeInsets.only(bottom: 6), child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Container(margin: const EdgeInsets.only(top: 2), width: 6, height: 6, decoration: const BoxDecoration(color: AppColors.accentCyan, shape: BoxShape.circle)),
+                const SizedBox(width: 8),
+                Expanded(child: SelectableText(st, style: const TextStyle(fontSize: 11, color: AppColors.textPrimary, fontFamily: 'monospace'))),
+              ])),
+            const SizedBox(height: 8),
+            const Text('INSTALL COMMAND (tap to copy)', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, letterSpacing: 0.6, color: AppColors.textMuted)),
+            const SizedBox(height: 4),
+            InkWell(
+              onTap: () {
+                Clipboard.setData(ClipboardData(text: script));
+                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(backgroundColor: AppColors.surface1, content: Text('Install command copied — paste it into your SSH terminal', style: TextStyle(fontSize: 12, color: AppColors.accentCyan)), duration: Duration(seconds: 2)));
+              },
+              child: Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(color: const Color(0xFF050505), borderRadius: BorderRadius.circular(8), border: Border.all(color: AppColors.border)),
+                child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  const Icon(Icons.copy, size: 13, color: AppColors.accentCyan),
+                  const SizedBox(width: 8),
+                  Expanded(child: Text(script, style: const TextStyle(fontSize: 9, color: Color(0xFFE4E4E7), fontFamily: 'monospace'), maxLines: 6, overflow: TextOverflow.ellipsis)),
+                ]),
+              ),
+            ),
+            const SizedBox(height: 6),
+            const Text('Requires: python3 + systemd + sudo on the server. Opens TCP 9108 for /metrics.', style: TextStyle(fontSize: 10, color: AppColors.textDim)),
+          ])),
+        ),
+        actions: [
+          TextButton.icon(onPressed: () { Navigator.pop(ctx); _openInAppTerminal(s); }, icon: const Icon(Icons.terminal, size: 14), label: const Text('OPEN TERMINAL', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800)), style: TextButton.styleFrom(foregroundColor: AppColors.accentCyan)),
+          TextButton.icon(onPressed: () { Clipboard.setData(ClipboardData(text: script)); ScaffoldMessenger.of(context).showSnackBar(const SnackBar(backgroundColor: AppColors.surface1, content: Text('Copied ✓', style: TextStyle(color: AppColors.accentCyan)))); }, icon: const Icon(Icons.copy, size: 14), label: const Text('COPY', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800)), style: TextButton.styleFrom(foregroundColor: AppColors.accentCyan)),
+          FilledButton(onPressed: () async {
+            Navigator.pop(ctx);
+            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(backgroundColor: AppColors.surface1, content: Text('Verifying agent...', style: TextStyle(fontSize: 12, color: AppColors.textSecondary))));
+            final m = await _agent.fetch(s.host);
+            if (!mounted) return;
+            if (m != null) {
+              setState(() => _metrics[s.id] = m);
+              ScaffoldMessenger.of(context).showSnackBar(SnackBar(backgroundColor: AppColors.success.withValues(alpha: 0.14), content: Text('Agent live on ${s.host} ✓ cpu=${m['cpu']} ram=${m['ram']}', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.success))));
+            } else {
+              ScaffoldMessenger.of(context).showSnackBar(SnackBar(backgroundColor: AppColors.critical.withValues(alpha: 0.14), content: Text('Cannot reach http://${s.host}:9108/metrics — check the install ran + firewall open.', style: const TextStyle(fontSize: 12, color: AppColors.critical)), duration: const Duration(seconds: 5)));
+              _showManualInstall(s);
+            }
+          }, style: FilledButton.styleFrom(backgroundColor: AppColors.accentCyan, foregroundColor: Colors.black), child: const Text('VERIFY', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800))),
+        ],
+      ),
+    );
+  }
+
+  // OPEN TERMINAL now opens the BUILT-IN terminal (not the OS one),
+  // preselected to this server with the install command ready to run.
+  void _openInAppTerminal(ServerConnection s) {
+    setState(() {
+      _navIndex = 11;
+      _terminalServerId = s.id;
+      _terminalPrefill = AgentService.manualInstallScript();
+      _terminalKey++; // force rebuild with new prefill
+    });
+    _loadSavedServers();
+  }
+
+  void _showInstallLog(ServerConnection s, String log) {
+    showDialog(context: context, builder: (ctx) => AlertDialog(
+      backgroundColor: AppColors.surface1,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: const BorderSide(color: AppColors.border)),
+      title: Text('Install log — ${s.host}', style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+      content: SizedBox(width: 380, height: 300, child: SingleChildScrollView(child: SelectableText(log, style: const TextStyle(fontSize: 10, color: AppColors.textSecondary, fontFamily: 'monospace')))),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('CLOSE', style: TextStyle(color: AppColors.textSecondary))),
+        FilledButton(onPressed: () { Navigator.pop(ctx); _installAgent(s); }, style: FilledButton.styleFrom(backgroundColor: AppColors.accentCyan, foregroundColor: Colors.black), child: const Text('RETRY')),
+      ],
+    ));
+  }
+
+  Widget _realServerBody(ServerConnection c, ServerInfo s, bool compact) {
+    final m = _metrics[c.id];
+    if (m != null) {
+      final cpu = (m['cpu'] as num).toDouble(), ram = (m['ram'] as num).toDouble(), disk = (m['disk'] as num).toDouble();
+      return Column(children: [
+        Row(children: [
+          Expanded(child: MetricBar(label: 'CPU', value: cpu, color: cpu > 0.75 ? AppColors.critical : AppColors.accentCyan)),
+          const SizedBox(width: 8),
+          Expanded(child: MetricBar(label: 'RAM', value: ram, color: ram > 0.85 ? AppColors.critical : AppColors.accentBlue)),
+          const SizedBox(width: 8),
+          Expanded(child: MetricBar(label: 'DISK', value: disk, color: disk > 0.8 ? AppColors.warning : AppColors.textSecondary)),
+        ]),
+        const SizedBox(height: 6),
+        Row(children: [
+          Container(width: 6, height: 6, decoration: const BoxDecoration(color: AppColors.success, shape: BoxShape.circle)),
+          const SizedBox(width: 6),
+          Text('LIVE • agent :9108 • up ${m['uptime_days']}d', style: const TextStyle(fontSize: 9, fontWeight: FontWeight.w700, color: AppColors.success, letterSpacing: 0.4)),
+          const Spacer(),
+          InkWell(onTap: () => _pollAgents(), child: const Row(children: [Icon(Icons.refresh, size: 11, color: AppColors.textMuted), SizedBox(width: 3), Text('REFRESH', style: TextStyle(fontSize: 9, fontWeight: FontWeight.w800, color: AppColors.textMuted))])),
+        ]),
+      ]);
+    }
+    final busy = _installing.contains(c.id);
+    final checking = _checking.contains(c.id);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+      decoration: BoxDecoration(color: AppColors.surface2, borderRadius: BorderRadius.circular(6), border: Border.all(color: AppColors.border)),
+      child: Column(children: [
+        Row(children: [
+          const Icon(Icons.sensors_off_outlined, size: 14, color: AppColors.warning),
+          const SizedBox(width: 8),
+          const Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text('No metrics agent', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+            Text('Install ran but app cannot see :9108? Tap CHECK.', style: TextStyle(fontSize: 9, color: AppColors.textMuted)),
+          ])),
+        ]),
+        const SizedBox(height: 8),
+        Row(children: [
+          Expanded(
+            child: FilledButton.icon(
+              onPressed: busy ? null : () => _installAgent(c),
+              icon: busy ? const SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black)) : const Icon(Icons.download, size: 12),
+              label: Text(busy ? 'INSTALLING' : 'INSTALL AGENT', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w800)),
+              style: FilledButton.styleFrom(backgroundColor: AppColors.accentCyan, foregroundColor: Colors.black, padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(7))),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: OutlinedButton.icon(
+              onPressed: (busy || checking) ? null : () => _checkAgent(c),
+              icon: checking ? const SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.accentCyan)) : const Icon(Icons.radar, size: 12),
+              label: Text(checking ? 'CHECKING' : 'CHECK :9108', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w800)),
+              style: OutlinedButton.styleFrom(foregroundColor: AppColors.accentCyan, side: const BorderSide(color: AppColors.accentCyan), padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(7))),
+            ),
+          ),
+        ]),
+      ]),
+    );
+  }
+
+  /// Diagnose why :9108 isn't visible: agent down vs firewall vs wrong host.
+  Future<void> _checkAgent(ServerConnection c) async {
+    setState(() => _checking.add(c.id));
+    String verdict;
+    final m = await _agent.fetch(c.host);
+    if (m != null) {
+      if (mounted) setState(() { _metrics[c.id] = m; _checking.remove(c.id); });
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(backgroundColor: AppColors.success.withValues(alpha: 0.14), content: Text('Agent live on ${c.host} ✓ cpu=${m['cpu']} ram=${m['ram']} disk=${m['disk']}', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.success))));
+      return;
+    }
+    // fetch failed — is TCP even open?
+    try {
+      final sock = await Socket.connect(c.host, AgentService.agentPort, timeout: const Duration(seconds: 5));
+      sock.destroy();
+      verdict = 'TCP ${AgentService.agentPort} OPEN but /metrics bad — agent crashed? On server: sudo systemctl status mcp-agent --no-pager && sudo journalctl -u mcp-agent -n 30 --no-pager';
+    } on SocketException catch (e) {
+      final msg = e.osError?.message ?? e.message;
+      if (msg.contains('refused')) {
+        verdict = 'Connection REFUSED on ${c.host}:${AgentService.agentPort} — agent not running. On server run: sudo systemctl status mcp-agent --no-pager (start with: sudo systemctl restart mcp-agent). Did the install finish with AGENT_OK?';
+      } else if (msg.contains('imeout')) {
+        verdict = 'TIMEOUT reaching ${c.host}:${AgentService.agentPort} — firewall/security group blocking, or wrong host IP. Open TCP ${AgentService.agentPort} (AWS: security group inbound; ufw: sudo ufw allow ${AgentService.agentPort}/tcp).';
+      } else {
+        verdict = 'Network error ($msg). Check the host/IP and that this machine can route to it.';
+      }
+    } catch (e) {
+      verdict = 'Check failed: $e';
+    }
+    if (mounted) setState(() => _checking.remove(c.id));
+    if (!mounted) return;
+    showDialog(context: context, builder: (ctx) => AlertDialog(
+      backgroundColor: AppColors.surface1,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: const BorderSide(color: AppColors.border)),
+      title: Row(children: [Container(width: 30, height: 30, decoration: BoxDecoration(color: AppColors.warning.withValues(alpha: 0.14), borderRadius: BorderRadius.circular(7)), child: const Icon(Icons.radar, size: 15, color: AppColors.warning)), const SizedBox(width: 10), Expanded(child: Text('Agent check — ${c.host}', style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.textPrimary)))]),
+      content: SizedBox(width: 380, child: SelectableText(verdict, style: const TextStyle(fontSize: 11, height: 1.4, color: AppColors.textSecondary, fontFamily: 'monospace'))),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('CLOSE', style: TextStyle(color: AppColors.textSecondary))),
+        TextButton.icon(onPressed: () { Navigator.pop(ctx); _openInAppTerminal(c); }, icon: const Icon(Icons.terminal, size: 14), label: const Text('OPEN TERMINAL', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800)), style: TextButton.styleFrom(foregroundColor: AppColors.accentCyan)),
+      ],
+    ));
+  }
+
+  void _goTo(int i) {
+    setState(() => _navIndex = i);
+    _loadSavedServers();
+  }
+
+  /// Open Server Details (pushed over the shell — works from Overview + Servers).
+  void _openServerDetails(String serverId) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => ServerDetailsScreen(
+          serverId: serverId,
+          onOpenTerminal: () {
+            Navigator.pop(context); // back to shell first
+            setState(() {
+              _navIndex = 11;
+              _terminalServerId = serverId;
+              _terminalPrefill = null;
+              _terminalKey++;
+            });
+          },
+        ),
+      ),
+    ).then((_) => _loadSavedServers()); // refresh lists on return
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _loadSavedServers();
+    _logTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+      if (!mounted) return;
+      setState(() {
+        _liveLogs.insert(0, LogLine(time: DateTime.now(), level: ['INFO','INFO','WARN','DEBUG'][DateTime.now().second % 4], source: ['api-gateway','worker-queue','auth-service'][DateTime.now().second % 3], message: 'heartbeat ok ${DateTime.now().second}'));
+        if (_liveLogs.length > 40) _liveLogs = _liveLogs.sublist(0, 40);
+      });
+    });
+  }
+
+  @override
+  void dispose() {
+    _logTimer?.cancel();
+    _chatController.dispose();
+    _chatScroll.dispose();
+    _logScroll.dispose();
+    super.dispose();
+  }
+
+  void _sendChat() {
+    final t = _chatController.text.trim();
+    if (t.isEmpty) return;
+    setState(() {
+      _chatMessages.add({'role': 'user', 'text': t});
+      _chatMessages.add({'role': 'assistant', 'text': _mockAIReply(t)});
+      _chatController.clear();
+    });
+  }
+
+  String _mockAIReply(String q) {
+    q = q.toLowerCase();
+    if (q.contains('server')) {
+      final op = _servers.where((s) => s.status == Status.operational).length;
+      if (!_useRealServers) return '${_servers.length} servers (demo data): $op operational.';
+      final live = _metrics.length;
+      final liveBit = live == _servers.length && live > 0
+          ? ' All reporting live metrics via agent ✓.'
+          : live > 0
+              ? ' $live of ${_servers.length} reporting live; rest need INSTALL AGENT.'
+              : ' No agents reporting yet — tap INSTALL AGENT on a server card.';
+      return '${_servers.length} servers (your saved connections): $op operational.$liveBit';
+    }
+    if (q.contains('cron')) return 'Checked 6 crons: 1 failed (purge-sessions). Recommend retry.';
+    if (q.contains('pr') || q.contains('github')) return 'Open: 3 issues, 3 PRs. Latest PR #91 ready for review.';
+    if (q.contains('deploy')) return 'Last deploy: api-gateway v2.14.3 to prod 22m ago - success.';
+    if (q.contains('security')) return '5 findings: 2 critical. Ack the S3 bucket?';
+    if (q.contains('log')) return 'Tailing logs: ${mockLogs.first.message}';
+    return 'I have context on all segments (servers, crons, apps, GitHub, alerts, deploys, logs, metrics, security).';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isDesktop = MediaQuery.of(context).size.width > 900;
+    return Scaffold(
+      backgroundColor: AppColors.pitchBlack,
+      appBar: _buildAppBar(),
+      drawer: isDesktop ? null : Drawer(backgroundColor: AppColors.pitchBlack, child: _buildSideRail()),
+      endDrawer: _buildChatDrawer(),
+      body: isDesktop ? Row(crossAxisAlignment: CrossAxisAlignment.start, children: [_buildSideRail(), const VerticalDivider(width: 1, color: AppColors.border), Expanded(child: _buildContent())]) : _buildContent(),
+      bottomNavigationBar: isDesktop ? null : _buildBottomNav(),
+    );
+  }
+
+  PreferredSizeWidget _buildAppBar() {
+    final op = _servers.where((s) => s.status == Status.operational).length;
+    return AppBar(
+      centerTitle: false,
+      title: Row(children: [
+        // Back to Overview on every non-Overview tab page.
+        // (Placed in title, not AppBar.leading, so the mobile drawer hamburger is preserved.)
+        if (_navIndex != 0)
+          Padding(
+            padding: const EdgeInsets.only(right: 6),
+            child: InkWell(
+              onTap: () => _goTo(0),
+              borderRadius: BorderRadius.circular(8),
+              child: Container(
+                width: 32, height: 32,
+                decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(8), border: Border.all(color: AppColors.border)),
+                child: const Icon(Icons.arrow_back, size: 16, color: AppColors.textSecondary),
+              ),
+            ),
+          ),
+        Container(width: 32, height: 32, decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(8), border: Border.all(color: AppColors.border)), child: const Icon(Icons.hub_outlined, size: 16, color: AppColors.accentCyan)),
+        const SizedBox(width: 10),
+        const Flexible(child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+          Text('MY CONTROL PANEL', maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 13, fontWeight: FontWeight.w800, letterSpacing: 1.0, color: AppColors.textPrimary)),
+          Text('IT CONTROL CENTER', maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 9, fontWeight: FontWeight.w600, letterSpacing: 0.6, color: AppColors.textMuted)),
+        ])),
+      ]),
+      actions: [
+        Container(
+          margin: const EdgeInsets.only(right: 8),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          decoration: BoxDecoration(color: AppColors.surface0, borderRadius: BorderRadius.circular(20), border: Border.all(color: AppColors.border)),
+          child: Row(children: [
+            StatusDot(color: op == _servers.length && _servers.isNotEmpty ? AppColors.success : AppColors.warning, pulse: true),
+            const SizedBox(width: 8),
+            Text('$op/${_servers.length} OPERATIONAL${_useRealServers ? '' : ' • DEMO'}', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: AppColors.textSecondary, letterSpacing: 0.5)),
+          ]),
+        ),
+        IconButton(onPressed: () => _goTo(10), icon: Container(padding: const EdgeInsets.all(6), decoration: BoxDecoration(color: _navIndex==10 ? AppColors.accentCyan.withValues(alpha:0.2) : AppColors.surface1, borderRadius: BorderRadius.circular(8), border: Border.all(color: _navIndex==10 ? AppColors.accentCyan : AppColors.border)), child: Icon(Icons.settings_outlined, size: 16, color: _navIndex==10 ? AppColors.accentCyan : AppColors.textSecondary))),
+        IconButton(onPressed: (){}, icon: const Icon(Icons.notifications_none, size: 18, color: AppColors.textSecondary)),
+        const SizedBox(width: 4),
+        Builder(builder: (ctx) => IconButton(onPressed: ()=> Scaffold.of(ctx).openEndDrawer(), icon: Container(padding: const EdgeInsets.all(6), decoration: BoxDecoration(color: AppColors.accentCyan, borderRadius: BorderRadius.circular(8)), child: const Icon(Icons.smart_toy_outlined, size: 16, color: Colors.black)))),
+        const SizedBox(width: 12),
+      ],
+    );
+  }
+
+  Widget _buildSideRail() {
+    final items = [
+      ('Overview', Icons.dashboard_outlined, AppColors.accentCyan),
+      ('Servers', Icons.dns_outlined, AppColors.accentBlue),
+      ('Cronjobs', Icons.schedule_outlined, AppColors.accentPurple),
+      ('Apps', Icons.apps_outlined, AppColors.accentGreen),
+      ('GitHub', Icons.code_outlined, AppColors.textPrimary),
+      ('Alerts', Icons.warning_amber_outlined, AppColors.warning),
+      ('Deploys', Icons.rocket_launch_outlined, AppColors.accentCyan),
+      ('Logs', Icons.terminal_outlined, AppColors.textSecondary),
+      ('Metrics', Icons.show_chart_outlined, AppColors.success),
+      ('Security', Icons.shield_outlined, AppColors.critical),
+      ('Settings', Icons.settings_outlined, AppColors.textSecondary),
+      ('Terminal', Icons.terminal_outlined, AppColors.accentCyan),
+    ];
+    return Container(
+      width: 220, color: AppColors.pitchBlack,
+      child: ListView(
+        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 10),
+        children: [
+          for (int i = 0; i < items.length; i++)
+            Container(
+              margin: const EdgeInsets.only(bottom: 4),
+              decoration: BoxDecoration(color: _navIndex==i ? AppColors.surface1 : Colors.transparent, borderRadius: BorderRadius.circular(10), border: Border.all(color: _navIndex==i ? AppColors.borderLight : Colors.transparent)),
+              child: ListTile(
+                dense: true, onTap: () => _goTo(i),
+                leading: Container(width: 28, height: 28, decoration: BoxDecoration(color: _navIndex==i ? items[i].$3.withValues(alpha: 0.14) : AppColors.surface2, borderRadius: BorderRadius.circular(7), border: Border.all(color: _navIndex==i ? items[i].$3.withValues(alpha: 0.25) : AppColors.border)), child: Icon(items[i].$2, size: 14, color: _navIndex==i ? items[i].$3 : AppColors.textMuted)),
+                title: Text(items[i].$1, style: TextStyle(fontSize: 12, fontWeight: _navIndex==i ? FontWeight.w700 : FontWeight.w500, color: _navIndex==i ? AppColors.textPrimary : AppColors.textSecondary)),
+                trailing: _navIndex==i ? Container(width: 6, height: 6, decoration: BoxDecoration(color: items[i].$3, shape: BoxShape.circle)) : null,
+                contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 0), minLeadingWidth: 28,
+              ),
+            ),
+          const SizedBox(height: 12),
+          const Divider(), const SizedBox(height: 12),
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(color: AppColors.surface0, borderRadius: BorderRadius.circular(12), border: Border.all(color: AppColors.border)),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              const Text('QUICK STATS', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700, letterSpacing: 0.7, color: AppColors.textMuted)),
+              const SizedBox(height: 10),
+              _miniStat('Servers', '${_servers.length}${_useRealServers ? ' real' : ' demo'}', AppColors.accentCyan),
+              _miniStat('Uptime', '99.92%', AppColors.success),
+              _miniStat('Incidents', '2 firing', AppColors.critical),
+              _miniStat('PRs open', '3', AppColors.textSecondary),
+            ]),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _miniStat(String k, String v, Color c) => Padding(
+    padding: const EdgeInsets.only(bottom: 6),
+    child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+      Text(k, style: const TextStyle(fontSize: 11, color: AppColors.textMuted)),
+      const SizedBox(width: 6),
+      Flexible(child: Text(v, maxLines: 1, overflow: TextOverflow.ellipsis, textAlign: TextAlign.end, style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: c))),
+    ]),
+  );
+
+  Widget _buildBottomNav() {
+    return Container(
+      decoration: const BoxDecoration(color: AppColors.surface0, border: Border(top: BorderSide(color: AppColors.border))),
+      child: SafeArea(
+        child: SizedBox(height: 64, child: Row(children: [
+          _bottomItem(0, Icons.dashboard, 'Overview'),
+          _bottomItem(1, Icons.dns, 'Servers'),
+          _bottomItem(4, Icons.code, 'GitHub'),
+          _bottomItem(6, Icons.rocket_launch, 'Deploys'),
+          _bottomItem(10, Icons.settings, 'Settings'),
+          Builder(builder: (ctx) => GestureDetector(onTap: ()=> Scaffold.of(ctx).openEndDrawer(), child: Container(margin: const EdgeInsets.all(8), width: 44, height: 44, decoration: BoxDecoration(color: AppColors.accentCyan, borderRadius: BorderRadius.circular(12)), child: const Icon(Icons.smart_toy_outlined, size: 18, color: Colors.black)))),
+        ])),
+      ),
+    );
+  }
+
+  Widget _bottomItem(int idx, IconData icon, String label) => Expanded(child: InkWell(onTap: ()=> _goTo(idx), child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+    Icon(icon, size: 18, color: _navIndex == idx ? AppColors.accentCyan : AppColors.textMuted),
+    const SizedBox(height: 3),
+    Text(label, style: TextStyle(fontSize: 9, fontWeight: FontWeight.w600, color: _navIndex == idx ? AppColors.accentCyan : AppColors.textMuted)),
+  ])));
+
+  Widget _buildContent() {
+    if (_navIndex == 0) return _overviewCompact();
+    if (_navIndex == 1) return SingleChildScrollView(padding: const EdgeInsets.all(12), child: _serversSegment(fullWidth: true));
+    if (_navIndex == 2) return SingleChildScrollView(padding: const EdgeInsets.all(12), child: _cronsSegment());
+    if (_navIndex == 3) return SingleChildScrollView(padding: const EdgeInsets.all(12), child: _appsSegment());
+    if (_navIndex == 4) return SingleChildScrollView(padding: const EdgeInsets.all(12), child: _githubSegment());
+    if (_navIndex == 5) return SingleChildScrollView(padding: const EdgeInsets.all(12), child: _alertsSegment());
+    if (_navIndex == 6) return SingleChildScrollView(padding: const EdgeInsets.all(12), child: _deploysSegment());
+    if (_navIndex == 7) return SingleChildScrollView(padding: const EdgeInsets.all(12), child: _logsSegment());
+    if (_navIndex == 8) return SingleChildScrollView(padding: const EdgeInsets.all(12), child: _metricsSegment());
+    if (_navIndex == 9) return SingleChildScrollView(padding: const EdgeInsets.all(12), child: _securitySegment());
+    if (_navIndex == 10) return const SettingsScreen();
+    return TerminalScreen(key: ValueKey(_terminalKey), initialServerId: _terminalServerId, prefillCommand: _terminalPrefill);
+  }
+
+  /// Status banner that reflects REAL agent state — not hardcoded copy.
+  Widget _overviewBanner() {
+    const gap = 12.0;
+    final live = _metrics.length;
+    final total = _servers.length;
+    final bool allLive = total > 0 && live == total;
+    final bool someLive = live > 0 && live < total;
+    final color = allLive ? AppColors.success : someLive ? AppColors.warning : AppColors.accentCyan;
+    final icon = allLive ? Icons.check_circle : someLive ? Icons.warning_amber : Icons.info_outline;
+    final text = allLive
+        ? 'All $total server${total == 1 ? '' : 's'} reporting live CPU/RAM/DISK via metrics agent ✓'
+        : someLive
+            ? '$live of $total servers live — ${total - live} still need the agent (tap INSTALL AGENT on their cards)'
+            : 'Showing $total saved server${total == 1 ? '' : 's'} — no metrics yet. Tap INSTALL AGENT on a server card to wire live CPU/RAM/DISK.';
+    return Container(
+      margin: const EdgeInsets.only(bottom: gap),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(color: color.withValues(alpha: 0.08), borderRadius: BorderRadius.circular(10), border: Border.all(color: color.withValues(alpha: 0.2))),
+      child: Row(children: [
+        Icon(icon, size: 14, color: color),
+        const SizedBox(width: 8),
+        Expanded(child: Text(text, style: const TextStyle(fontSize: 11, color: AppColors.textSecondary))),
+        InkWell(onTap: () => _goTo(1), child: const Text('SERVERS →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan))),
+      ]),
+    );
+  }
+
+  Widget _overviewCompact() {
+    final isDesktop = MediaQuery.of(context).size.width > 900;
+    const gap = 12.0;
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(12),
+      child: Column(children: [
+        _kpiStrip(),
+        const SizedBox(height: gap),
+        if (_useRealServers) _overviewBanner(),
+        if (isDesktop) ...[
+          Row(crossAxisAlignment: CrossAxisAlignment.start, children: [Expanded(child: _serversSegment(compact: true)), const SizedBox(width: gap), Expanded(child: _appsSegment(compact: true))]),
+          Row(crossAxisAlignment: CrossAxisAlignment.start, children: [Expanded(child: _cronsSegment(compact: true)), const SizedBox(width: gap), Expanded(child: _alertsSegment(compact: true))]),
+          Row(crossAxisAlignment: CrossAxisAlignment.start, children: [Expanded(child: _githubSegment(compact: true)), const SizedBox(width: gap), Expanded(child: _deploysSegment(compact: true))]),
+          Row(crossAxisAlignment: CrossAxisAlignment.start, children: [Expanded(child: _metricsSegment(compact: true)), const SizedBox(width: gap), Expanded(child: _securitySegment(compact: true))]),
+          _logsSegment(compact: true),
+        ] else ...[
+          _serversSegment(compact: true), _appsSegment(compact: true), _cronsSegment(compact: true),
+          _alertsSegment(compact: true), _githubSegment(compact: true), _deploysSegment(compact: true),
+          _metricsSegment(compact: true), _securitySegment(compact: true), _logsSegment(compact: true),
+        ],
+        const SizedBox(height: 8),
+        Text(_useRealServers ? 'MY CONTROL PANEL • ${_servers.length} REAL SERVERS • PITCH BLACK' : 'MY CONTROL PANEL • DEMO DATA • ADD SERVERS IN SETTINGS', style: const TextStyle(fontSize: 9, letterSpacing: 0.7, color: AppColors.textDim, fontWeight: FontWeight.w600)),
+        const SizedBox(height: 4),
+      ]),
+    );
+  }
+
+  Widget _kpiStrip() {
+    final op = _servers.where((s) => s.status == Status.operational).length;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(color: AppColors.surface0, borderRadius: BorderRadius.circular(12), border: Border.all(color: AppColors.border)),
+      child: Row(children: [
+        _kpiCell('SERVERS', '$op/${_servers.length}', _useRealServers ? AppColors.accentCyan : AppColors.success, Icons.dns),
+        _kpiDivider(),
+        _kpiCell('CRONS', '1 FAILED', AppColors.critical, Icons.schedule),
+        _kpiDivider(),
+        _kpiCell('APPS', '4/5 OK', AppColors.success, Icons.apps),
+        _kpiDivider(),
+        _kpiCell('ALERTS', '2 FIRING', AppColors.warning, Icons.warning_amber),
+        _kpiDivider(),
+        _kpiCell('DEPOYS', '4 /24H', AppColors.accentCyan, Icons.rocket_launch),
+        _kpiDivider(),
+        _kpiCell('SECURITY', '2 CRIT', AppColors.critical, Icons.shield),
+      ]),
+    );
+  }
+  Widget _kpiCell(String label, String val, Color c, IconData icon) => Expanded(child: Column(children: [Icon(icon, size: 12, color: c), const SizedBox(height: 3), Text(val, style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: c)), Text(label, style: const TextStyle(fontSize: 8, fontWeight: FontWeight.w700, letterSpacing: 0.5, color: AppColors.textMuted))]));
+  Widget _kpiDivider() => Container(width: 1, height: 28, color: AppColors.border, margin: const EdgeInsets.symmetric(horizontal: 4));
+
+  Widget _serversSegment({bool fullWidth = false, bool compact = false}) {
+    final filtered = _serverFilter == 'all' ? _servers : _servers.where((s) => s.status.name == _serverFilter).toList();
+    final display = compact ? filtered.take(3).toList() : filtered;
+    return PitchCard(
+      title: _useRealServers ? 'SERVER STATUS • ${_servers.length} SAVED' : 'SERVER STATUS • DEMO',
+      subtitle: compact ? '${filtered.length} nodes • ${display.length} shown' : '${filtered.length} nodes • ${_servers.where((s)=>s.status==Status.operational).length} healthy',
+      trailing: compact
+          ? InkWell(onTap: () => _goTo(1), child: const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan)))
+          : (_useRealServers
+              ? InkWell(onTap: () => _goTo(10), child: Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), decoration: BoxDecoration(color: AppColors.accentCyan.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(6), border: Border.all(color: AppColors.accentCyan.withValues(alpha: 0.2))), child: const Text('+ MANAGE', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan))))
+              : Wrap(spacing: 6, children: [_filterChip('all','All'),_filterChip('operational','OK'),_filterChip('degraded','Warn'),_filterChip('down','Down')])),
+      child: Column(children: [
+        if (filtered.isEmpty)
+          Padding(padding: const EdgeInsets.all(16), child: Column(children: [const Icon(Icons.dns_outlined, size: 24, color: AppColors.textMuted), const SizedBox(height: 8), const Text('No servers yet', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: AppColors.textPrimary)), const SizedBox(height: 8), FilledButton(onPressed: () => _goTo(10), style: FilledButton.styleFrom(backgroundColor: AppColors.accentCyan, foregroundColor: Colors.black), child: const Text('ADD SERVER IN SETTINGS', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800)))]))
+        else ...[
+          for (final s in display)
+            Container(
+              margin: EdgeInsets.only(bottom: compact ? 8 : 10),
+              padding: EdgeInsets.all(compact ? 10 : 12),
+              decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(10), border: Border.all(color: AppColors.borderLight)),
+              child: InkWell(
+                onTap: _useRealServers ? () => _openServerDetails(s.id) : null,
+                child: Column(children: [
+                  Row(children: [
+                    StatusDot(color: statusColor(s.status)),
+                    const SizedBox(width: 8),
+                    Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      Row(children: [Flexible(child: Text(s.name, style: TextStyle(color: AppColors.textPrimary, fontSize: compact ? 12 : 13, fontWeight: FontWeight.w700), overflow: TextOverflow.ellipsis)), const SizedBox(width: 5), Container(padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1), decoration: BoxDecoration(color: AppColors.surface2, borderRadius: BorderRadius.circular(4)), child: Text(s.os.split(' ').first, style: const TextStyle(fontSize: 8, color: AppColors.textMuted)))]),
+                      Text('${s.ip} • ${s.region} • ${_useRealServers && s.latencyMs == 0 ? 'no metrics yet' : '${s.latencyMs.toInt()}ms'}', style: TextStyle(fontSize: compact ? 10 : 11, color: AppColors.textMuted)),
+                    ])),
+                    Pill(text: s.status.name.toUpperCase(), color: statusColor(s.status)),
+                  ]),
+                  SizedBox(height: compact ? 6 : 10),
+                  if (_useRealServers)
+                    Builder(builder: (_) {
+                      final conn = _savedServers.firstWhere((e) => e.id == s.id, orElse: () => _savedServers.first);
+                      return _realServerBody(conn, s, compact);
+                    })
+                  else ...[
+                    Row(children: [
+                      Expanded(child: MetricBar(label: 'CPU', value: s.cpu, color: s.cpu > 0.75 ? AppColors.critical : AppColors.accentCyan)),
+                      const SizedBox(width: 8),
+                      Expanded(child: MetricBar(label: 'RAM', value: s.ram, color: s.ram > 0.85 ? AppColors.critical : AppColors.accentBlue)),
+                      const SizedBox(width: 8),
+                      Expanded(child: MetricBar(label: 'DISK', value: s.disk, color: s.disk > 0.8 ? AppColors.warning : AppColors.textSecondary)),
+                    ]),
+                    const SizedBox(height: 6),
+                    SizedBox(height: compact ? 18 : 24, child: _miniSparkline(s.sparkline, s.status==Status.degraded ? AppColors.warning : AppColors.success)),
+                  ],
+                ]),
+              ),
+            ),
+          if (compact && filtered.length > display.length)
+            Container(margin: const EdgeInsets.only(top: 2), padding: const EdgeInsets.symmetric(vertical: 6), decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(8), border: Border.all(color: AppColors.borderLight)), child: Center(child: Text('+ ${filtered.length-display.length} more • tap VIEW ALL', style: const TextStyle(fontSize: 10, color: AppColors.textMuted, fontWeight: FontWeight.w600)))),
+        ],
+      ]),
+      footer: compact ? null : Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+        Text(_useRealServers ? 'Saved locally • Manage in Settings' : 'Demo data • Add servers in Settings', style: const TextStyle(fontSize: 11, color: AppColors.textMuted)),
+        InkWell(onTap: () => _goTo(_useRealServers ? 10 : 1), child: Text(_useRealServers ? 'MANAGE →' : 'VIEW ALL →', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: AppColors.accentCyan))),
+      ]),
+    );
+  }
+
+  Widget _filterChip(String val, String label) => ChoiceChip(
+    label: Text(label, style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: _serverFilter==val ? Colors.black : AppColors.textSecondary)),
+    selected: _serverFilter==val, selectedColor: AppColors.accentCyan, backgroundColor: AppColors.surface2,
+    side: BorderSide(color: _serverFilter==val ? AppColors.accentCyan : AppColors.border),
+    onSelected: (v){ if (v) setState(()=> _serverFilter = val); }, materialTapTargetSize: MaterialTapTargetSize.shrinkWrap, visualDensity: VisualDensity.compact, padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 0),
+  );
+
+  Widget _miniSparkline(List<double> vals, Color c) => LineChart(LineChartData(
+    gridData: const FlGridData(show: false), titlesData: const FlTitlesData(show: false), borderData: FlBorderData(show: false),
+    lineBarsData: [LineChartBarData(spots: [for (int i=0;i<vals.length;i++) FlSpot(i.toDouble(), vals[i])], isCurved: true, color: c, barWidth: 1.6, dotData: const FlDotData(show: false), belowBarData: BarAreaData(show: true, color: c.withValues(alpha: 0.08)))],
+  ));
+
+  /// Real discovered crons across all connected servers (empty until polled).
+  List<CronEntry> get _realCrons => _serverCrons.values.expand((e) => e).toList();
+
+  Widget _cronsSegment({bool compact = false}) {
+    final hasReal = _realCrons.isNotEmpty;
+    final loading = _cronLoading.isNotEmpty;
+    if (_useRealServers && (hasReal || loading)) return _realCronsCard(compact: compact);
+    // demo fallback (no servers, or poll found nothing yet and not loading)
+    final display = compact ? mockCrons.take(3).toList() : mockCrons;
+    return PitchCard(
+      title: _useRealServers ? 'CRONJOBS • SCANNING…' : 'CRONJOBS • DEMO',
+      subtitle: _useRealServers
+          ? 'Discovering crontabs on ${_savedServers.length} server${_savedServers.length == 1 ? '' : 's'}…'
+          : '${mockCrons.length} schedules',
+      trailing: compact ? InkWell(onTap: () => _goTo(2), child: const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan))) : null,
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: DataTable(
+          headingRowHeight: compact ? 28 : 36, dataRowMinHeight: compact ? 30 : 36, dataRowMaxHeight: compact ? 30 : 44,
+          headingRowColor: WidgetStateProperty.all(AppColors.surface2), dataRowColor: WidgetStateProperty.all(Colors.transparent),
+          headingTextStyle: TextStyle(fontSize: compact ? 9 : 10, fontWeight: FontWeight.w700, color: AppColors.textMuted),
+          dataTextStyle: TextStyle(fontSize: compact ? 11 : 12, color: AppColors.textPrimary),
+          columnSpacing: compact ? 14 : 20,
+          columns: const [DataColumn(label: Text('JOB')), DataColumn(label: Text('SCHEDULE')), DataColumn(label: Text('LAST')), DataColumn(label: Text('DUR')), DataColumn(label: Text('STATUS')), DataColumn(label: Text('SERVER'))],
+          rows: display.map((c) => DataRow(cells: [
+            DataCell(Row(children: [Container(width: 5, height: 5, decoration: BoxDecoration(color: cronColor(c.status), shape: BoxShape.circle)), const SizedBox(width: 5), Text(c.name, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 11))])),
+            DataCell(Text(c.schedule, style: const TextStyle(fontFamily: 'monospace', fontSize: 10, color: AppColors.textSecondary))),
+            DataCell(Text(timeAgo(c.lastRun), style: const TextStyle(fontSize: 10, color: AppColors.textSecondary))),
+            DataCell(Text(c.duration, style: const TextStyle(fontSize: 10))),
+            DataCell(Pill(text: c.status.name.toUpperCase(), color: cronColor(c.status))),
+            DataCell(Text(c.server.split('-').last, style: const TextStyle(fontSize: 10, color: AppColors.textMuted))),
+          ])).toList(),
+        ),
+      ),
+    );
+  }
+
+  /// Cronjobs discovered live on the user's servers via SSH.
+  Widget _realCronsCard({bool compact = false}) {
+    final all = _realCrons;
+    final display = compact ? all.take(4).toList() : all;
+    final loading = _cronLoading.isNotEmpty;
+    return PitchCard(
+      title: 'CRONJOBS • ${_savedServers.length} SERVER${_savedServers.length == 1 ? '' : 'S'}',
+      subtitle: '${all.length} jobs discovered${loading ? ' • scanning…' : ''}',
+      trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+        if (loading) const SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.accentCyan)),
+        if (loading) const SizedBox(width: 6),
+        InkWell(
+          onTap: () {
+            setState(() { _serverCrons.clear(); _cronError = null; });
+            _pollCrons();
+          },
+          child: const Row(children: [Icon(Icons.refresh, size: 11, color: AppColors.accentCyan), SizedBox(width: 3), Text('RESCAN', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan))]),
+        ),
+        if (compact) ...[const SizedBox(width: 10), InkWell(onTap: () => _goTo(2), child: const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan)))],
+      ]),
+      child: all.isEmpty
+          ? Padding(
+              padding: const EdgeInsets.all(14),
+              child: Row(children: [
+                const Icon(Icons.schedule_outlined, size: 16, color: AppColors.textMuted),
+                const SizedBox(width: 8),
+                Expanded(child: Text(_cronError ?? 'No crontab entries found on connected servers.', style: const TextStyle(fontSize: 11, color: AppColors.textMuted))),
+              ]),
+            )
+          : Column(children: [
+              for (final e in display)
+                Container(
+                  margin: EdgeInsets.only(bottom: compact ? 6 : 8),
+                  padding: EdgeInsets.all(compact ? 8 : 10),
+                  decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(8), border: Border.all(color: AppColors.borderLight)),
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Row(children: [
+                      Container(width: 6, height: 6, decoration: const BoxDecoration(color: AppColors.success, shape: BoxShape.circle)),
+                      const SizedBox(width: 6),
+                      Expanded(child: Text(e.command, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: AppColors.textPrimary, fontFamily: 'monospace'), maxLines: compact ? 1 : 2, overflow: TextOverflow.ellipsis)),
+                    ]),
+                    const SizedBox(height: 4),
+                    SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: Row(children: [
+                        Text(e.schedule, style: const TextStyle(fontSize: 10, color: AppColors.accentCyan, fontFamily: 'monospace')),
+                        const SizedBox(width: 8),
+                        Pill(text: e.serverName.toUpperCase(), color: AppColors.accentBlue),
+                        const SizedBox(width: 6),
+                        Text(e.source, style: const TextStyle(fontSize: 9, color: AppColors.textMuted, fontFamily: 'monospace')),
+                        const SizedBox(width: 6),
+                        const Pill(text: 'SCHEDULED', color: AppColors.success),
+                      ]),
+                    ),
+                  ]),
+                ),
+              if (compact && all.length > display.length)
+                Center(child: Text('+ ${all.length - display.length} more • tap VIEW ALL', style: const TextStyle(fontSize: 10, color: AppColors.textMuted, fontWeight: FontWeight.w600))),
+            ]),
+      footer: compact
+          ? null
+          : (_cronError != null
+              ? Row(children: [const Icon(Icons.info_outline, size: 12, color: AppColors.warning), const SizedBox(width: 6), Expanded(child: Text('Last scan: $_cronError', style: const TextStyle(fontSize: 10, color: AppColors.warning)))])
+              : Row(children: [const Icon(Icons.check_circle, size: 12, color: AppColors.success), const SizedBox(width: 6), const Expanded(child: Text('Live from crontab • /etc/crontab • /etc/cron.d — rescans on tab switch', style: TextStyle(fontSize: 10, color: AppColors.textMuted)))])),
+    );
+  }
+
+  Widget _appsSegment({bool compact = false}) {
+    // Real discovered apps take over once any server reports them.
+    if (_useRealServers && (_realApps.isNotEmpty || _appLoading.isNotEmpty)) return _realAppsCard(compact: compact);
+    final display = compact ? mockApps.take(3).toList() : mockApps;
+    return PitchCard(
+      title: _useRealServers ? 'APPS • SCANNING…' : 'APPS • DEMO',
+      subtitle: _useRealServers ? 'Discovering services on ${_savedServers.length} server${_savedServers.length == 1 ? '' : 's'}…' : (compact ? '3 of ${mockApps.length} shown' : '${mockApps.length} services'),
+      trailing: compact ? InkWell(onTap: () => _goTo(3), child: const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan))) : null,
+      child: Column(children: display.map((a) => Container(
+        margin: EdgeInsets.only(bottom: compact ? 6 : 10), padding: EdgeInsets.all(compact ? 8 : 11),
+        decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(10), border: Border.all(color: AppColors.borderLight)),
+        child: Row(children: [
+          Container(width: compact ? 28 : 36, height: compact ? 28 : 36, decoration: BoxDecoration(color: AppColors.surface2, borderRadius: BorderRadius.circular(7), border: Border.all(color: AppColors.border)), child: Icon(a.env==AppEnv.prod ? Icons.cloud_done : Icons.science_outlined, size: compact ? 12 : 16, color: a.env==AppEnv.prod ? AppColors.success : AppColors.warning)),
+          const SizedBox(width: 8),
+          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Row(children: [Text(a.name, style: TextStyle(fontSize: compact ? 11 : 12, fontWeight: FontWeight.w700, color: AppColors.textPrimary)), const SizedBox(width: 5), Pill(text: a.env.name.toUpperCase(), color: a.env==AppEnv.prod ? AppColors.success : AppColors.warning)]),
+            Text('${a.rps.toInt()} rps • ${a.errorRate}% err • ${a.containers}◻', style: TextStyle(fontSize: compact ? 10 : 11, color: AppColors.textMuted)),
+          ])),
+          StatusDot(color: statusColor(a.status), pulse: a.status!=Status.operational),
+        ]),
+      )).toList()),
+    );
+  }
+
+  /// Apps discovered live on the user's servers (systemd + docker + ports).
+  Widget _realAppsCard({bool compact = false}) {
+    final all = _realApps;
+    final display = compact ? all.take(4).toList() : all;
+    final loading = _appLoading.isNotEmpty;
+    IconData iconFor(AppEntry a) {
+      switch (a.source) {
+        case 'docker': return Icons.inventory_2_outlined;
+        case 'port': return Icons.hub_outlined;
+        default: return Icons.settings_applications_outlined;
+      }
+    }
+    Color colorFor(AppEntry a) {
+      switch (a.source) {
+        case 'docker': return AppColors.accentBlue;
+        case 'port': return AppColors.accentPurple;
+        default: return AppColors.success;
+      }
+    }
+    return PitchCard(
+      title: 'APPS • ${_savedServers.length} SERVER${_savedServers.length == 1 ? '' : 'S'}',
+      subtitle: '${all.length} services discovered${loading ? ' • scanning…' : ''}',
+      trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+        if (loading) const SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.accentCyan)),
+        if (loading) const SizedBox(width: 6),
+        InkWell(
+          onTap: () {
+            setState(() { _serverApps.clear(); _appError = null; });
+            _pollApps();
+          },
+          child: const Row(children: [Icon(Icons.refresh, size: 11, color: AppColors.accentCyan), SizedBox(width: 3), Text('RESCAN', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan))]),
+        ),
+        if (compact) ...[const SizedBox(width: 10), InkWell(onTap: () => _goTo(3), child: const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan)))],
+      ]),
+      child: all.isEmpty
+          ? Padding(
+              padding: const EdgeInsets.all(14),
+              child: Row(children: [
+                const Icon(Icons.apps_outlined, size: 16, color: AppColors.textMuted),
+                const SizedBox(width: 8),
+                Expanded(child: Text(_appError ?? 'No services found on connected servers.', style: const TextStyle(fontSize: 11, color: AppColors.textMuted))),
+              ]),
+            )
+          : Column(children: [
+              for (final a in display)
+                Container(
+                  margin: EdgeInsets.only(bottom: compact ? 6 : 8),
+                  padding: EdgeInsets.all(compact ? 8 : 10),
+                  decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(8), border: Border.all(color: AppColors.borderLight)),
+                  child: Row(children: [
+                    Container(width: compact ? 28 : 32, height: compact ? 28 : 32, decoration: BoxDecoration(color: colorFor(a).withValues(alpha: 0.12), borderRadius: BorderRadius.circular(7), border: Border.all(color: colorFor(a).withValues(alpha: 0.2))), child: Icon(iconFor(a), size: compact ? 12 : 14, color: colorFor(a))),
+                    const SizedBox(width: 8),
+                    Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      Row(children: [
+                        Flexible(child: Text(a.name, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: AppColors.textPrimary), overflow: TextOverflow.ellipsis)),
+                        const SizedBox(width: 5),
+                        Pill(text: a.source.toUpperCase(), color: colorFor(a)),
+                      ]),
+                      const SizedBox(height: 4),
+                      Row(children: [
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                          decoration: BoxDecoration(color: AppColors.accentCyan.withValues(alpha: 0.1), borderRadius: BorderRadius.circular(4), border: Border.all(color: AppColors.accentCyan.withValues(alpha: 0.25))),
+                          child: Row(mainAxisSize: MainAxisSize.min, children: [
+                            const Icon(Icons.dns, size: 9, color: AppColors.accentCyan),
+                            const SizedBox(width: 3),
+                            Text(a.serverName.toUpperCase(), style: const TextStyle(fontSize: 9, fontWeight: FontWeight.w800, letterSpacing: 0.3, color: AppColors.accentCyan)),
+                          ]),
+                        ),
+                        const SizedBox(width: 6),
+                        Expanded(child: Text(a.detail, style: const TextStyle(fontSize: 10, color: AppColors.textMuted, fontFamily: 'monospace'), maxLines: 1, overflow: TextOverflow.ellipsis)),
+                      ]),
+                    ])),
+                    StatusDot(color: AppColors.success, pulse: false),
+                  ]),
+                ),
+              if (compact && all.length > display.length)
+                Center(child: Text('+ ${all.length - display.length} more • tap VIEW ALL', style: const TextStyle(fontSize: 10, color: AppColors.textMuted, fontWeight: FontWeight.w600))),
+            ]),
+      footer: compact
+          ? null
+          : const Row(children: [Icon(Icons.check_circle, size: 12, color: AppColors.success), SizedBox(width: 6), Expanded(child: Text('Live from systemd • docker • listening ports — rescans on tab switch', style: TextStyle(fontSize: 10, color: AppColors.textMuted)))]),
+    );
+  }
+
+  Widget _githubSegment({bool compact = false}) {
+    final data = _githubTab==0 ? mockIssues : _githubTab==1 ? mockPRs : mockTasks;
+    final display = compact ? data.take(2).toList() : data;
+    return PitchCard(
+      title: 'GITHUB',
+      trailing: InkWell(onTap: () => _goTo(4), child: compact ? const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan)) : const Text('OPEN →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan))),
+      child: Column(children: [
+        ToggleButtons(
+          isSelected: [_githubTab==0, _githubTab==1, _githubTab==2], onPressed: (i)=> setState(()=> _githubTab=i),
+          borderRadius: BorderRadius.circular(7), selectedColor: Colors.black, fillColor: AppColors.accentCyan, color: AppColors.textSecondary, borderColor: AppColors.border, selectedBorderColor: AppColors.accentCyan,
+          constraints: const BoxConstraints(minHeight: 24, minWidth: 44),
+          children: const [Text('Issues', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700)), Text('PRs', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700)), Text('Tasks', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700))],
+        ),
+        const SizedBox(height: 8),
+        for (final item in display)
+          Container(
+            margin: const EdgeInsets.only(bottom: 6), padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(8), border: Border.all(color: AppColors.borderLight)),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Row(children: [Container(padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1), decoration: BoxDecoration(color: AppColors.surface2, borderRadius: BorderRadius.circular(4), border: Border.all(color: AppColors.border)), child: Text('#${item.number}', style: const TextStyle(fontSize: 9, fontWeight: FontWeight.w700, color: AppColors.textSecondary, fontFamily: 'monospace'))), const SizedBox(width: 5), Expanded(child: Text(item.title, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: AppColors.textPrimary), maxLines: 1, overflow: TextOverflow.ellipsis))]),
+              const SizedBox(height: 4),
+              Row(children: [Text(item.repo.split('/').last, style: const TextStyle(fontSize: 9, color: AppColors.textMuted)), const Spacer(), Pill(text: item.state.toUpperCase(), color: item.state=='open' ? AppColors.success : AppColors.textMuted)]),
+            ]),
+          ),
+      ]),
+    );
+  }
+
+  Widget _alertsSegment({bool compact = false}) {
+    // Connected servers ALWAYS get the real card (with server badges) —
+    // never demo alerts. Empty/error states explain themselves inside.
+    if (_useRealServers) return _realAlertsCard(compact: compact);
+    final display = compact ? mockAlerts.take(3).toList() : mockAlerts;
+    return PitchCard(
+      title: _useRealServers ? 'ALERTS • SCANNING…' : 'ALERTS • DEMO',
+      subtitle: _useRealServers ? 'Harvesting signals from ${_savedServers.length} server${_savedServers.length == 1 ? '' : 's'}…' : '${mockAlerts.where((a)=>a.status=='firing').length} firing',
+      trailing: compact ? InkWell(onTap: () => _goTo(5), child: const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan))) : null,
+      child: Column(children: display.map((a) => Container(
+        margin: EdgeInsets.only(bottom: compact ? 6 : 8), padding: EdgeInsets.all(compact ? 8 : 10),
+        decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(8), border: Border.all(color: a.severity=='critical' ? AppColors.critical.withValues(alpha: 0.3) : AppColors.borderLight)),
+        child: Row(children: [
+          Container(width: compact ? 22 : 28, height: compact ? 22 : 28, decoration: BoxDecoration(color: severityColor(a.severity).withValues(alpha: 0.12), borderRadius: BorderRadius.circular(6)), child: Icon(a.severity=='critical' ? Icons.error_outline : a.severity=='warning' ? Icons.warning_amber : Icons.info_outline, size: compact ? 11 : 14, color: severityColor(a.severity))),
+          const SizedBox(width: 8),
+          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(a.title, style: TextStyle(fontSize: compact ? 11 : 12, fontWeight: FontWeight.w600, color: AppColors.textPrimary), maxLines: 1, overflow: TextOverflow.ellipsis),
+            Text('${a.source.split('•').first.trim()} • ${timeAgo(a.time)}', style: const TextStyle(fontSize: 9, color: AppColors.textMuted)),
+          ])),
+          Pill(text: a.status.toUpperCase(), color: a.status=='firing' ? AppColors.critical : AppColors.success),
+        ]),
+      )).toList()),
+    );
+  }
+
+  /// Alerts harvested live from the user's servers.
+  Widget _realAlertsCard({bool compact = false}) {
+    final all = _realAlerts;
+    final display = compact ? all.take(3).toList() : all;
+    final loading = _alertLoading.isNotEmpty;
+    final firing = all.where((a) => a.status == 'firing').length;
+    return PitchCard(
+      title: 'ALERTS • ${_savedServers.length} SERVER${_savedServers.length == 1 ? '' : 'S'}',
+      subtitle: all.isEmpty ? (loading ? 'scanning…' : 'no firing signals ✓') : '$firing firing • ${all.length} total',
+      trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+        if (loading) const SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.accentCyan)),
+        if (loading) const SizedBox(width: 6),
+        InkWell(
+          onTap: () {
+            setState(() { _serverAlerts.clear(); _alertError = null; });
+            _pollAlerts();
+          },
+          child: const Row(children: [Icon(Icons.refresh, size: 11, color: AppColors.accentCyan), SizedBox(width: 3), Text('RESCAN', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan))]),
+        ),
+        if (compact) ...[const SizedBox(width: 10), InkWell(onTap: () => _goTo(5), child: const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan)))],
+      ]),
+      child: all.isEmpty
+          ? Padding(
+              padding: const EdgeInsets.all(14),
+              child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Icon(loading ? Icons.radar : (_alertError != null ? Icons.error_outline : Icons.check_circle), size: 16, color: loading ? AppColors.accentCyan : (_alertError != null ? AppColors.warning : AppColors.success)),
+                const SizedBox(width: 8),
+                Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text(
+                    loading
+                        ? 'Harvesting signals via SSH…'
+                        : (_alertError ?? 'Healthy — no failed units, disk OK, no brute force, load normal.'),
+                    style: const TextStyle(fontSize: 11, color: AppColors.textMuted),
+                  ),
+                  if (!loading && _alertError != null) ...[
+                    const SizedBox(height: 6),
+                    ..._savedServers.map((s) => Padding(
+                          padding: const EdgeInsets.only(bottom: 3),
+                          child: Row(children: [
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                              decoration: BoxDecoration(color: AppColors.surface2, borderRadius: BorderRadius.circular(4), border: Border.all(color: AppColors.border)),
+                              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                                const Icon(Icons.dns, size: 8, color: AppColors.textMuted),
+                                const SizedBox(width: 3),
+                                Text(s.name.toUpperCase(), style: const TextStyle(fontSize: 8, fontWeight: FontWeight.w800, letterSpacing: 0.3, color: AppColors.textSecondary)),
+                              ]),
+                            ),
+                            const SizedBox(width: 6),
+                            const Expanded(child: Text('scan failed — tap RESCAN', style: TextStyle(fontSize: 10, color: AppColors.textMuted))),
+                          ]),
+                        )),
+                  ],
+                ])),
+              ]),
+            )
+          : Column(children: [
+              for (final a in display)
+                Container(
+                  margin: EdgeInsets.only(bottom: compact ? 6 : 8),
+                  padding: EdgeInsets.all(compact ? 8 : 10),
+                  decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(8), border: Border.all(color: a.severity == 'critical' ? AppColors.critical.withValues(alpha: 0.3) : AppColors.borderLight)),
+                  child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Container(width: compact ? 22 : 28, height: compact ? 22 : 28, decoration: BoxDecoration(color: severityColor(a.severity).withValues(alpha: 0.12), borderRadius: BorderRadius.circular(6)), child: Icon(a.severity == 'critical' ? Icons.error_outline : a.severity == 'warning' ? Icons.warning_amber : Icons.info_outline, size: compact ? 11 : 14, color: severityColor(a.severity))),
+                    const SizedBox(width: 8),
+                    Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      Text(a.title, style: TextStyle(fontSize: compact ? 11 : 12, fontWeight: FontWeight.w600, color: AppColors.textPrimary), maxLines: compact ? 1 : 2, overflow: TextOverflow.ellipsis),
+                      const SizedBox(height: 3),
+                      Row(children: [
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                          decoration: BoxDecoration(color: AppColors.accentCyan.withValues(alpha: 0.1), borderRadius: BorderRadius.circular(4), border: Border.all(color: AppColors.accentCyan.withValues(alpha: 0.25))),
+                          child: Row(mainAxisSize: MainAxisSize.min, children: [
+                            const Icon(Icons.dns, size: 8, color: AppColors.accentCyan),
+                            const SizedBox(width: 3),
+                            Text(a.serverName.toUpperCase(), style: const TextStyle(fontSize: 8, fontWeight: FontWeight.w800, letterSpacing: 0.3, color: AppColors.accentCyan)),
+                          ]),
+                        ),
+                        const SizedBox(width: 6),
+                        Expanded(child: Text(a.source, style: const TextStyle(fontSize: 9, color: AppColors.textMuted), maxLines: 1, overflow: TextOverflow.ellipsis)),
+                      ]),
+                    ])),
+                    const SizedBox(width: 6),
+                    Pill(text: a.status.toUpperCase(), color: a.status == 'firing' ? AppColors.critical : AppColors.success),
+                  ]),
+                ),
+              if (compact && all.length > display.length)
+                Center(child: Text('+ ${all.length - display.length} more • tap VIEW ALL', style: const TextStyle(fontSize: 10, color: AppColors.textMuted, fontWeight: FontWeight.w600))),
+            ]),
+      footer: compact
+          ? null
+          : const Row(children: [Icon(Icons.check_circle, size: 12, color: AppColors.success), SizedBox(width: 6), Expanded(child: Text('Live: failed units • disk • SSH brute force • load • kernel • uptime', style: TextStyle(fontSize: 10, color: AppColors.textMuted)))]),
+    );
+  }
+
+  Widget _deploysSegment({bool compact = false}) {
+    final display = compact ? mockDeploys.take(3).toList() : mockDeploys;
+    return PitchCard(
+      title: 'CI/CD', subtitle: compact ? '3 of ${mockDeploys.length}' : 'Last 6 deployments',
+      trailing: compact ? InkWell(onTap: () => _goTo(6), child: const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan))) : null,
+      child: Column(children: display.map((d) => Container(
+        margin: EdgeInsets.only(bottom: compact ? 6 : 8), padding: EdgeInsets.all(compact ? 8 : 10),
+        decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(8), border: Border.all(color: AppColors.borderLight)),
+        child: Row(children: [
+          Container(width: compact ? 26 : 32, height: compact ? 26 : 32, decoration: BoxDecoration(color: d.status=='success' ? AppColors.success.withValues(alpha: 0.12) : AppColors.critical.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(7)), child: Icon(d.status=='success' ? Icons.check : Icons.close, size: compact ? 11 : 14, color: d.status=='success' ? AppColors.success : AppColors.critical)),
+          const SizedBox(width: 8),
+          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Row(children: [Text(d.app, style: TextStyle(fontSize: compact ? 11 : 12, fontWeight: FontWeight.w700, color: AppColors.textPrimary)), const SizedBox(width: 5), Text(d.version, style: const TextStyle(fontSize: 10, color: AppColors.accentCyan, fontFamily: 'monospace'))]),
+            Text('by ${d.actor} • ${timeAgo(d.time)}', style: const TextStyle(fontSize: 9, color: AppColors.textMuted)),
+          ])),
+        ]),
+      )).toList()),
+    );
+  }
+
+  Widget _logsSegment({bool compact = false}) {
+    final filtered = _logFilter=='ALL' ? _liveLogs : _liveLogs.where((l)=> l.level==_logFilter).toList();
+    final display = compact ? filtered.take(6).toList() : filtered;
+    return PitchCard(
+      title: 'LIVE LOG TAIL',
+      trailing: compact ? InkWell(onTap: () => _goTo(7), child: const Text('EXPAND →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan))) : null,
+      child: Container(
+        height: compact ? 160 : 280,
+        decoration: BoxDecoration(color: const Color(0xFF050505), borderRadius: BorderRadius.circular(10), border: Border.all(color: AppColors.border)),
+        child: Column(children: [
+          Container(padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5), decoration: const BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.vertical(top: Radius.circular(10))), child: const Row(children: [Icon(Icons.circle, size: 7, color: AppColors.success), SizedBox(width: 6), Text('● LIVE', style: TextStyle(fontSize: 9, fontWeight: FontWeight.w800, color: AppColors.success))])),
+          Expanded(child: ListView.builder(padding: const EdgeInsets.all(7), itemCount: display.length, itemBuilder: (_, i) {
+            final l = display[i];
+            Color lvlColor = l.level=='ERROR' ? AppColors.critical : l.level=='WARN' ? AppColors.warning : AppColors.success;
+            return Padding(padding: const EdgeInsets.only(bottom: 2), child: Row(children: [
+              Container(padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 1), decoration: BoxDecoration(color: lvlColor.withValues(alpha: 0.14), borderRadius: BorderRadius.circular(3)), child: Text(l.level, style: TextStyle(fontSize: 8, fontWeight: FontWeight.w800, color: lvlColor))),
+              const SizedBox(width: 5),
+              Expanded(child: Text(l.message, style: const TextStyle(fontSize: 9, color: Color(0xFFE4E4E7), fontFamily: 'monospace'), maxLines: 1, overflow: TextOverflow.ellipsis)),
+            ]));
+          })),
+        ]),
+      ),
+    );
+  }
+
+  Widget _metricsSegment({bool compact = false}) {
+    return PitchCard(
+      title: 'METRICS',
+      trailing: compact ? InkWell(onTap: () => _goTo(8), child: const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan))) : null,
+      child: Column(children: [
+        SizedBox(
+          height: compact ? 110 : 160,
+          child: LineChart(LineChartData(
+            gridData: FlGridData(show: true, drawVerticalLine: false, horizontalInterval: 20, getDrawingHorizontalLine: (v)=> FlLine(color: AppColors.border, strokeWidth: 0.6)),
+            titlesData: const FlTitlesData(leftTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)), bottomTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)), topTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)), rightTitles: AxisTitles(sideTitles: SideTitles(showTitles: false))),
+            borderData: FlBorderData(show: true, border: const Border(bottom: BorderSide(color: AppColors.border), left: BorderSide(color: AppColors.border))),
+            lineBarsData: [
+              LineChartBarData(spots: const [FlSpot(0,35),FlSpot(1,42),FlSpot(2,38),FlSpot(3,55),FlSpot(4,48)], isCurved: true, color: AppColors.accentCyan, barWidth: 1.8, dotData: const FlDotData(show: false), belowBarData: BarAreaData(show: true, color: AppColors.accentCyan.withValues(alpha: 0.08))),
+            ],
+          )),
+        ),
+        const SizedBox(height: 8),
+        Row(children: [
+          _metricKpi('Uptime', '99.92%', AppColors.success, compact: compact),
+          const SizedBox(width: 6),
+          _metricKpi('p95', _useRealServers ? '—' : '48ms', AppColors.accentCyan, compact: compact),
+          const SizedBox(width: 6),
+          _metricKpi('Errors', '0.31%', AppColors.warning, compact: compact),
+          const SizedBox(width: 6),
+          _metricKpi('Req/min', '6.2k', AppColors.textPrimary, compact: compact),
+        ]),
+      ]),
+    );
+  }
+
+  Widget _metricKpi(String label, String value, Color c, {bool compact=false}) => Expanded(child: Container(
+    padding: EdgeInsets.all(compact ? 6 : 8),
+    decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(8), border: Border.all(color: AppColors.borderLight)),
+    child: Column(children: [Text(value, style: TextStyle(fontSize: compact ? 11 : 13, fontWeight: FontWeight.w800, color: c)), Text(label, style: TextStyle(fontSize: compact ? 8 : 9, color: AppColors.textMuted))]),
+  ));
+
+  Widget _securitySegment({bool compact = false}) {
+    final display = compact ? mockSecurity.take(3).toList() : mockSecurity;
+    return PitchCard(
+      title: 'SECURITY',
+      trailing: compact ? InkWell(onTap: () => _goTo(9), child: const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan))) : null,
+      child: Column(children: display.map((s) => Container(
+        margin: EdgeInsets.only(bottom: compact ? 6 : 8), padding: EdgeInsets.all(compact ? 8 : 10),
+        decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(8), border: Border.all(color: s.severity=='critical' ? AppColors.critical.withValues(alpha: 0.25) : AppColors.borderLight)),
+        child: Row(children: [
+          Container(width: compact ? 22 : 28, height: compact ? 22 : 28, decoration: BoxDecoration(color: severityColor(s.severity).withValues(alpha: 0.12), borderRadius: BorderRadius.circular(6)), child: Icon(Icons.shield_outlined, size: compact ? 11 : 14, color: severityColor(s.severity))),
+          const SizedBox(width: 8),
+          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(s.title, style: TextStyle(fontSize: compact ? 10 : 11, fontWeight: FontWeight.w600, color: AppColors.textPrimary), maxLines: 1, overflow: TextOverflow.ellipsis),
+            Row(children: [Pill(text: s.severity.toUpperCase(), color: severityColor(s.severity)), const SizedBox(width: 5), Text(s.category, style: const TextStyle(fontSize: 9, color: AppColors.textMuted))]),
+          ])),
+        ]),
+      )).toList()),
+    );
+  }
+
+  Widget _buildChatDrawer() {
+    return Drawer(
+      backgroundColor: const Color(0xFF0A0A0A), width: 380,
+      child: SafeArea(child: Column(children: [
+        Container(padding: const EdgeInsets.all(14), decoration: const BoxDecoration(color: AppColors.surface1, border: Border(bottom: BorderSide(color: AppColors.border))), child: Row(children: [Container(width: 36, height: 36, decoration: BoxDecoration(color: AppColors.accentCyan, borderRadius: BorderRadius.circular(8)), child: const Icon(Icons.smart_toy, size: 18, color: Colors.black)), const SizedBox(width: 10), const Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text('AI Assistant', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.textPrimary)), Text('Control center aware', style: TextStyle(fontSize: 10, color: AppColors.textMuted))]))])),
+        Expanded(child: ListView.builder(controller: _chatScroll, padding: const EdgeInsets.all(12), itemCount: _chatMessages.length, itemBuilder: (_, i) {
+          final m = _chatMessages[i]; final isUser = m['role']=='user';
+          return Align(alignment: isUser ? Alignment.centerRight : Alignment.centerLeft, child: Container(margin: const EdgeInsets.only(bottom: 8), padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9), constraints: const BoxConstraints(maxWidth: 300), decoration: BoxDecoration(color: isUser ? AppColors.accentCyan : AppColors.surface1, borderRadius: BorderRadius.circular(14), border: Border.all(color: isUser ? AppColors.accentCyan : AppColors.border)), child: Text(m['text']!, style: TextStyle(fontSize: 12, color: isUser ? Colors.black : AppColors.textPrimary))));
+        })),
+        Container(padding: const EdgeInsets.all(10), decoration: const BoxDecoration(color: AppColors.surface1, border: Border(top: BorderSide(color: AppColors.border))), child: Row(children: [
+          Expanded(child: TextField(controller: _chatController, onSubmitted: (_)=> _sendChat(), style: const TextStyle(fontSize: 13, color: AppColors.textPrimary), decoration: InputDecoration(hintText: 'Ask about servers, crons, deploys...', hintStyle: const TextStyle(fontSize: 12, color: AppColors.textMuted), filled: true, fillColor: AppColors.surface2, contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10), border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: AppColors.border)), enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: AppColors.border)), focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: AppColors.accentCyan))))),
+          const SizedBox(width: 8),
+          FilledButton(onPressed: _sendChat, style: FilledButton.styleFrom(backgroundColor: AppColors.accentCyan, foregroundColor: Colors.black, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)), padding: const EdgeInsets.all(12)), child: const Icon(Icons.send, size: 16)),
+        ])),
+      ])),
+    );
+  }
+}
