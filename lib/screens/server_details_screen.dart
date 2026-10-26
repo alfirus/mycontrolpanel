@@ -166,7 +166,7 @@ class _ServerDetailsScreenState extends State<ServerDetailsScreen> {
         backgroundColor: AppColors.surface1,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: const BorderSide(color: AppColors.border)),
         title: const Text('Key passphrase', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
-        content: TextField(controller: c, obscureText: true, autofocus: true, style: const TextStyle(fontSize: 12, color: AppColors.textPrimary, fontFamily: 'monospace'), decoration: InputDecoration(hintText: 'Passphrase', hintStyle: const TextStyle(fontSize: 11, color: AppColors.textMuted), filled: true, fillColor: AppColors.surface2, border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.border)), enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.border)))),
+        content: TextField(controller: c, obscureText: true, autofocus: true, style: const TextStyle(fontSize: 12, color: AppColors.textPrimary, fontFamily: AppFonts.mono), decoration: InputDecoration(hintText: 'Passphrase', hintStyle: const TextStyle(fontSize: 11, color: AppColors.textMuted), filled: true, fillColor: AppColors.surface2, border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.border)), enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.border)))),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('CANCEL', style: TextStyle(color: AppColors.textSecondary))),
           FilledButton(onPressed: () => Navigator.pop(ctx, c.text), style: FilledButton.styleFrom(backgroundColor: AppColors.accentCyan, foregroundColor: Colors.black), child: const Text('UNLOCK')),
@@ -205,7 +205,7 @@ class _ServerDetailsScreenState extends State<ServerDetailsScreen> {
                 ScaffoldMessenger.of(context).showSnackBar(const SnackBar(backgroundColor: AppColors.surface1, content: Text('Agent installed ✓ — refreshing metrics…', style: TextStyle(fontSize: 12, color: AppColors.success))));
                 _refreshMetrics();
               } else {
-                ScaffoldMessenger.of(context).showSnackBar(SnackBar(backgroundColor: AppColors.critical.withValues(alpha: 0.14), content: SelectableText('Install failed:\n${r.log.split('\n').reversed.take(6).toList().reversed.join('\n')}', style: const TextStyle(fontSize: 11, color: AppColors.critical, fontFamily: 'monospace')), duration: const Duration(seconds: 8)));
+                ScaffoldMessenger.of(context).showSnackBar(SnackBar(backgroundColor: AppColors.critical.withValues(alpha: 0.14), content: SelectableText('Install failed:\n${r.log.split('\n').reversed.take(6).toList().reversed.join('\n')}', style: const TextStyle(fontSize: 11, color: AppColors.critical, fontFamily: AppFonts.mono)), duration: const Duration(seconds: 8)));
               }
             });
           }
@@ -213,7 +213,7 @@ class _ServerDetailsScreenState extends State<ServerDetailsScreen> {
             backgroundColor: AppColors.surface1,
             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: const BorderSide(color: AppColors.border)),
             title: Row(children: [const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.accentCyan)), const SizedBox(width: 10), Expanded(child: Text('Installing on ${c.host}', style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.textPrimary)))]),
-            content: SizedBox(width: 340, height: 220, child: SingleChildScrollView(child: SelectableText(lines.join('\n'), style: const TextStyle(fontSize: 10, color: AppColors.textSecondary, fontFamily: 'monospace')))),
+            content: SizedBox(width: 340, height: 220, child: SingleChildScrollView(child: SelectableText(lines.join('\n'), style: const TextStyle(fontSize: 10, color: AppColors.textSecondary, fontFamily: AppFonts.mono)))),
           );
         }),
       );
@@ -320,7 +320,7 @@ class _ServerDetailsScreenState extends State<ServerDetailsScreen> {
         padding: const EdgeInsets.only(bottom: 7),
         child: Row(children: [
           SizedBox(width: 100, child: Text(k, style: const TextStyle(fontSize: 11, color: AppColors.textMuted, fontWeight: FontWeight.w600))),
-          Expanded(child: SelectableText(v, style: const TextStyle(fontSize: 12, color: AppColors.textPrimary, fontFamily: 'monospace'))),
+          Expanded(child: SelectableText(v, style: const TextStyle(fontSize: 12, color: AppColors.textPrimary, fontFamily: AppFonts.mono))),
         ]),
       );
 
@@ -410,12 +410,12 @@ class _ServerDetailsScreenState extends State<ServerDetailsScreen> {
           Row(children: [
             Container(width: 6, height: 6, decoration: const BoxDecoration(color: AppColors.success, shape: BoxShape.circle)),
             const SizedBox(width: 6),
-            Expanded(child: Text(e.command, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: AppColors.textPrimary, fontFamily: 'monospace'), maxLines: 2, overflow: TextOverflow.ellipsis)),
+            Expanded(child: Text(e.command, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: AppColors.textPrimary, fontFamily: AppFonts.mono), maxLines: 2, overflow: TextOverflow.ellipsis)),
           ]),
           const SizedBox(height: 5),
           Wrap(spacing: 6, runSpacing: 4, children: [
-            Text(e.schedule, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: AppColors.accentCyan, fontFamily: 'monospace')),
-            Text(e.source, style: const TextStyle(fontSize: 9, color: AppColors.textMuted, fontFamily: 'monospace')),
+            Text(e.schedule, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: AppColors.accentCyan, fontFamily: AppFonts.mono)),
+            Text(e.source, style: const TextStyle(fontSize: 9, color: AppColors.textMuted, fontFamily: AppFonts.mono)),
             const Pill(text: 'SCHEDULED', color: AppColors.success),
           ]),
         ]),
@@ -468,7 +468,7 @@ class _ServerDetailsScreenState extends State<ServerDetailsScreen> {
             Pill(text: a.source.toUpperCase(), color: color),
           ]),
           const SizedBox(height: 2),
-          Text(a.detail, style: const TextStyle(fontSize: 10, color: AppColors.textMuted, fontFamily: 'monospace'), maxLines: 1, overflow: TextOverflow.ellipsis),
+          Text(a.detail, style: const TextStyle(fontSize: 10, color: AppColors.textMuted, fontFamily: AppFonts.mono), maxLines: 1, overflow: TextOverflow.ellipsis),
         ])),
         StatusDot(color: AppColors.success, pulse: false),
       ]),
@@ -516,7 +516,7 @@ class _ServerDetailsScreenState extends State<ServerDetailsScreen> {
           Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             Text(a.title, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: AppColors.textPrimary), maxLines: 2, overflow: TextOverflow.ellipsis),
             const SizedBox(height: 3),
-            Text(a.source, style: const TextStyle(fontSize: 9, color: AppColors.textMuted, fontFamily: 'monospace')),
+            Text(a.source, style: const TextStyle(fontSize: 9, color: AppColors.textMuted, fontFamily: AppFonts.mono)),
           ])),
           const SizedBox(width: 6),
           Pill(text: a.status.toUpperCase(), color: a.status == 'firing' ? AppColors.critical : AppColors.success),

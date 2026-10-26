@@ -196,7 +196,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             const SizedBox(width: 8),
             OutlinedButton.icon(onPressed: _import, icon: const Icon(Icons.download, size: 12), label: const Text('IMPORT', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700)), style: OutlinedButton.styleFrom(foregroundColor: AppColors.textSecondary, side: const BorderSide(color: AppColors.border), padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8))),
             const Spacer(),
-            Text('${filtered.length} shown', style: const TextStyle(fontSize: 10, color: AppColors.textMuted, fontFamily: 'monospace')),
+            Text('${filtered.length} shown', style: const TextStyle(fontSize: 10, color: AppColors.textMuted, fontFamily: AppFonts.mono)),
           ]),
         ),
         // Two-col for app prefs + integrations
@@ -289,7 +289,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 if (!s.enabled) ...[const SizedBox(width: 5), const Pill(text: 'DISABLED', color: AppColors.textMuted)],
               ]),
               const SizedBox(height: 2),
-              Text('${s.host}:${s.port} • ${s.username}@ • ${s.region} • ${s.os}', style: const TextStyle(fontSize: 10, color: AppColors.textMuted, fontFamily: 'monospace'), maxLines: 1, overflow: TextOverflow.ellipsis),
+              Text('${s.host}:${s.port} • ${s.username}@ • ${s.region} • ${s.os}', style: const TextStyle(fontSize: 10, color: AppColors.textMuted, fontFamily: AppFonts.mono), maxLines: 1, overflow: TextOverflow.ellipsis),
               const SizedBox(height: 2),
               Row(children: [
                 Icon(s.authMethod==AuthMethod.password ? Icons.password : s.authMethod==AuthMethod.sshKey ? Icons.key : Icons.token_outlined, size: 10, color: AppColors.textDim),
@@ -334,7 +334,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Widget _sliderTile(String title, String valLabel, double val, double min, double max, ValueChanged<double> onChanged) => Padding(
     padding: const EdgeInsets.only(bottom: 10),
     child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Text(title, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.textPrimary)), Text(valLabel, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: AppColors.accentCyan, fontFamily: 'monospace'))]),
+      Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Text(title, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.textPrimary)), Text(valLabel, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: AppColors.accentCyan, fontFamily: AppFonts.mono))]),
       Slider(value: val, min: min, max: max, divisions: 11, activeColor: AppColors.accentCyan, inactiveColor: AppColors.surface2, onChanged: onChanged),
     ]),
   );
@@ -351,7 +351,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           const SizedBox(width: 10),
           Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             const Text('GitHub', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
-            Text(connected ? '@$_githubUser • ${_githubRepos.length} repo${_githubRepos.length == 1 ? '' : 's'}' : 'Not connected — paste a personal access token', style: TextStyle(fontSize: 10, color: connected ? AppColors.success : AppColors.textMuted, fontFamily: 'monospace')),
+            Text(connected ? '@$_githubUser • ${_githubRepos.length} repo${_githubRepos.length == 1 ? '' : 's'}' : 'Not connected — paste a personal access token', style: TextStyle(fontSize: 10, color: connected ? AppColors.success : AppColors.textMuted, fontFamily: AppFonts.mono)),
           ])),
           Container(width: 8, height: 8, decoration: BoxDecoration(color: connected ? AppColors.success : AppColors.textDim, shape: BoxShape.circle)),
         ]),
@@ -361,10 +361,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
             child: TextField(
               controller: _githubTokenCtrl,
               obscureText: true,
-              style: const TextStyle(fontSize: 11, color: AppColors.textPrimary, fontFamily: 'monospace'),
+              style: const TextStyle(fontSize: 11, color: AppColors.textPrimary, fontFamily: AppFonts.mono),
               decoration: InputDecoration(
                 hintText: 'ghp_… / github_pat_… (needs `repo` scope)',
-                hintStyle: const TextStyle(fontSize: 10, color: AppColors.textMuted, fontFamily: 'monospace'),
+                hintStyle: const TextStyle(fontSize: 10, color: AppColors.textMuted, fontFamily: AppFonts.mono),
                 filled: true, fillColor: AppColors.surface2,
                 contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
                 border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.border)),
@@ -393,7 +393,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 child: Row(children: [
                   const Icon(Icons.book_outlined, size: 12, color: AppColors.textSecondary),
                   const SizedBox(width: 6),
-                  Expanded(child: Text(r, style: const TextStyle(fontSize: 11, color: AppColors.textPrimary, fontFamily: 'monospace'))),
+                  Expanded(child: Text(r, style: const TextStyle(fontSize: 11, color: AppColors.textPrimary, fontFamily: AppFonts.mono))),
                   InkWell(onTap: () => _removeGithubRepo(r), child: const Icon(Icons.close, size: 13, color: AppColors.textMuted)),
                 ]),
               ),
@@ -404,10 +404,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
               child: TextField(
                 controller: _githubRepoCtrl,
                 onSubmitted: (_) => _addGithubRepo(),
-                style: const TextStyle(fontSize: 11, color: AppColors.textPrimary, fontFamily: 'monospace'),
+                style: const TextStyle(fontSize: 11, color: AppColors.textPrimary, fontFamily: AppFonts.mono),
                 decoration: InputDecoration(
                   hintText: 'owner/repo  (e.g. alfirus/mycontrolpanel)',
-                  hintStyle: const TextStyle(fontSize: 10, color: AppColors.textMuted, fontFamily: 'monospace'),
+                  hintStyle: const TextStyle(fontSize: 10, color: AppColors.textMuted, fontFamily: AppFonts.mono),
                   filled: true, fillColor: AppColors.surface2,
                   contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
                   border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.border)),
@@ -509,7 +509,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     child: Row(children: [
       Container(width: 30, height: 30, decoration: BoxDecoration(color: c.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(7), border: Border.all(color: c.withValues(alpha: 0.2))), child: Icon(icon, size: 14, color: c)),
       const SizedBox(width: 10),
-      Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(name, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.textPrimary)), Text(masked, style: const TextStyle(fontSize: 10, color: AppColors.textMuted, fontFamily: 'monospace'))])),
+      Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(name, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.textPrimary)), Text(masked, style: const TextStyle(fontSize: 10, color: AppColors.textMuted, fontFamily: AppFonts.mono))])),
       OutlinedButton(onPressed: (){}, style: OutlinedButton.styleFrom(side: const BorderSide(color: AppColors.border), foregroundColor: AppColors.textSecondary, padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6)), child: Text(action, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700))),
     ]),
   );
@@ -661,9 +661,9 @@ class _ServerDialogState extends State<_ServerDialog> {
     const SizedBox(height: 4),
     TextFormField(
       controller: c, obscureText: obscure, validator: validator, keyboardType: keyboard,
-      style: const TextStyle(fontSize: 12, color: AppColors.textPrimary, fontFamily: 'monospace'),
+      style: const TextStyle(fontSize: 12, color: AppColors.textPrimary, fontFamily: AppFonts.mono),
       decoration: InputDecoration(
-        hintText: hint, hintStyle: const TextStyle(fontSize: 11, color: AppColors.textMuted, fontFamily: 'monospace'),
+        hintText: hint, hintStyle: const TextStyle(fontSize: 11, color: AppColors.textMuted, fontFamily: AppFonts.mono),
         prefixIcon: Icon(icon, size: 14, color: AppColors.textMuted),
         suffixIcon: suffix,
         filled: true, fillColor: AppColors.surface1,
@@ -683,7 +683,7 @@ class _ServerDialogState extends State<_ServerDialog> {
       initialValue: value,
       onChanged: onChanged,
       dropdownColor: AppColors.surface1,
-      style: const TextStyle(fontSize: 12, color: AppColors.textPrimary, fontFamily: 'monospace'),
+      style: const TextStyle(fontSize: 12, color: AppColors.textPrimary, fontFamily: AppFonts.mono),
       decoration: InputDecoration(filled: true, fillColor: AppColors.surface1, contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10), border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.border)), enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.border))),
       items: items.map((e)=> DropdownMenuItem(value: e, child: Text(e, style: const TextStyle(fontSize: 11)))).toList(),
     ),
