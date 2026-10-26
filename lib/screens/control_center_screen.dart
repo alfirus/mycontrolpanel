@@ -14,8 +14,11 @@ import '../models/app_entry.dart';
 import '../models/cron_entry.dart';
 import '../models/server_connection.dart';
 import 'dart:convert';
+import 'package:path_provider/path_provider.dart';
 import '../services/agent_service.dart';
 import '../services/ai_service.dart';
+import '../services/update_installer.dart';
+import '../services/update_service.dart';
 import '../services/ai_tools.dart';
 import '../services/github_service.dart';
 import '../services/ssh_key_loader.dart';
@@ -69,6 +72,10 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
   String _aiKey = '';
   bool _aiTyping = false;
   String _aiSessionId = ''; // stable x-opencode-session for Go/Zen routing + caching
+  // Update state (GitHub Releases, desktop)
+  ReleaseInfo? _updateRel;
+  bool _updateChecking = false;
+  bool _updateAutoChecked = false;
   // GitHub live state (PAT + repos from Settings)
   String _ghToken = '';
   String _ghUser = '';
@@ -531,6 +538,262 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
   void _goTo(int i) {
     setState(() => _navIndex = i);
     _loadSavedServers();
+    if (i == 0) _maybeAutoCheckUpdates();
+  }
+
+  /// Auto-check once per startup when enabled (desktop only).
+  Future<void> _maybeAutoCheckUpdates() async {
+    if (_updateAutoChecked) return;
+    _updateAutoChecked = true;
+    if (!(Platform.isMacOS || Platform.isWindows || Platform.isLinux)) return;
+    SharedPreferences? prefs;
+    try {
+      prefs = await SharedPreferences.getInstance();
+    } catch (_) {
+      return;
+    }
+    if (!(prefs.getBool('auto_update_check') ?? true)) return;
+    await checkForUpdates(manual: false);
+  }
+
+  /// Check GitHub Releases for a newer version. Sets [_updateRel] when an
+  /// update is pending (and not skipped). Safe to call repeatedly.
+  Future<void> checkForUpdates({bool manual = false}) async {
+    if (_updateChecking) return;
+    if (!Platform.isMacOS && !Platform.isWindows && !Platform.isLinux) return;
+    setState(() => _updateChecking = true);
+    try {
+      final svc = UpdateService();
+      final rel = await svc.fetchLatest();
+      final cur = await svc.currentVersion();
+      final prefs = await SharedPreferences.getInstance();
+      final skipped = prefs.getString('skipped_update_tag') ?? '';
+      if (!mounted) return;
+      setState(() {
+        _updateChecking = false;
+        if (rel.tag.isNotEmpty &&
+            UpdateService.compareVersions(cur, rel.version) < 0 &&
+            rel.tag != skipped &&
+            UpdateService.pickAsset(rel) != null) {
+          _updateRel = rel;
+        } else {
+          if (manual) _updateRel = null;
+        }
+      });
+      if (manual && mounted) {
+        final r = _updateRel;
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          backgroundColor: AppColors.surface1,
+          content: Text(
+              r == null ? 'Up to date (v$cur) ✓' : 'v${r.version} available — tap UPDATE below',
+              style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+        ));
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _updateChecking = false);
+      if (manual) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          backgroundColor: AppColors.surface1,
+          content: Text('Update check failed: ${e.toString().split('\n').first}',
+              style: const TextStyle(fontSize: 12, color: AppColors.critical)),
+        ));
+      }
+    }
+  }
+
+  Future<void> _skipUpdateVersion() async {
+    final tag = _updateRel?.tag;
+    if (tag == null) return;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('skipped_update_tag', tag);
+    if (!mounted) return;
+    setState(() => _updateRel = null);
+  }
+
+  /// Overview update banner (only when a pending update exists).
+  Widget _updateBanner() {
+    final rel = _updateRel;
+    if (rel == null) return const SizedBox.shrink();
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: AppColors.accentCyan.withValues(alpha: 0.07),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppColors.accentCyan.withValues(alpha: 0.25)),
+      ),
+      child: Row(children: [
+        Container(
+            width: 32, height: 32,
+            decoration: BoxDecoration(color: AppColors.accentCyan.withValues(alpha: 0.14), borderRadius: BorderRadius.circular(8)),
+            child: _updateChecking
+                ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.accentCyan))
+                : const Icon(Icons.system_update, size: 16, color: AppColors.accentCyan)),
+        const SizedBox(width: 10),
+        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text('Update available: v${rel.version}', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
+          Text(
+              (rel.name.isNotEmpty ? '${rel.name} • ' : '') + 'Tap UPDATE to review, download and install',
+              style: const TextStyle(fontSize: 10, color: AppColors.textMuted),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis),
+        ])),
+        const SizedBox(width: 8),
+        TextButton(onPressed: _skipUpdateVersion, child: const Text('SKIP', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: AppColors.textMuted))),
+        FilledButton(
+          onPressed: () => _showUpdateDialog(rel),
+          style: FilledButton.styleFrom(backgroundColor: AppColors.accentCyan, foregroundColor: Colors.black, padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10)),
+          child: const Text('UPDATE', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800)),
+        ),
+      ]),
+    );
+  }
+
+  /// Review notes → download (progress) → verify → platform install.
+  void _showUpdateDialog(ReleaseInfo rel) {
+    final asset = UpdateService.pickAsset(rel);
+    double progress = -1;
+    String status = asset == null
+        ? 'No ${Platform.isMacOS ? 'macOS' : Platform.isWindows ? 'Windows' : 'Linux'} build attached to this release.'
+        : 'Ready to download ${(asset.size / 1048576).toStringAsFixed(1)} MB (${asset.name}).';
+    bool busy = false;
+    bool downloaded = false;
+    bool verified = false;
+    File? file;
+    Directory? outDir;
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => StatefulBuilder(builder: (ctx, setD) {
+        Future<void> doDownload() async {
+          if (asset == null || busy) return;
+          setD(() { busy = true; status = 'Downloading…'; });
+          try {
+            final tmp = await getTemporaryDirectory();
+            final dir = Directory('${tmp.path}/mcp-update-${rel.tag}');
+            if (await dir.exists()) await dir.delete(recursive: true);
+            await dir.create(recursive: true);
+            file = await UpdateService().downloadAsset(asset, dir, (p) => setD(() => progress = p));
+            setD(() => status = 'Download complete — verifying checksum…');
+            final ok = await UpdateService().verifyChecksum(rel, file!);
+            if (ok == false) throw Exception('Checksum MISMATCH — file may be corrupt. Aborting.');
+            outDir = Directory('${dir.path}/extracted');
+            await outDir!.create();
+            setD(() => status = 'Extracting…');
+            await UpdateService().extractArchive(file!, outDir!);
+            setD(() {
+              downloaded = true;
+              verified = true;
+              busy = false;
+              status = ok == null
+                  ? 'Extracted ✓ (no checksum file published — proceeding unverified).'
+                  : 'Extracted ✓ checksum verified.';
+            });
+          } catch (e) {
+            setD(() {
+              busy = false;
+              status = 'Failed: ${e.toString().replaceFirst('Exception: ', '').split('\n').first}';
+            });
+          }
+        }
+
+        Future<void> doInstall() async {
+          if (!downloaded || outDir == null) return;
+          if (Platform.isMacOS) {
+            Navigator.pop(ctx);
+            final msg = await UpdateInstaller.apply(outDir!);
+            if (!mounted) return;
+            showDialog(
+              context: context,
+              builder: (_) => AlertDialog(
+                backgroundColor: AppColors.surface1,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: const BorderSide(color: AppColors.border)),
+                title: const Text('Finish the update', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
+                content: SizedBox(width: 360, child: SelectableText(msg, style: const TextStyle(fontSize: 11, height: 1.4, color: AppColors.textSecondary))),
+                actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('GOT IT', style: TextStyle(color: AppColors.accentCyan, fontWeight: FontWeight.w800)))],
+              ),
+            );
+            return;
+          }
+          // Windows / Linux: swap + relaunch (app exits here).
+          setD(() {
+            busy = true;
+            status = 'Installing — the app will restart…';
+          });
+          await UpdateInstaller.apply(outDir!);
+        }
+
+        return AlertDialog(
+          backgroundColor: AppColors.surface1,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: const BorderSide(color: AppColors.border)),
+          title: Row(children: [
+            Container(width: 30, height: 30, decoration: BoxDecoration(color: AppColors.accentCyan.withValues(alpha: 0.14), borderRadius: BorderRadius.circular(7)), child: const Icon(Icons.system_update, size: 15, color: AppColors.accentCyan)),
+            const SizedBox(width: 10),
+            Expanded(child: Text('Update to v${rel.version}', style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w800, color: AppColors.textPrimary))),
+            IconButton(onPressed: busy ? null : () => Navigator.pop(ctx), icon: const Icon(Icons.close, size: 16, color: AppColors.textMuted)),
+          ]),
+          content: SizedBox(
+            width: 440,
+            height: 420,
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              const Text('WHAT\u2019S NEW', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, letterSpacing: 0.6, color: AppColors.textMuted)),
+              const SizedBox(height: 4),
+              Expanded(
+                child: Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(color: const Color(0xFF050505), borderRadius: BorderRadius.circular(8), border: Border.all(color: AppColors.border)),
+                  child: SingleChildScrollView(
+                    child: rel.notes.isEmpty
+                        ? const Text('No release notes.', style: TextStyle(fontSize: 11, color: AppColors.textMuted))
+                        : MarkdownBody(data: rel.notes, selectable: true, shrinkWrap: true, styleSheet: _chatMarkdownStyle()),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+              if (busy || progress >= 0) ...[
+                Row(children: [
+                  Expanded(
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(4),
+                      child: LinearProgressIndicator(
+                        value: progress < 0 ? null : progress.clamp(0.0, 1.0),
+                        minHeight: 5,
+                        backgroundColor: AppColors.surface2,
+                        valueColor: const AlwaysStoppedAnimation(AppColors.accentCyan),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(progress < 0 ? '…' : '${(progress * 100).toInt()}%', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan, fontFamily: AppFonts.mono)),
+                ]),
+                const SizedBox(height: 6),
+              ],
+              Row(children: [
+                Icon(verified ? Icons.check_circle : Icons.info_outline, size: 13, color: verified ? AppColors.success : AppColors.textMuted),
+                const SizedBox(width: 6),
+                Expanded(child: Text(status, style: const TextStyle(fontSize: 11, color: AppColors.textSecondary))),
+              ]),
+            ]),
+          ),
+          actions: [
+            TextButton(onPressed: busy ? null : () => Navigator.pop(ctx), child: const Text('LATER', style: TextStyle(color: AppColors.textSecondary, fontWeight: FontWeight.w700))),
+            if (!downloaded)
+              FilledButton(
+                onPressed: (busy || asset == null) ? null : doDownload,
+                style: FilledButton.styleFrom(backgroundColor: AppColors.accentCyan, foregroundColor: Colors.black),
+                child: Text(progress >= 0 ? 'DOWNLOADING…' : 'DOWNLOAD', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w800)),
+              )
+            else
+              FilledButton(
+                onPressed: busy ? null : doInstall,
+                style: FilledButton.styleFrom(backgroundColor: AppColors.accentCyan, foregroundColor: Colors.black),
+                child: Text(Platform.isMacOS ? 'REVEAL IN FINDER' : 'INSTALL & RESTART', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w800)),
+              ),
+          ],
+        );
+      }),
+    );
   }
 
   /// Open Server Details (pushed over the shell — works from Overview + Servers).
@@ -557,7 +820,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
   @override
   void initState() {
     super.initState();
-    _loadSavedServers();
+    _loadSavedServers().then((_) => _maybeAutoCheckUpdates());
     _logTimer = Timer.periodic(const Duration(seconds: 3), (_) {
       if (!mounted) return;
       setState(() {
@@ -1176,6 +1439,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     return SingleChildScrollView(
       padding: const EdgeInsets.all(12),
       child: Column(children: [
+        _updateBanner(),
         _kpiStrip(),
         const SizedBox(height: gap),
         if (_useRealServers) _overviewBanner(),
