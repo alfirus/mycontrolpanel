@@ -5,6 +5,7 @@ import '../models/mock_data.dart';
 import '../models/server_connection.dart';
 import 'agent_service.dart';
 import 'github_service.dart';
+import 'gitlab_service.dart';
 
 /// Tool-calling for the AI assistant (Stage 2).
 /// Read tools run immediately. Write tools are `gated` — the UI must show
@@ -133,6 +134,21 @@ class AiTools {
         {
           'type': 'function',
           'function': {
+            'name': 'retry_gitlab_pipeline',
+            'description': 'REQUIRES USER APPROVAL. Retry a failed GitLab pipeline by its numeric id (see CI/CD timeline).',
+            'parameters': {
+              'type': 'object',
+              'properties': {
+                'project': {'type': 'string', 'description': 'group/project path or numeric id. Must be a tracked project.'},
+                'pipeline_id': {'type': 'integer', 'description': 'The numeric pipeline id.'},
+              },
+              'required': ['project', 'pipeline_id'],
+            },
+          },
+        },
+        {
+          'type': 'function',
+          'function': {
             'name': 'create_github_issue',
             'description': 'REQUIRES USER APPROVAL. File a GitHub issue in a tracked repo (e.g. from an alert). Keep title short, body factual.',
             'parameters': {
@@ -152,7 +168,7 @@ class AiTools {
         },
       ];
 
-  static const gated = {'restart_service', 'run_ssh_command', 'rerun_workflow', 'create_github_issue'};
+  static const gated = {'restart_service', 'run_ssh_command', 'rerun_workflow', 'retry_gitlab_pipeline', 'create_github_issue'};
 
   /// Allowlist for run_ssh_command. Units: [a-zA-Z0-9@._:-]+, lines 1-200,
   /// ls restricted to absolute paths (no .., no ~, no $() or backticks).
@@ -181,6 +197,9 @@ class ToolDeps {
   final List<DeployItem> runs;
   final String githubToken;
   final List<String> githubRepos;
+  final String gitlabToken;
+  final String gitlabBaseUrl;
+  final List<String> gitlabProjects;
   final AgentService agent;
 
   const ToolDeps({
@@ -195,6 +214,9 @@ class ToolDeps {
     required this.runs,
     required this.githubToken,
     required this.githubRepos,
+    required this.gitlabToken,
+    required this.gitlabBaseUrl,
+    required this.gitlabProjects,
     required this.agent,
   });
 
@@ -297,6 +319,19 @@ Future<ToolResult> executeTool(String name, Map<String, dynamic> args, ToolDeps 
         return ToolResult('Re-run accepted for $repo run $runId ✓ (check Actions for progress).');
       } catch (e) {
         return ToolResult('Rerun failed: ${e.toString().replaceFirst('Exception: ', '').split('\n').first}');
+      }
+    }
+    case 'retry_gitlab_pipeline': {
+      final project = (args['project'] ?? '').toString();
+      final pipelineId = (args['pipeline_id'] as num?)?.toInt();
+      if (!d.gitlabProjects.contains(project)) return ToolResult('Project "$project" is not tracked. Tracked: ${d.gitlabProjects.join(', ')}');
+      if (pipelineId == null) return const ToolResult('Missing pipeline_id.');
+      if (d.gitlabToken.isEmpty) return const ToolResult('GitLab not connected.');
+      try {
+        await GitlabService(baseUrl: d.gitlabBaseUrl, token: d.gitlabToken).retryPipeline(project, pipelineId);
+        return ToolResult('Retry accepted for $project pipeline $pipelineId ✓ (check CI/CD for progress).');
+      } catch (e) {
+        return ToolResult('Retry failed: ${e.toString().replaceFirst('Exception: ', '').split('\n').first}');
       }
     }
     case 'create_github_issue': {
