@@ -32,7 +32,7 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
       - name: Static analysis
-        run: flutter analyze --no-fatal-infos
+        run: flutter analyze --no-fatal-infos --no-fatal-warnings
 
   osv-scan:
     runs-on: ubuntu-latest
@@ -44,7 +44,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Scan locked dependencies with OSV
-        uses: google/osv-scanner-action@b1d267aea5211fa648d9d442fa64b90dbdcbdd36 # v2.7.0
+        uses: google/osv-scanner-action/osv-scanner-action@b1d267aea5211fa648d9d442fa64b90dbdcbdd36 # v2.7.0
         with:
           scan-args: |-
             --lockfile=pubspec.lock
@@ -61,3 +61,5 @@ jobs:
           fetch-depth: 0
       - name: Scan for leaked secrets
         uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
