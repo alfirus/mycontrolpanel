@@ -104,7 +104,7 @@ class AiTools {
           'type': 'function',
           'function': {
             'name': 'run_ssh_command',
-            'description': 'REQUIRES USER APPROVAL. Run a diagnostic command on a server. ONLY these are allowed: systemctl status|is-active <unit>, journalctl --no-pager -u <unit> -n <lines>, df -h, uptime, free -m. Anything else is rejected.',
+            'description': 'REQUIRES USER APPROVAL. Run a diagnostic command on a server. ONLY these are allowed: systemctl status|is-active <unit>, journalctl --no-pager -u <unit> -n <lines>, ls -l[a] <absolute-path> (directory listings), cat <absolute-path> (only .log/.conf/.yaml/.yml/.toml/.json/.service/.timer files), df -h, uptime, free -m. Anything else is rejected.',
             'parameters': {
               'type': 'object',
               'properties': {
@@ -154,10 +154,13 @@ class AiTools {
 
   static const gated = {'restart_service', 'run_ssh_command', 'rerun_workflow', 'create_github_issue'};
 
-  /// Allowlist for run_ssh_command. Units: [a-zA-Z0-9@._:-]+, lines 1-200.
+  /// Allowlist for run_ssh_command. Units: [a-zA-Z0-9@._:-]+, lines 1-200,
+  /// ls restricted to absolute paths (no .., no ~, no $() or backticks).
   static final _allowedCmd = RegExp(
       r'^(systemctl (status|is-active) [A-Za-z0-9@._:\-]+'
       r'|journalctl --no-pager -u [A-Za-z0-9@._:\-]+( -n (?:[1-9]|[1-9][0-9]|1[0-9][0-9]|200))?'
+      r'|ls -la? /(?:[A-Za-z0-9@._\-]+/)*[A-Za-z0-9@._\-]*'
+      r'|cat /[A-Za-z0-9@._\-/]*\.(?:log|conf|yaml|yml|toml|json|service|timer)'
       r'|df -h'
       r'|uptime'
       r'|free -m)$');
@@ -274,7 +277,7 @@ Future<ToolResult> executeTool(String name, Map<String, dynamic> args, ToolDeps 
       if (s == null) return ToolResult('Unknown server "${args['server']}". Known: ${d.servers.map((e) => e.name).join(', ')}');
       final cmd = (args['command'] ?? '').toString().trim();
       if (!AiTools._allowedCmd.hasMatch(cmd)) {
-        return const ToolResult('Command rejected by allowlist. Allowed: systemctl status|is-active <unit>, journalctl --no-pager -u <unit> -n <lines>, df -h, uptime, free -m.');
+        return const ToolResult('Command rejected by allowlist. Allowed: systemctl status|is-active <unit>, journalctl --no-pager -u <unit> -n <lines>, ls -l[a] <abs-path>, cat <abs-path> (.log/.conf/.yaml/.yml/.toml/.json/.service/.timer), df -h, uptime, free -m.');
       }
       try {
         final out = await d.agent.runCommand(s, cmd);

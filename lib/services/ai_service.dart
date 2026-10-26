@@ -146,24 +146,45 @@ class AiService {
   /// Gemini: POST {base}/v1beta/models/{model}:generateContent.
   static const String clientAgent = 'MyControlPanel/1.0';
 
-  /// Whether this provider+model speaks OpenAI chat-completions (hence tools).
-  /// Responses/Anthropic/Gemini-routed models (some Zen/Go) use plain chat.
-  static bool usesChatCompletions(AiProvider provider, String model) {
+  /// Tool route for a provider+model: chat-completions tools, Responses
+  /// function tools, or plain chat (no tools: Anthropic/Gemini-native, Ollama).
+  static ToolRoute toolRoute(AiProvider provider, String model) {
     switch (provider) {
       case AiProvider.openai:
       case AiProvider.openaiCompatible:
       case AiProvider.openRouter:
       case AiProvider.lmStudio:
-        return true;
+        return ToolRoute.chat;
+      case AiProvider.openCodeGo:
+        if (!_goChatFamily(model)) {
+          if (_goResponsesFamily(model)) return ToolRoute.responses;
+          return ToolRoute.plain;
+        }
+        return ToolRoute.chat;
+      case AiProvider.openCodeZen:
+        if (!_zenChatFamily(model)) {
+          if (_zenResponsesFamily(model)) return ToolRoute.responses;
+          return ToolRoute.plain;
+        }
+        return ToolRoute.chat;
       case AiProvider.ollama:
       case AiProvider.anthropic:
       case AiProvider.gemini:
-        return false;
-      case AiProvider.openCodeGo:
-        return _goChatFamily(model);
-      case AiProvider.openCodeZen:
-        return _zenChatFamily(model);
+        return ToolRoute.plain;
     }
+  }
+
+  static bool _goResponsesFamily(String model) {
+    const s = {
+      'grok-4.7', 'gpt-6-luna', 'gpt-5.6-luna',
+      'muse-spark-1.3-contributor', 'muse-spark-1.2-contributor',
+    };
+    return s.contains(model.toLowerCase());
+  }
+
+  static bool _zenResponsesFamily(String model) {
+    final m = model.toLowerCase();
+    return m.startsWith('gpt-') || m.startsWith('grok-') || m.startsWith('muse-spark-');
   }
 
   static bool _goChatFamily(String model) {
@@ -223,19 +244,25 @@ class AiService {
     required List<Map<String, String>> messages,
     required List<Map<String, dynamic>> tools,
   }) async {
-    final body = {
-      'model': model,
-      'messages': [
-        {'role': 'system', 'content': system},
-        ...messages,
-      ],
-      'temperature': 0.3,
-      if (tools.isNotEmpty) 'tools': tools,
-      if (tools.isNotEmpty) 'tool_choice': 'auto',
-    };
-    final r = await http.post(Uri.parse('$baseUrl/chat/completions'),
-        headers: {'Content-Type': 'application/json', ...headers}, body: jsonEncode(body))
-        .timeout(const Duration(seconds: 90));
+    Map<String, dynamic> bodyFor(List<Map<String, dynamic>> tls) => {
+          'model': model,
+          'messages': [
+            {'role': 'system', 'content': system},
+            ...messages,
+          ],
+          'temperature': 0.3,
+          if (tls.isNotEmpty) 'tools': tls,
+          if (tls.isNotEmpty) 'tool_choice': 'auto',
+        };
+    Future<http.Response> post(Map<String, dynamic> b) => http.post(
+        Uri.parse('$baseUrl/chat/completions'),
+        headers: {'Content-Type': 'application/json', ...headers},
+        body: jsonEncode(b)).timeout(const Duration(seconds: 90));
+    var r = await post(bodyFor(tools));
+    // Fallback: model rejects function calling (400 with tools) — retry plain.
+    if (r.statusCode == 400 && tools.isNotEmpty) {
+      r = await post(bodyFor(const []));
+    }
     if (r.statusCode != 200) throw Exception(_err(r, 'chat'));
     final j = jsonDecode(r.body) as Map;
     final choices = (j['choices'] as List?) ?? [];
@@ -323,8 +350,10 @@ class AiService {
   }
 
   // --- OpenCode Zen: same multi-protocol shape under /zen/v1.
+  // Keyless Zen serves free `-free` models as literal `Bearer public`.
   Future<String> _zenChat(String base, String key, String model, String system,
       List<Map<String, String>> messages, String? sessionId) async {
+    if (key.isEmpty) key = 'public';
     final m = model.toLowerCase();
     final isResponses = m.startsWith('gpt-') || m.startsWith('grok-') || m.startsWith('muse-spark-');
     final isAnthropic = m.startsWith('claude-') ||
@@ -341,6 +370,72 @@ class AiService {
     }
     return _openAiChat('$base/chat/completions', key, model, system, messages, AiProvider.openCodeZen,
         sessionId: sessionId, fullUrl: true);
+  }
+
+  /// One Responses-API turn WITH function tools.
+  /// [input] is the Responses input-item list (persist across turns).
+  Future<ResponsesTurn> responsesTurn({
+    required String url,
+    required Map<String, String> headers,
+    required String model,
+    required String instructions,
+    required List<Map<String, dynamic>> input,
+    required List<Map<String, dynamic>> tools,
+  }) async {
+    final fnTools = [
+      for (final t in tools)
+        {
+          'type': 'function',
+          'name': ((t['function'] as Map?)?['name'] ?? '').toString(),
+          'description': (((t['function'] as Map?)?['description'] ?? '')).toString(),
+          'parameters': ((t['function'] as Map?)?['parameters'] ?? {'type': 'object', 'properties': {}}),
+        },
+    ];
+    Map<String, dynamic> bodyFor(List<Map<String, dynamic>> tls) => {
+          'model': model,
+          'instructions': instructions,
+          'input': input,
+          if (tls.isNotEmpty) 'tools': tls,
+        };
+    var r = await http.post(Uri.parse(url), headers: headers, body: jsonEncode(bodyFor(fnTools)))
+        .timeout(const Duration(seconds: 90));
+    // Fallback: model rejects function tools (400) — retry as plain chat.
+    if (r.statusCode == 400 && fnTools.isNotEmpty) {
+      r = await http.post(Uri.parse(url), headers: headers, body: jsonEncode(bodyFor(const [])))
+          .timeout(const Duration(seconds: 90));
+    }
+    if (r.statusCode != 200) throw Exception(_errStatic(r, 'responses'));
+    final j = jsonDecode(r.body) as Map;
+    final output = ((j['output'] as List?) ?? []).cast<Map<String, dynamic>>();
+    final text = StringBuffer();
+    final calls = <ToolCall>[];
+    for (final item in output) {
+      if (item['type'] == 'message') {
+        for (final c in ((item['content'] as List?) ?? [])) {
+          final cm = c as Map;
+          if (cm['type'] == 'output_text' || cm['type'] == 'text') {
+            text.writeln((cm['text'] ?? '').toString());
+          }
+        }
+      } else if (item['type'] == 'function_call') {
+        Map<String, dynamic> args = {};
+        try {
+          final raw = item['arguments'];
+          if (raw is Map) {
+            args = Map<String, dynamic>.from(raw);
+          } else if (raw is String && raw.trim().isNotEmpty) {
+            args = Map<String, dynamic>.from(jsonDecode(raw) as Map);
+          }
+        } catch (_) {}
+        calls.add(ToolCall(
+          id: (item['call_id'] ?? item['id'] ?? '').toString(),
+          name: (item['name'] ?? '').toString(),
+          arguments: args,
+        ));
+      }
+    }
+    final t = text.toString().trim();
+    return ResponsesTurn(text: t.isEmpty ? null : t, calls: calls.where((c) => c.name.isNotEmpty).toList(), outputItems: output);
   }
 
   Map<String, String> _gwHeaders(String key, String? sessionId) => {
@@ -537,6 +632,9 @@ class AiService {
   }
 }
 
+/// How tools are delivered for a provider+model.
+enum ToolRoute { chat, responses, plain }
+
 /// A function call requested by the model.
 class ToolCall {
   final String id;
@@ -550,4 +648,13 @@ class ChatTurn {
   final String? text;
   final List<ToolCall> calls;
   const ChatTurn({this.text, required this.calls});
+}
+
+/// One Responses-API turn: text, function calls, and raw output items
+/// (which must be echoed back with function_call_output items).
+class ResponsesTurn {
+  final String? text;
+  final List<ToolCall> calls;
+  final List<Map<String, dynamic>> outputItems;
+  const ResponsesTurn({this.text, required this.calls, required this.outputItems});
 }

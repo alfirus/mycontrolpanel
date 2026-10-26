@@ -455,7 +455,12 @@ WantedBy=multi-user.target
       passwordCb = () => s.credential;
     } else {
       final loaded = await SshKeyLoader.load(s.credential, passphrase: keyPassphrase);
-      if (loaded.keys == null) throw Exception(loaded.error ?? 'key load failed');
+      if (loaded.keys == null) {
+        if (loaded.needsPassphrase) {
+          throw Exception('SSH key is encrypted — re-run from the Terminal tab and enter the passphrase there.');
+        }
+        throw Exception(loaded.error ?? 'key load failed');
+      }
       keys = loaded.keys;
     }
     SSHClient? client;
