@@ -4,13 +4,17 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:uuid/uuid.dart';
 import '../theme/app_theme.dart';
 import '../models/mock_data.dart';
 import '../models/alert_entry.dart';
 import '../models/app_entry.dart';
 import '../models/cron_entry.dart';
 import '../models/server_connection.dart';
+import 'dart:convert';
 import '../services/agent_service.dart';
+import '../services/ai_service.dart';
+import '../services/ai_tools.dart';
 import '../services/github_service.dart';
 import '../services/ssh_key_loader.dart';
 import 'server_details_screen.dart';
@@ -31,9 +35,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
   String _serverFilter = 'all';
   final TextEditingController _chatController = TextEditingController();
   final List<Map<String, String>> _chatMessages = [
-    {'role': 'assistant', 'text': 'Control Center AI online. Ask me anything.'},
-    {'role': 'user', 'text': 'Show failed crons'},
-    {'role': 'assistant', 'text': '1 failed in last 24h: purge-sessions on prod-core-01. Want me to tail logs?'},
+    {'role': 'assistant', 'text': 'Control Center AI online. I can see your live servers, alerts, crons, apps, GitHub and deploys — ask me anything, e.g. "which servers need attention?"'},
   ];
   final ScrollController _chatScroll = ScrollController();
   final ScrollController _logScroll = ScrollController();
@@ -59,6 +61,11 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
   // AI provider state (Settings → Integrations)
   bool _aiConfigured = false;
   String _aiModelName = '';
+  AiProvider _aiProvider = AiProvider.openai;
+  String _aiBaseUrl = '';
+  String _aiKey = '';
+  bool _aiTyping = false;
+  String _aiSessionId = ''; // stable x-opencode-session for Go/Zen routing + caching
   // GitHub live state (PAT + repos from Settings)
   String _ghToken = '';
   String _ghUser = '';
@@ -93,6 +100,14 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
       _ghUser = prefs.getString('github_user') ?? '';
       _ghRepos = prefs.getStringList('github_repos') ?? [];
       _aiModelName = prefs.getString('ai_model') ?? '';
+      _aiSessionId = prefs.getString('ai_session_id') ?? '';
+      if (_aiSessionId.isEmpty) {
+        _aiSessionId = const Uuid().v4();
+        unawaited(prefs.setString('ai_session_id', _aiSessionId));
+      }
+      _aiProvider = AiProvider.values[(prefs.getInt('ai_provider') ?? 0).clamp(0, AiProvider.values.length - 1)];
+      _aiBaseUrl = prefs.getString('ai_base_url') ?? _aiProvider.defaultBaseUrl;
+      _aiKey = prefs.getString('ai_key') ?? '';
       _aiConfigured = _aiModelName.isNotEmpty;
     });
     _pollAgents();
@@ -554,35 +569,244 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     super.dispose();
   }
 
-  void _sendChat() {
+  void _sendChat() async {
     final t = _chatController.text.trim();
-    if (t.isEmpty) return;
+    if (t.isEmpty || _aiTyping) return;
     setState(() {
       _chatMessages.add({'role': 'user', 'text': t});
-      _chatMessages.add({'role': 'assistant', 'text': _mockAIReply(t)});
       _chatController.clear();
+      _aiTyping = true;
+    });
+    _scrollChatToEnd();
+    if (!_aiConfigured) {
+      setState(() {
+        _chatMessages.add({'role': 'assistant', 'text': 'No AI provider configured — tap CONFIGURE AI PROVIDER above.'});
+        _aiTyping = false;
+      });
+      return;
+    }
+    try {
+      final hist = _chatMessages.where((m) => m['text'] != null && m['text']!.isNotEmpty).toList();
+      final tail = hist.length > 12 ? hist.sublist(hist.length - 12) : hist;
+      final convo = tail.map((m) => {'role': m['role']!, 'content': m['text']!}).toList();
+      if (AiService.usesChatCompletions(_aiProvider, _aiModelName)) {
+        await _runToolLoop(convo);
+      } else {
+        final reply = await AiService().chat(
+          provider: _aiProvider,
+          baseUrl: _aiBaseUrl,
+          apiKey: _aiKey,
+          model: _aiModelName,
+          system: _aiSystemPrompt(),
+          sessionId: _aiSessionId,
+          messages: convo,
+        );
+        if (!mounted) return;
+        setState(() {
+          _chatMessages.add({'role': 'assistant', 'text': reply});
+          _aiTyping = false;
+        });
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _chatMessages.add({'role': 'assistant', 'text': 'AI error: ${e.toString().replaceFirst('Exception: ', '').split('\n').first}\n(Provider: ${_aiProvider.label} • model: $_aiModelName — check Settings → AI Provider.)'});
+        _aiTyping = false;
+      });
+    }
+    _scrollChatToEnd();
+  }
+
+  /// Tool-calling loop (Stage 2): read tools run freely; gated write tools
+  /// pause for an Approve/Deny dialog first.
+  Future<void> _runToolLoop(List<Map<String, String>> convo) async {
+    final svc = AiService();
+    final headers = AiService().openAiHeaders(_aiProvider, _aiKey, _aiSessionId);
+    final base = AiService.chatBase(_aiProvider, _aiBaseUrl);
+    final turns = <Map<String, dynamic>>[
+      for (final m in convo) {'role': m['role']!, 'content': m['content']!},
+    ];
+    for (var i = 0; i < AiTools.maxIterations; i++) {
+      final turn = await svc.chatTurn(
+        baseUrl: base,
+        headers: headers,
+        model: _aiModelName,
+        system: '${_aiSystemPrompt()}\n\nYou have tools for live data and actions. Prefer calling a read tool over guessing. For restart_service, run_ssh_command, rerun_workflow, create_github_issue: the app asks the user to approve first — briefly say what you are about to do, then call the tool.',
+        messages: turns.map((m) => {'role': m['role'].toString(), 'content': (m['content'] ?? '').toString()}).toList(),
+        tools: AiTools.schemas(),
+      );
+      if (turn.text != null && turn.text!.isNotEmpty) {
+        if (!mounted) return;
+        setState(() => _chatMessages.add({'role': 'assistant', 'text': turn.text!}));
+        _scrollChatToEnd();
+      }
+      if (turn.calls.isEmpty) {
+        if (!mounted) return;
+        setState(() => _aiTyping = false);
+        return;
+      }
+      turns.add({
+        'role': 'assistant',
+        'content': turn.text ?? '',
+        'tool_calls': [
+          for (final c in turn.calls)
+            {'id': c.id, 'type': 'function', 'function': {'name': c.name, 'arguments': _argsJson(c.arguments)}},
+        ],
+      });
+      for (final call in turn.calls) {
+        if (AiTools.gated.contains(call.name)) {
+          final approved = await _askToolApproval(call);
+          if (!mounted) return;
+          if (!approved) {
+            setState(() => _chatMessages.add({'role': 'assistant', 'text': '_${call.name} denied by user — I won\'t run it._'}));
+            turns.add({'role': 'tool', 'tool_call_id': call.id, 'content': 'Denied by user. Do not retry this call. Explain the manual alternative instead.'});
+            continue;
+          }
+          setState(() => _chatMessages.add({'role': 'assistant', 'text': '_Running ${call.name}…_'}));
+        }
+        final result = await executeTool(call.name, call.arguments, _toolDeps());
+        if (!mounted) return;
+        turns.add({'role': 'tool', 'tool_call_id': call.id, 'content': result.output});
+      }
+    }
+    if (!mounted) return;
+    setState(() {
+      _chatMessages.add({'role': 'assistant', 'text': '_Stopped after ${AiTools.maxIterations} tool rounds — ask me to continue if needed._'});
+      _aiTyping = false;
     });
   }
 
-  String _mockAIReply(String q) {
-    q = q.toLowerCase();
-    if (q.contains('server')) {
-      final op = _servers.where((s) => s.status == Status.operational).length;
-      if (!_useRealServers) return '${_servers.length} servers (demo data): $op operational.';
-      final live = _metrics.length;
-      final liveBit = live == _servers.length && live > 0
-          ? ' All reporting live metrics via agent ✓.'
-          : live > 0
-              ? ' $live of ${_servers.length} reporting live; rest need INSTALL AGENT.'
-              : ' No agents reporting yet — tap INSTALL AGENT on a server card.';
-      return '${_servers.length} servers (your saved connections): $op operational.$liveBit';
+  String _argsJson(Map<String, dynamic> args) {
+    try {
+      return const JsonEncoder.withIndent('  ').convert(args);
+    } catch (_) {
+      return args.toString();
     }
-    if (q.contains('cron')) return 'Checked 6 crons: 1 failed (purge-sessions). Recommend retry.';
-    if (q.contains('pr') || q.contains('github')) return 'Open: 3 issues, 3 PRs. Latest PR #91 ready for review.';
-    if (q.contains('deploy')) return 'Last deploy: api-gateway v2.14.3 to prod 22m ago - success.';
-    if (q.contains('security')) return '5 findings: 2 critical. Ack the S3 bucket?';
-    if (q.contains('log')) return 'Tailing logs: ${mockLogs.first.message}';
-    return 'I have context on all segments (servers, crons, apps, GitHub, alerts, deploys, logs, metrics, security).';
+  }
+
+  ToolDeps _toolDeps() => ToolDeps(
+        servers: _savedServers,
+        metrics: _metrics,
+        crons: _serverCrons,
+        apps: _serverApps,
+        alerts: _serverAlerts,
+        issues: _ghIssues,
+        prs: _ghPRs,
+        tasks: _ghTasks,
+        runs: _ghRuns,
+        githubToken: _ghToken,
+        githubRepos: _ghRepos,
+        agent: _agent,
+      );
+
+  /// Approve/Deny gate for write tools. True only on explicit Approve.
+  Future<bool> _askToolApproval(ToolCall call) async {
+    final pretty = _argsJson(call.arguments);
+    final result = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.surface1,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: BorderSide(color: AppColors.warning.withValues(alpha: 0.4))),
+        title: Row(children: [
+          Container(width: 30, height: 30, decoration: BoxDecoration(color: AppColors.warning.withValues(alpha: 0.14), borderRadius: BorderRadius.circular(7)), child: const Icon(Icons.verified_user_outlined, size: 15, color: AppColors.warning)),
+          const SizedBox(width: 10),
+          const Expanded(child: Text('Approve AI action?', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w800, color: AppColors.textPrimary))),
+        ]),
+        content: SizedBox(
+          width: 340,
+          child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              decoration: BoxDecoration(color: AppColors.warning.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(6), border: Border.all(color: AppColors.warning.withValues(alpha: 0.25))),
+              child: Text(call.name, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w800, color: AppColors.warning, fontFamily: AppFonts.mono)),
+            ),
+            const SizedBox(height: 8),
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(color: const Color(0xFF050505), borderRadius: BorderRadius.circular(8), border: Border.all(color: AppColors.border)),
+              child: SingleChildScrollView(child: SelectableText(pretty, style: const TextStyle(fontSize: 11, color: AppColors.textPrimary, fontFamily: AppFonts.mono))),
+            ),
+            const SizedBox(height: 8),
+            const Text('Runs with your saved credentials. Deny if anything looks off.', style: TextStyle(fontSize: 10, color: AppColors.textMuted)),
+          ]),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('DENY', style: TextStyle(color: AppColors.textSecondary, fontWeight: FontWeight.w800))),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), style: FilledButton.styleFrom(backgroundColor: AppColors.warning, foregroundColor: Colors.black), child: const Text('APPROVE & RUN', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800))),
+        ],
+      ),
+    );
+    return result == true;
+  }
+
+  void _scrollChatToEnd() {
+    Future.delayed(const Duration(milliseconds: 100), () {
+      if (_chatScroll.hasClients) {
+        _chatScroll.animateTo(_chatScroll.position.maxScrollExtent + 200,
+            duration: const Duration(milliseconds: 300), curve: Curves.easeOut);
+      }
+    });
+  }
+
+  /// Live control-center snapshot injected as the system prompt.
+  String _aiSystemPrompt() {
+    final b = StringBuffer();
+    b.writeln('You are the AI assistant inside MyControlPanel, an IT control center app.');
+    b.writeln('Answer concisely (2-5 sentences, monospace-friendly plain text, no markdown tables).');
+    b.writeln('Use ONLY the live state below for facts about infrastructure. Never invent servers, metrics, or deployments.');
+    b.writeln();
+    b.writeln('SERVERS (${_servers.length}${_useRealServers ? ', user-configured' : ', DEMO data'}):');
+    for (final s in _servers) {
+      final m = _metrics[s.id];
+      final met = m == null
+          ? 'no live metrics'
+          : 'cpu=${((m['cpu'] as num).toDouble() * 100).toInt()}% ram=${((m['ram'] as num).toDouble() * 100).toInt()}% disk=${((m['disk'] as num).toDouble() * 100).toInt()}% up=${m['uptime_days']}d';
+      b.writeln('- ${s.name} (${s.ip}, ${s.region}) status=${s.status.name} $met');
+    }
+    b.writeln();
+    final alerts = _realAlerts.isEmpty && !_useRealServers ? mockAlerts.map((a) => '${a.title} [${a.severity}]').toList() : _realAlerts.map((a) => '${a.title} [${a.severity}] on ${a.serverName}').toList();
+    b.writeln('ALERTS (${alerts.length} firing signals):');
+    for (final a in alerts.take(10)) {
+      b.writeln('- $a');
+    }
+    b.writeln();
+    final crons = _realCrons.isEmpty && !_useRealServers
+        ? mockCrons.map((c) => '${c.name} (${c.schedule}) status=${c.status.name} on ${c.server}').toList()
+        : _realCrons.map((c) => '${c.command} (${c.schedule}) on ${c.serverName} [${c.source}]').toList();
+    b.writeln('CRONJOBS (${crons.length}):');
+    for (final c in crons.take(10)) {
+      b.writeln('- $c');
+    }
+    b.writeln();
+    final apps = _realApps.isEmpty && !_useRealServers
+        ? mockApps.map((a) => '${a.name} ${a.version} [${a.env.name}]').toList()
+        : _realApps.map((a) => '${a.name} (${a.detail}) on ${a.serverName} [${a.source}]').toList();
+    b.writeln('APPS (${apps.length}):');
+    for (final a in apps.take(10)) {
+      b.writeln('- $a');
+    }
+    b.writeln();
+    if (_ghConfigured) {
+      b.writeln('GITHUB (@$_ghUser, repos: ${_ghRepos.join(', ')}): ${_ghIssues.length} open issues, ${_ghPRs.length} open PRs, ${_ghTasks.length} tasks.');
+      for (final i in _ghIssues.take(5)) {
+        b.writeln('- issue #${i.number}: ${i.title} (${i.repo})');
+      }
+      for (final p in _ghPRs.take(5)) {
+        b.writeln('- PR #${p.number}: ${p.title} (${p.repo})');
+      }
+      if (_ghRuns.isNotEmpty) {
+        b.writeln('RECENT ACTIONS RUNS:');
+        for (final r in _ghRuns.take(5)) {
+          b.writeln('- ${r.app} #${r.version} ${r.status} on ${r.env} by ${r.actor}');
+        }
+      }
+    } else {
+      b.writeln('GITHUB: not connected (demo data in UI).');
+    }
+    b.writeln();
+    b.writeln('If asked to DO something (restart, deploy, ack), explain you are read-only and point to the relevant screen/terminal command.');
+    return b.toString();
   }
 
   @override
@@ -1545,9 +1769,12 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
             ),
           )
         else ...[
-        Expanded(child: ListView.builder(controller: _chatScroll, padding: const EdgeInsets.all(12), itemCount: _chatMessages.length, itemBuilder: (_, i) {
+        Expanded(child: ListView.builder(controller: _chatScroll, padding: const EdgeInsets.all(12), itemCount: _chatMessages.length + (_aiTyping ? 1 : 0), itemBuilder: (_, i) {
+          if (_aiTyping && i == _chatMessages.length) {
+            return Align(alignment: Alignment.centerLeft, child: Container(margin: const EdgeInsets.only(bottom: 8), padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10), decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(14), border: Border.all(color: AppColors.border)), child: Row(mainAxisSize: MainAxisSize.min, children: [const SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.accentCyan)), const SizedBox(width: 8), Text('$_aiModelName is thinking…', style: const TextStyle(fontSize: 11, color: AppColors.textMuted))])));
+          }
           final m = _chatMessages[i]; final isUser = m['role']=='user';
-          return Align(alignment: isUser ? Alignment.centerRight : Alignment.centerLeft, child: Container(margin: const EdgeInsets.only(bottom: 8), padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9), constraints: const BoxConstraints(maxWidth: 300), decoration: BoxDecoration(color: isUser ? AppColors.accentCyan : AppColors.surface1, borderRadius: BorderRadius.circular(14), border: Border.all(color: isUser ? AppColors.accentCyan : AppColors.border)), child: Text(m['text']!, style: TextStyle(fontSize: 12, color: isUser ? Colors.black : AppColors.textPrimary))));
+          return Align(alignment: isUser ? Alignment.centerRight : Alignment.centerLeft, child: Container(margin: const EdgeInsets.only(bottom: 8), padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9), constraints: const BoxConstraints(maxWidth: 300), decoration: BoxDecoration(color: isUser ? AppColors.accentCyan : AppColors.surface1, borderRadius: BorderRadius.circular(14), border: Border.all(color: isUser ? AppColors.accentCyan : AppColors.border)), child: SelectableText(m['text']!, style: TextStyle(fontSize: 12, height: 1.35, color: isUser ? Colors.black : AppColors.textPrimary))));
         })),
         Container(padding: const EdgeInsets.all(10), decoration: const BoxDecoration(color: AppColors.surface1, border: Border(top: BorderSide(color: AppColors.border))), child: Row(children: [
           Expanded(child: TextField(controller: _chatController, onSubmitted: (_)=> _sendChat(), style: const TextStyle(fontSize: 13, color: AppColors.textPrimary), decoration: InputDecoration(hintText: 'Ask about servers, crons, deploys...', hintStyle: const TextStyle(fontSize: 12, color: AppColors.textMuted), filled: true, fillColor: AppColors.surface2, contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10), border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: AppColors.border)), enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: AppColors.border)), focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: AppColors.accentCyan))))),

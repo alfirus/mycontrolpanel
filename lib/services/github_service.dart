@@ -115,8 +115,30 @@ class GithubService {
         time: created,
         status: mapped,
         duration: mapped == 'running' ? '…' : dur,
+        runId: (j['id'] as num?)?.toInt(),
       );
     }).toList();
+  }
+
+  /// Re-run a workflow run. Returns true on accepted (201/204).
+  Future<bool> rerunRun(String repo, int runId) async {
+    final r = await http.post(
+      Uri.parse('https://api.github.com/repos/$repo/actions/runs/$runId/rerun'),
+      headers: _headers,
+    );
+    if (r.statusCode == 201 || r.statusCode == 204) return true;
+    throw Exception(_apiError(r, 'rerun $runId'));
+  }
+
+  /// Create an issue. Returns the new issue number.
+  Future<int> createIssue(String repo, String title, {String body = '', List<String> labels = const []}) async {
+    final r = await http.post(
+      Uri.parse('https://api.github.com/repos/$repo/issues'),
+      headers: _headers,
+      body: jsonEncode({'title': title, 'body': body, 'labels': labels}),
+    );
+    if (r.statusCode != 201) throw Exception(_apiError(r, 'create issue'));
+    return (((jsonDecode(r.body) as Map)['number'] as num?) ?? 0).toInt();
   }
 
   String? _loginCache;

@@ -669,7 +669,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<void> _fetchAiModels() async {
     if (_aiProvider.needsKey && _aiKeyCtrl.text.trim().isEmpty) {
-      setState(() => _aiError = 'API key required for ${_aiProvider.label} (Ollama needs none).');
+      setState(() => _aiError = 'API key required for ${_aiProvider.label} (Ollama / LM Studio need none).');
       return;
     }
     setState(() { _aiFetching = true; _aiError = null; });
