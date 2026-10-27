@@ -126,6 +126,7 @@ WantedBy=multi-user.target
       }
       keyPairs = loaded.keys;
       log('Key loaded (${keyPairs!.length} identit${keyPairs!.length == 1 ? 'y' : 'ies'}).');
+      if (loaded.detected.isNotEmpty) log('Key type: ${loaded.detected}.');
     }
     SSHClient? client;
     try {

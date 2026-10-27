@@ -299,7 +299,8 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
       entry: e,
       conn: conn,
       agent: _agent,
-      askPassphrase: () => _askKeyPassphrase(conn, actionLabel: 'VIEW LOG'),
+      askPassphrase: () => _cachedPassphrase(conn, actionLabel: 'VIEW LOG'),
+      onBadPassphrase: () => _forgetPassphrase(conn.id),
       onChanged: () {
         setState(() {
           _serverCrons.remove(conn.id);
@@ -351,7 +352,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     if (s.authMethod != AuthMethod.password) {
       final pre = await SshKeyLoader.load(s.credential);
       if (pre.keys == null && pre.needsPassphrase) {
-        keyPassphrase = await _askKeyPassphrase(s);
+        keyPassphrase = await _cachedPassphrase(s);
         if (keyPassphrase == null || keyPassphrase.isEmpty) return; // cancelled
       } else if (pre.keys == null) {
         _showManualInstall(s);
@@ -405,6 +406,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
                 if (result.log == 'SSH_KEY_AUTH') {
                   _showManualInstall(s);
                 } else if (result.log == 'SSH_KEY_BAD_PASSPHRASE') {
+                  _forgetPassphrase(s.id); // cached phrase was wrong — ask again next time
                   _showInstallLog(s, 'Wrong key passphrase. Tap INSTALL AGENT to retry with the correct one, or use the manual install.');
                 } else if (result.log == 'SSH_KEY_NEEDS_PASSPHRASE') {
                   ScaffoldMessenger.of(context).showSnackBar(const SnackBar(backgroundColor: AppColors.surface1, content: Text('Key needs a passphrase — enter it to retry one-click, or use manual install.', style: TextStyle(fontSize: 12, color: AppColors.warning)), duration: Duration(seconds: 4)));
@@ -432,8 +434,25 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     }
   }
 
+  /// In-memory passphrase cache: prompt once per app run per server.
+  final Map<String, String> _passCache = {};
+  void _forgetPassphrase(String serverId) => _passCache.remove(serverId);
+
+  Future<String?> _cachedPassphrase(ServerConnection s, {String actionLabel = 'INSTALL NOW'}) async {
+    final hit = _passCache[s.id];
+    if (hit != null && hit.isNotEmpty) return hit;
+    final pass = await _askKeyPassphrase(s, actionLabel: actionLabel);
+    if (pass != null && pass.isNotEmpty) _passCache[s.id] = pass;
+    return pass;
+  }
+
   Future<String?> _askKeyPassphrase(ServerConnection s, {String actionLabel = 'INSTALL NOW'}) async {
     final c = TextEditingController();
+    final cred = s.credential.trim();
+    final isPath = !cred.contains('PRIVATE KEY') && !cred.contains('OPENSSH');
+    final desc = isPath
+        ? 'Saved as file path (sandbox may block reads — prefer import)'
+        : SshKeyLoader.describe(cred);
     return showDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -443,7 +462,17 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
         content: SizedBox(
           width: 320,
           child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-            const Text('Your saved key is encrypted. Enter its passphrase to run the one-click install directly — no terminal needed.', style: TextStyle(fontSize: 11, color: AppColors.textSecondary)),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+              decoration: BoxDecoration(color: AppColors.surface2, borderRadius: BorderRadius.circular(6), border: Border.all(color: AppColors.border)),
+              child: Row(children: [
+                const Icon(Icons.fingerprint, size: 13, color: AppColors.accentCyan),
+                const SizedBox(width: 6),
+                Expanded(child: Text(desc, style: const TextStyle(fontSize: 10, color: AppColors.textSecondary, fontFamily: AppFonts.mono))),
+              ]),
+            ),
+            const SizedBox(height: 8),
+            const Text('This exact key is encrypted. Enter ITS passphrase (not the server login password).', style: TextStyle(fontSize: 11, color: AppColors.textSecondary)),
             const SizedBox(height: 10),
             TextField(controller: c, obscureText: true, autofocus: true, style: const TextStyle(fontSize: 12, color: AppColors.textPrimary, fontFamily: AppFonts.mono), decoration: InputDecoration(hintText: 'Key passphrase', hintStyle: const TextStyle(fontSize: 11, color: AppColors.textMuted), filled: true, fillColor: AppColors.surface2, contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10), border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.border)), enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.border)), focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.accentCyan)))),
           ]),

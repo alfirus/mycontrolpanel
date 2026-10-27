@@ -2,8 +2,24 @@ import 'package:flutter/material.dart';
 import '../models/cron_entry.dart';
 import '../models/server_connection.dart';
 import '../services/agent_service.dart';
+import '../services/ssh_key_loader.dart';
 import '../theme/app_theme.dart';
 import 'pitch_card.dart';
+
+/// Returns (proceed, passphrase). Skips the prompt entirely when the saved
+/// key loads without one — an unencrypted key must never trigger a dialog.
+Future<(bool, String?)> _resolvePassphrase(
+  ServerConnection conn,
+  Future<String?> Function() askPassphrase,
+) async {
+  if (conn.authMethod == AuthMethod.password) return (true, null);
+  final pre = await SshKeyLoader.load(conn.credential);
+  if (pre.keys != null) return (true, null);
+  if (!pre.needsPassphrase) throw Exception(pre.error ?? 'key load failed');
+  final pass = await askPassphrase();
+  if (pass == null || pass.isEmpty) return (false, null);
+  return (true, pass);
+}
 
 /// Tap a cronjob → LOG / EDIT. Shared by Overview, Cronjobs tab, Server Details.
 Future<void> showCronActions(
@@ -13,6 +29,7 @@ Future<void> showCronActions(
   required AgentService agent,
   required Future<String?> Function() askPassphrase,
   required VoidCallback onChanged,
+  VoidCallback? onBadPassphrase,
 }) {
   return showDialog(
     context: context,
@@ -41,7 +58,7 @@ Future<void> showCronActions(
                 Navigator.pop(ctx);
                 await Future.delayed(const Duration(milliseconds: 350));
                 if (context.mounted) {
-                  showCronLog(context, entry: entry, conn: conn, agent: agent, askPassphrase: askPassphrase);
+                  showCronLog(context, entry: entry, conn: conn, agent: agent, askPassphrase: askPassphrase, onBadPassphrase: onBadPassphrase);
                 }
               },
               icon: const Icon(Icons.terminal, size: 14),
@@ -57,7 +74,7 @@ Future<void> showCronActions(
                 Navigator.pop(ctx);
                 await Future.delayed(const Duration(milliseconds: 350));
                 if (context.mounted) {
-                  showCronEdit(context, entry: entry, conn: conn, agent: agent, askPassphrase: askPassphrase, onChanged: onChanged);
+                  showCronEdit(context, entry: entry, conn: conn, agent: agent, askPassphrase: askPassphrase, onChanged: onChanged, onBadPassphrase: onBadPassphrase);
                 }
               },
               icon: const Icon(Icons.edit_outlined, size: 14),
@@ -77,11 +94,15 @@ Future<void> showCronLog(
   required ServerConnection conn,
   required AgentService agent,
   required Future<String?> Function() askPassphrase,
+  VoidCallback? onBadPassphrase,
 }) async {
   String? log;
   String? error;
   bool loading = true;
   bool started = false;
+  void noteBadPass(String e) {
+    if (e.contains('Passphrase not accepted')) onBadPassphrase?.call();
+  }
   // Kicked off post-frame (never during build): the fetch — and the
   // passphrase dialog it may open — must not run inside this builder.
   // setD is only called from post-frame callbacks or event handlers
@@ -90,23 +111,22 @@ Future<void> showCronLog(
     if (!c.mounted) return;
     setD(() { loading = true; log = null; error = null; });
     try {
-      String? pass;
-      if (conn.authMethod != AuthMethod.password) {
-        pass = await askPassphrase();
-        if (!c.mounted) return;
-        if (pass == null) {
-          setD(() { loading = false; error = 'Passphrase required — cancelled.'; });
-          return;
-        }
+      final (proceed, pass) = await _resolvePassphrase(conn, askPassphrase);
+      if (!c.mounted) return;
+      if (!proceed) {
+        setD(() { loading = false; error = 'Passphrase required — cancelled.'; });
+        return;
       }
       final out = await agent.fetchCronLogs(conn, entry, keyPassphrase: pass);
       if (!c.mounted) return;
       setD(() { loading = false; log = out; });
     } catch (e) {
       if (!c.mounted) return;
+      final msg = e.toString().replaceFirst('Exception: ', '').split('\n').first;
+      noteBadPass(msg);
       setD(() {
         loading = false;
-        error = e.toString().replaceFirst('Exception: ', '').split('\n').first;
+        error = msg;
       });
     }
   }
@@ -164,6 +184,7 @@ Future<void> showCronEdit(
   required AgentService agent,
   required Future<String?> Function() askPassphrase,
   required VoidCallback onChanged,
+  VoidCallback? onBadPassphrase,
 }) {
   final schedCtrl = TextEditingController(text: entry.schedule);
   final cmdCtrl = TextEditingController(text: entry.command);
@@ -179,14 +200,11 @@ Future<void> showCronEdit(
         if (!ctx.mounted) return;
         setD(() { saving = true; saveError = null; });
         try {
-          String? pass;
-          if (conn.authMethod != AuthMethod.password) {
-            pass = await askPassphrase();
-            if (!ctx.mounted) return;
-            if (pass == null) {
-              setD(() => saving = false);
-              return;
-            }
+          final (proceed, pass) = await _resolvePassphrase(conn, askPassphrase);
+          if (!ctx.mounted) return;
+          if (!proceed) {
+            setD(() => saving = false);
+            return;
           }
           await agent.updateCron(conn, entry, schedCtrl.text.trim(), cmdCtrl.text.trim(), keyPassphrase: pass);
           if (context.mounted) {
@@ -196,9 +214,11 @@ Future<void> showCronEdit(
           }
         } catch (e) {
           if (!ctx.mounted) return;
+          final msg = e.toString().replaceFirst('Exception: ', '').split('\n').first;
+          if (msg.contains('Passphrase not accepted')) onBadPassphrase?.call();
           setD(() {
             saving = false;
-            saveError = e.toString().replaceFirst('Exception: ', '').split('\n').first;
+            saveError = msg;
           });
         }
       }

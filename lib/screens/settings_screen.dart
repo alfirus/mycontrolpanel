@@ -1116,6 +1116,18 @@ class _ServerDialogState extends State<_ServerDialog> {
     _env = e?.env ?? ServerEnv.prod;
     _region = e?.region ?? 'us-east-1';
     _os = e?.os ?? 'Ubuntu 24.04';
+    _cred.addListener(() => setState(() {})); // refresh key fingerprint line
+  }
+
+  /// Non-secret summary of what's in the credential field (never key material).
+  String _keyFingerprint() {
+    final v = _cred.text.trim();
+    if (v.isEmpty) return 'No key entered yet.';
+    if (!v.contains('PRIVATE KEY') && !v.contains('OPENSSH') && !v.contains('Proc-Type') && !v.contains('DEK-Info')) {
+      return 'Saved value is a file path (${v.length} chars) — app cannot read paths; import the file.';
+    }
+    final lines = v.split('\n').length;
+    return 'Saved: ${SshKeyLoader.describe(v)} • $lines lines, ${v.length} chars.';
   }
   @override
   void dispose() {
@@ -1202,6 +1214,17 @@ class _ServerDialogState extends State<_ServerDialog> {
                   padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
                   decoration: BoxDecoration(color: AppColors.warning.withValues(alpha: 0.08), borderRadius: BorderRadius.circular(6), border: Border.all(color: AppColors.warning.withValues(alpha: 0.2))),
                   child: const Text('Sandbox note: typed paths (e.g. ~/.ssh/...) cannot be read by the app. Use the folder icon to import — key content is stored, path stops mattering.', style: TextStyle(fontSize: 10, color: AppColors.textMuted)),
+                ),
+              if (_auth==AuthMethod.sshKey && _cred.text.trim().isNotEmpty)
+                Container(
+                  margin: const EdgeInsets.only(top: 6),
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                  decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(6), border: Border.all(color: AppColors.border)),
+                  child: Row(children: [
+                    const Icon(Icons.fingerprint, size: 13, color: AppColors.accentCyan),
+                    const SizedBox(width: 6),
+                    Expanded(child: Text(_keyFingerprint(), style: const TextStyle(fontSize: 10, color: AppColors.textSecondary, fontFamily: AppFonts.mono))),
+                  ]),
                 ),
               const SizedBox(height: 10),
               _field('Tags (optional)', _tags, 'prod, api, critical', Icons.label_outline),
