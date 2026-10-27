@@ -11,21 +11,26 @@ import '../theme/app_theme.dart';
 import '../models/mock_data.dart';
 import '../models/alert_entry.dart';
 import '../models/app_entry.dart';
+import '../models/app_proc.dart';
 import '../models/cron_entry.dart';
 import '../models/server_connection.dart';
 import 'dart:convert';
 import 'package:path_provider/path_provider.dart';
 import '../services/agent_service.dart';
 import '../services/ai_service.dart';
+import '../services/secure_store.dart';
 import '../widgets/cron_dialogs.dart';
 import '../services/update_installer.dart';
 import '../services/update_service.dart';
 import '../services/ai_tools.dart';
+import '../services/audit_log.dart';
+import '../models/audit_entry.dart';
 import '../services/github_service.dart';
 import '../services/gitlab_service.dart';
 import '../services/ssh_key_loader.dart';
 import 'server_details_screen.dart';
 import '../widgets/pitch_card.dart';
+import 'audit_screen.dart';
 import 'settings_screen.dart';
 import 'terminal_screen.dart';
 
@@ -63,6 +68,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
   Set<String> _appLoading = {};
   String? _appError;
   List<AppEntry> get _realApps => _serverApps.values.expand((e) => e).toList();
+  Map<String, AppStats> _procStats = {}; // server id -> APM-lite snapshot
   Map<String, List<AlertEntry>> _serverAlerts = {}; // server id -> harvested alerts
   Set<String> _alertLoading = {};
   String? _alertError;
@@ -87,6 +93,9 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
   List<GithubItem> _ghIssues = [];
   List<GithubItem> _ghPRs = [];
   List<GithubItem> _ghTasks = [];
+  List<Map<String, dynamic>> _ghProjects = [];
+  String _ghTasksSource = ''; // 'projects' or 'assigned'
+  bool get _ghTasksFromProjects => _ghTasksSource == 'projects';
   bool _ghLoading = false;
   String? _ghError;
   bool get _ghConfigured => _ghToken.isNotEmpty && _ghRepos.isNotEmpty;
@@ -118,12 +127,12 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
       : mockServers;
 
   Future<void> _loadSavedServers() async {
+    await SecureStore.migrateIfNeeded();
     final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString('server_connections');
+    final servers = await SecureStore.readServers();
     if (!mounted) return;
     setState(() {
-      _savedServers = raw == null ? [] : ServerConnection.decodeList(raw);
-      _ghToken = prefs.getString('github_token') ?? '';
+      _savedServers = servers;
       _ghUser = prefs.getString('github_user') ?? '';
       _ghRepos = prefs.getStringList('github_repos') ?? [];
       _aiModelName = prefs.getString('ai_model') ?? '';
@@ -135,12 +144,20 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
       }
       _aiProvider = AiProvider.values[(prefs.getInt('ai_provider') ?? 0).clamp(0, AiProvider.values.length - 1)];
       _aiBaseUrl = prefs.getString('ai_base_url') ?? _aiProvider.defaultBaseUrl;
-      _aiKey = prefs.getString('ai_key') ?? '';
       _aiConfigured = _aiModelName.isNotEmpty;
-      _glToken = prefs.getString('gitlab_token') ?? '';
       _glUser = prefs.getString('gitlab_user') ?? '';
       _glBase = prefs.getString('gitlab_base_url') ?? 'https://gitlab.com';
       _glProjects = prefs.getStringList('gitlab_projects') ?? [];
+    });
+    // secrets (keychain) resolve async after first paint
+    final ghTok = await SecureStore.readSecret('github_token') ?? '';
+    final glTok = await SecureStore.readSecret('gitlab_token') ?? '';
+    final aiK = await SecureStore.readSecret('ai_key') ?? '';
+    if (!mounted) return;
+    setState(() {
+      _ghToken = ghTok;
+      _glToken = glTok;
+      _aiKey = aiK;
     });
     _pollAgents();
     _pollGithub();
@@ -163,8 +180,23 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
       }
       issues.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
       prs.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+      // Tasks prefer Projects v2 boards; fall back to assigned issues.
       List<GithubItem> tasks = [];
-      try { tasks = await svc.myTasks(_ghRepos); } catch (_) {}
+      var tasksSource = '';
+      List<Map<String, dynamic>> projects = [];
+      try {
+        projects = await svc.projectsV2();
+      } catch (_) {}
+      try {
+        tasks = await svc.projectTasks();
+        if (tasks.isNotEmpty) tasksSource = 'projects';
+      } catch (_) {}
+      if (tasks.isEmpty) {
+        try {
+          tasks = await svc.myTasks(_ghRepos);
+          if (tasks.isNotEmpty) tasksSource = 'assigned';
+        } catch (_) {}
+      }
       final runs = <DeployItem>[];
       for (final repo in _ghRepos) {
         try { runs.addAll(await svc.repoRuns(repo)); } catch (_) {}
@@ -175,6 +207,8 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
         _ghIssues = issues;
         _ghPRs = prs;
         _ghTasks = tasks;
+        _ghTasksSource = tasksSource;
+        _ghProjects = projects;
         _ghRuns = runs.take(12).toList();
         _ghLoading = false;
       });
@@ -235,6 +269,13 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
         final m = await _agent.fetch(c.host);
         if (!mounted) return;
         if (m != null) setState(() => _metrics[c.id] = m);
+        final ps = await _agent.fetchAppStats(c.host);
+        if (!mounted) return;
+        if (ps != null) {
+          setState(() => _procStats[c.id] = ps);
+        } else {
+          if (mounted) setState(() => _procStats.remove(c.id));
+        }
       }
       _pollCrons();
       _pollApps();
@@ -1037,21 +1078,40 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
         await _runToolLoop(convo);
       } else if (route == ToolRoute.responses) {
         await _runResponsesLoop(convo);
+      } else if (route == ToolRoute.anthropic) {
+        await _runAnthropicToolLoop(convo);
+      } else if (route == ToolRoute.gemini) {
+        await _runGeminiToolLoop(convo);
       } else {
-        final reply = await AiService().chat(
-          provider: _aiProvider,
-          baseUrl: _aiBaseUrl,
-          apiKey: _aiKey,
-          model: _aiModelName,
-          system: _aiSystemPrompt(),
-          sessionId: _aiSessionId,
-          messages: convo,
-        );
+        // Plain route: streamed reply straight into the bubble.
+        setState(() => _chatMessages.add({'role': 'assistant', 'text': ''}));
+        final idx = _chatMessages.length - 1;
+        final buf = StringBuffer();
+        try {
+          await AiService().streamChat(
+            provider: _aiProvider,
+            baseUrl: _aiBaseUrl,
+            apiKey: _aiKey,
+            model: _aiModelName,
+            system: _aiSystemPrompt(),
+            sessionId: _aiSessionId,
+            messages: convo,
+            onToken: (t) {
+              if (!mounted) return;
+              buf.write(t);
+              setState(() => _chatMessages[idx]['text'] = buf.toString());
+              if (_chatScroll.hasClients) {
+                _chatScroll.jumpTo(_chatScroll.position.maxScrollExtent);
+              }
+            },
+          );
+        } catch (e) {
+          if (!mounted) return;
+          final msg = 'AI error: ${e.toString().replaceFirst('Exception: ', '').split('\n').first}\n(Provider: ${_aiProvider.label} • model: $_aiModelName — check Settings → AI Provider.)';
+          setState(() => _chatMessages[idx]['text'] = buf.isEmpty ? msg : '${buf}\n\n$msg');
+        }
         if (!mounted) return;
-        setState(() {
-          _chatMessages.add({'role': 'assistant', 'text': reply});
-          _aiTyping = false;
-        });
+        setState(() => _aiTyping = false);
       }
     } catch (e) {
       if (!mounted) return;
@@ -1064,11 +1124,16 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
   }
 
   /// Tool-calling loop (Stage 2): read tools run freely; gated write tools
-  /// pause for an Approve/Deny dialog first.
+  /// pause for an Approve/Deny dialog first. Ollama rides the same loop via
+  /// its OpenAI-compatible /api/chat endpoint.
   Future<void> _runToolLoop(List<Map<String, String>> convo) async {
     final svc = AiService();
     final headers = AiService().openAiHeaders(_aiProvider, _aiKey, _aiSessionId);
-    final base = AiService.chatBase(_aiProvider, _aiBaseUrl);
+    final isOllama = _aiProvider == AiProvider.ollama;
+    final base = isOllama
+        ? _aiBaseUrl.trim().replaceAll(RegExp(r'/+$'), '')
+        : AiService.chatBase(_aiProvider, _aiBaseUrl);
+    final path = isOllama ? '/api/chat' : '/chat/completions';
     final turns = <Map<String, dynamic>>[
       for (final m in convo) {'role': m['role']!, 'content': m['content']!},
     ];
@@ -1083,6 +1148,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
         system: '${_aiSystemPrompt()}\n\nYou have tools for live data${_aiWriteEnabled ? ' and actions' : ''}. Prefer calling a read tool over guessing.${_aiWriteEnabled ? ' For restart_service, run_ssh_command, rerun_workflow, retry_gitlab_pipeline, create_github_issue: the app asks the user to approve first — briefly say what you are about to do, then call the tool.' : ' Write actions are DISABLED by the user — you are read-only. If asked to change anything, explain the manual steps instead of calling a tool.'}',
         messages: turns.map((m) => {'role': m['role'].toString(), 'content': (m['content'] ?? '').toString()}).toList(),
         tools: tools,
+        path: path,
       );
       if (turn.text != null && turn.text!.isNotEmpty) {
         if (!mounted) return;
@@ -1094,15 +1160,23 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
         setState(() => _aiTyping = false);
         return;
       }
+      // Normalize ids first (some providers omit them) so the assistant
+      // message and the follow-up tool results reference the same ids.
+      var callSeq = 0;
+      final calls = [
+        for (final c in turn.calls)
+          c.id.isNotEmpty ? c : ToolCall(id: 'call_${DateTime.now().millisecondsSinceEpoch}_${callSeq++}', name: c.name, arguments: c.arguments),
+      ];
       turns.add({
         'role': 'assistant',
         'content': turn.text ?? '',
         'tool_calls': [
-          for (final c in turn.calls)
+          for (final c in calls)
             {'id': c.id, 'type': 'function', 'function': {'name': c.name, 'arguments': _argsJson(c.arguments)}},
         ],
       });
-      for (final call in turn.calls) {
+      for (final call in calls) {
+        var toolDecision = 'auto';
         if (AiTools.gated.contains(call.name)) {
           // Kill-switch: model should not have these schemas when disabled,
           // but refuse anyway if one arrives.
@@ -1110,6 +1184,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
             if (!mounted) return;
             setState(() => _chatMessages.add({'role': 'assistant', 'text': '_Write tools are disabled — enable them above to allow ${call.name}._'}));
             turns.add({'role': 'tool', 'tool_call_id': call.id, 'content': 'Write tools are disabled by the user. Explain manual steps instead.'});
+            _auditDecision(call, 'blocked', 'Blocked: write tools disabled.');
             continue;
           }
           final approved = await _askToolApproval(call);
@@ -1117,11 +1192,13 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
           if (!approved) {
             setState(() => _chatMessages.add({'role': 'assistant', 'text': '_${call.name} denied by user — I won\'t run it._'}));
             turns.add({'role': 'tool', 'tool_call_id': call.id, 'content': 'Denied by user. Do not retry this call. Explain the manual alternative instead.'});
+            _auditDecision(call, 'denied', 'Denied by user at approval gate.');
             continue;
           }
           setState(() => _chatMessages.add({'role': 'assistant', 'text': '_Running ${call.name}…_'}));
+          toolDecision = 'approved';
         }
-        final result = await _safeExecute(call.name, call.arguments);
+        final result = await _auditedExecute(call, toolDecision);
         if (!mounted) return;
         turns.add({'role': 'tool', 'tool_call_id': call.id, 'content': result.output});
       }
@@ -1140,6 +1217,35 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     } catch (e) {
       return ToolResult('Tool $name crashed: ${e.toString().split('\n').first}');
     }
+  }
+
+  /// Execute + audit. Decision: auto (read tools), approved, denied, blocked.
+  Future<ToolResult> _auditedExecute(ToolCall call, String decision) async {
+    final sw = Stopwatch()..start();
+    final result = await _safeExecute(call.name, call.arguments);
+    sw.stop();
+    unawaited(AuditLog.record(
+      tool: call.name,
+      args: call.arguments,
+      decision: decision,
+      result: result.output,
+      provider: _aiProvider.label,
+      model: _aiModelName,
+      durationMs: sw.elapsedMilliseconds,
+    ));
+    return result;
+  }
+
+  void _auditDecision(ToolCall call, String decision, String summary) {
+    unawaited(AuditLog.record(
+      tool: call.name,
+      args: call.arguments,
+      decision: decision,
+      result: summary,
+      provider: _aiProvider.label,
+      model: _aiModelName,
+      durationMs: 0,
+    ));
   }
 
   /// Tool loop for Responses-API models (Go/Zen responses family):
@@ -1184,11 +1290,13 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
       }
       input = [...input, ...turn.outputItems];
       for (final call in turn.calls) {
+        var toolDecision = 'auto';
         if (AiTools.gated.contains(call.name)) {
           if (!_aiWriteEnabled) {
             if (!mounted) return;
             setState(() => _chatMessages.add({'role': 'assistant', 'text': '_Write tools are disabled — enable them above to allow ${call.name}._'}));
             input.add({'type': 'function_call_output', 'call_id': call.id, 'output': 'Write tools are disabled by the user. Explain manual steps instead.'});
+            _auditDecision(call, 'blocked', 'Blocked: write tools disabled.');
             continue;
           }
           final approved = await _askToolApproval(call);
@@ -1196,13 +1304,174 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
           if (!approved) {
             setState(() => _chatMessages.add({'role': 'assistant', 'text': '_${call.name} denied by user — I won\'t run it._'}));
             input.add({'type': 'function_call_output', 'call_id': call.id, 'output': 'Denied by user. Do not retry this call. Explain the manual alternative instead.'});
+            _auditDecision(call, 'denied', 'Denied by user at approval gate.');
             continue;
           }
           setState(() => _chatMessages.add({'role': 'assistant', 'text': '_Running ${call.name}…_'}));
+        toolDecision = 'approved';
         }
-        final result = await _safeExecute(call.name, call.arguments);
+        final result = await _auditedExecute(call, toolDecision);
         if (!mounted) return;
         input.add({'type': 'function_call_output', 'call_id': call.id, 'output': result.output});
+      }
+    }
+    if (!mounted) return;
+    setState(() {
+      _chatMessages.add({'role': 'assistant', 'text': '_Stopped after ${AiTools.maxIterations} tool rounds — ask me to continue if needed._'});
+      _aiTyping = false;
+    });
+  }
+
+  List<Map<String, dynamic>> _toolSchemas() => _aiWriteEnabled
+      ? AiTools.schemas()
+      : AiTools.schemas().where((t) => !AiTools.gated.contains((((t['function'] as Map?)) ?? const {})['name'])).toList();
+
+  String _toolSystemSuffix() =>
+      ' Prefer calling a read tool over guessing.${_aiWriteEnabled ? ' For restart_service, run_ssh_command, rerun_workflow, retry_gitlab_pipeline, create_github_issue: the app asks the user to approve first — briefly say what you are about to do, then call the tool.' : ' Write actions are DISABLED by the user — you are read-only. If asked to change anything, explain the manual steps instead of calling a tool.'}';
+
+  /// Native Anthropic tool loop (Anthropic provider + Zen/Go anthropic models).
+  Future<void> _runAnthropicToolLoop(List<Map<String, String>> convo) async {
+    final svc = AiService();
+    final trimmed = _aiBaseUrl.trim().replaceAll(RegExp(r'/+$'), '');
+    late final String url;
+    if (_aiProvider == AiProvider.anthropic) {
+      url = '$trimmed/v1/messages';
+    } else if (_aiProvider == AiProvider.openCodeGo) {
+      url = 'https://opencode.ai/inference/go/anthropic/v1/messages';
+    } else {
+      url = '$trimmed/messages'; // Zen: {base}/messages
+    }
+    final messages = <Map<String, dynamic>>[
+      for (final m in convo)
+        if (m['role'] == 'user' || m['role'] == 'assistant') {'role': m['role']!, 'content': m['content']!},
+    ];
+    final tools = _toolSchemas();
+    final system = '${_aiSystemPrompt()}\n\nYou have tools for live data${_aiWriteEnabled ? ' and actions' : ''}.${_toolSystemSuffix()}';
+    for (var i = 0; i < AiTools.maxIterations; i++) {
+      final turn = await svc.anthropicTurn(
+        baseUrl: _aiBaseUrl,
+        key: _aiKey,
+        model: _aiModelName,
+        system: system,
+        messages: messages,
+        tools: tools,
+        endpoint: url,
+        gateway: _aiProvider != AiProvider.anthropic,
+      );
+      if (turn.text != null && turn.text!.isNotEmpty) {
+        if (!mounted) return;
+        setState(() => _chatMessages.add({'role': 'assistant', 'text': turn.text!}));
+        _scrollChatToEnd();
+      }
+      if (turn.calls.isEmpty) {
+        if (!mounted) return;
+        setState(() => _aiTyping = false);
+        return;
+      }
+      messages.add({'role': 'assistant', 'content': turn.native});
+      for (final call in turn.calls) {
+        var toolDecision = 'auto';
+        if (AiTools.gated.contains(call.name)) {
+          if (!_aiWriteEnabled) {
+            if (!mounted) return;
+            setState(() => _chatMessages.add({'role': 'assistant', 'text': '_Write tools are disabled — enable them above to allow ${call.name}._'}));
+            messages.add({'role': 'user', 'content': [{'type': 'tool_result', 'tool_use_id': call.id, 'content': 'Write tools are disabled by the user. Explain manual steps instead.'}]});
+            _auditDecision(call, 'blocked', 'Blocked: write tools disabled.');
+            continue;
+          }
+          final approved = await _askToolApproval(call);
+          if (!mounted) return;
+          if (!approved) {
+            setState(() => _chatMessages.add({'role': 'assistant', 'text': '_${call.name} denied by user — I won\'t run it._'}));
+            messages.add({'role': 'user', 'content': [{'type': 'tool_result', 'tool_use_id': call.id, 'content': 'Denied by user. Do not retry this call. Explain the manual alternative instead.'}]});
+            _auditDecision(call, 'denied', 'Denied by user at approval gate.');
+            continue;
+          }
+          setState(() => _chatMessages.add({'role': 'assistant', 'text': '_Running ${call.name}…_'}));
+        toolDecision = 'approved';
+        }
+        final result = await _auditedExecute(call, toolDecision);
+        if (!mounted) return;
+        messages.add({'role': 'user', 'content': [{'type': 'tool_result', 'tool_use_id': call.id, 'content': result.output}]});
+      }
+    }
+    if (!mounted) return;
+    setState(() {
+      _chatMessages.add({'role': 'assistant', 'text': '_Stopped after ${AiTools.maxIterations} tool rounds — ask me to continue if needed._'});
+      _aiTyping = false;
+    });
+  }
+
+  /// Native Gemini tool loop (direct + Go/Zen gateways).
+  Future<void> _runGeminiToolLoop(List<Map<String, String>> convo) async {
+    final svc = AiService();
+    final contents = <Map<String, dynamic>>[
+      for (final m in convo)
+        {
+          'role': m['role'] == 'assistant' ? 'model' : 'user',
+          'parts': [
+            {'text': m['content']!}
+          ],
+        },
+    ];
+    final tools = _toolSchemas();
+    final system = '${_aiSystemPrompt()}\n\nYou have function tools for live data${_aiWriteEnabled ? ' and actions' : ''}.${_toolSystemSuffix()}';
+    String? fullUrl;
+    var gateway = false;
+    if (_aiProvider == AiProvider.openCodeGo) {
+      fullUrl = 'https://opencode.ai/inference/go/google/v1beta/models/gemini-4-argon:generateContent?key=$_aiKey';
+      gateway = true;
+    } else if (_aiProvider == AiProvider.openCodeZen) {
+      final m = _aiModelName.trim().toLowerCase();
+      fullUrl = '${_aiBaseUrl.trim().replaceAll(RegExp(r'/+$'), '')}/models/$m:generateContent?key=$_aiKey';
+      gateway = true;
+    }
+    for (var i = 0; i < AiTools.maxIterations; i++) {
+      final turn = await svc.geminiTurn(
+        baseUrl: _aiBaseUrl,
+        key: _aiKey,
+        model: _aiModelName,
+        system: system,
+        contents: contents,
+        fullUrl: fullUrl,
+        gateway: gateway,
+        tools: tools,
+      );
+      if (turn.text != null && turn.text!.isNotEmpty) {
+        if (!mounted) return;
+        setState(() => _chatMessages.add({'role': 'assistant', 'text': turn.text!}));
+        _scrollChatToEnd();
+      }
+      if (turn.calls.isEmpty) {
+        if (!mounted) return;
+        setState(() => _aiTyping = false);
+        return;
+      }
+      contents.add({'role': 'model', 'parts': turn.native});
+      for (final call in turn.calls) {
+        var toolDecision = 'auto';
+        if (AiTools.gated.contains(call.name)) {
+          if (!_aiWriteEnabled) {
+            if (!mounted) return;
+            setState(() => _chatMessages.add({'role': 'assistant', 'text': '_Write tools are disabled — enable them above to allow ${call.name}._'}));
+            contents.add({'role': 'function', 'parts': [{'functionResponse': {'name': call.name, 'response': {'result': 'Write tools are disabled by the user. Explain manual steps instead.'}}}]});
+            _auditDecision(call, 'blocked', 'Blocked: write tools disabled.');
+            continue;
+          }
+          final approved = await _askToolApproval(call);
+          if (!mounted) return;
+          if (!approved) {
+            setState(() => _chatMessages.add({'role': 'assistant', 'text': '_${call.name} denied by user — I won\'t run it._'}));
+            contents.add({'role': 'function', 'parts': [{'functionResponse': {'name': call.name, 'response': {'result': 'Denied by user. Do not retry this call. Explain the manual alternative instead.'}}}]});
+            _auditDecision(call, 'denied', 'Denied by user at approval gate.');
+            continue;
+          }
+          setState(() => _chatMessages.add({'role': 'assistant', 'text': '_Running ${call.name}…_'}));
+        toolDecision = 'approved';
+        }
+        final result = await _auditedExecute(call, toolDecision);
+        if (!mounted) return;
+        contents.add({'role': 'function', 'parts': [{'functionResponse': {'name': call.name, 'response': {'result': result.output}}}]});
       }
     }
     if (!mounted) return;
@@ -1371,7 +1640,10 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     }
     b.writeln();
     if (_ghConfigured) {
-      b.writeln('GITHUB (@$_ghUser, repos: ${_ghRepos.join(', ')}): ${_ghIssues.length} open issues, ${_ghPRs.length} open PRs, ${_ghTasks.length} tasks.');
+      b.writeln('GITHUB (@$_ghUser, repos: ${_ghRepos.join(', ')}): ${_ghIssues.length} open issues, ${_ghPRs.length} open PRs, ${_ghTasks.length} tasks${_ghTasksFromProjects ? ' (from Projects v2 boards)' : ''}.');
+      if (_ghProjects.isNotEmpty) {
+        b.writeln('PROJECTS V2: ${_ghProjects.map((p) => '${p['title']} (${p['items']} items)').join(', ')}');
+      }
       for (final i in _ghIssues.take(5)) {
         b.writeln('- issue #${i.number}: ${i.title} (${i.repo})');
       }
@@ -1912,6 +2184,12 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
   }
 
   /// Apps discovered live on the user's servers (systemd + docker + ports).
+  /// Extract port from a "listening :PORT" detail string.
+  String _portOf(String detail) {
+    final m = RegExp(r':(\d+)').firstMatch(detail);
+    return m?.group(1) ?? '';
+  }
+
   Widget _realAppsCard({bool compact = false}) {
     final all = _realApps;
     final display = compact ? all.take(4).toList() : all;
@@ -1956,7 +2234,12 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
             )
           : Column(children: [
               for (final a in display)
-                Container(
+                Builder(builder: (_) {
+                  final proc = _procStats[a.serverId]?.matchForApp(a.name);
+                  final est = a.source == 'port'
+                      ? _procStats[a.serverId]?.ports[_portOf(a.detail)]?.established
+                      : null;
+                  return Container(
                   margin: EdgeInsets.only(bottom: compact ? 6 : 8),
                   padding: EdgeInsets.all(compact ? 8 : 10),
                   decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(8), border: Border.all(color: AppColors.borderLight)),
@@ -1967,6 +2250,18 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
                       Row(children: [
                         Flexible(child: Text(a.name, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: AppColors.textPrimary), overflow: TextOverflow.ellipsis)),
                         const SizedBox(width: 5),
+                        if (proc != null)
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                            decoration: BoxDecoration(color: (proc.cpu > 0.75 ? AppColors.critical : AppColors.success).withValues(alpha: 0.12), borderRadius: BorderRadius.circular(4)),
+                            child: Text('CPU ${(proc.cpu * 100).toInt()}% • ${proc.memMb}MB', style: TextStyle(fontSize: 9, fontWeight: FontWeight.w800, color: proc.cpu > 0.75 ? AppColors.critical : AppColors.success, fontFamily: AppFonts.mono)),
+                          )
+                        else if (est != null && est > 0)
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                            decoration: BoxDecoration(color: AppColors.accentPurple.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(4)),
+                            child: Text('$est CONN', style: const TextStyle(fontSize: 9, fontWeight: FontWeight.w800, color: AppColors.accentPurple, fontFamily: AppFonts.mono)),
+                          ),
                         Pill(text: a.source.toUpperCase(), color: colorFor(a)),
                       ]),
                       const SizedBox(height: 4),
@@ -1986,7 +2281,8 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
                     ])),
                     StatusDot(color: AppColors.success, pulse: false),
                   ]),
-                ),
+                  );
+                }),
               if (compact && all.length > display.length)
                 Center(child: Text('+ ${all.length - display.length} more • tap VIEW ALL', style: const TextStyle(fontSize: 10, color: AppColors.textMuted, fontWeight: FontWeight.w600))),
             ]),
@@ -2043,13 +2339,13 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
           ? 'syncing…'
           : _ghError != null
               ? _ghError!
-              : '${_ghRepos.length} repo${_ghRepos.length == 1 ? '' : 's'} • ${_ghIssues.length} issues • ${_ghPRs.length} PRs • ${_ghTasks.length} tasks',
+              : '${_ghRepos.length} repo${_ghRepos.length == 1 ? '' : 's'} • ${_ghIssues.length} issues • ${_ghPRs.length} PRs • ${_ghTasks.length} tasks${_ghTasksFromProjects ? ' (Projects v2)' : ''}${_ghProjects.isNotEmpty ? ' • ${_ghProjects.length} boards' : ''}',
       trailing: Row(mainAxisSize: MainAxisSize.min, children: [
         if (_ghLoading) const SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.accentCyan)),
         if (_ghLoading) const SizedBox(width: 6),
         InkWell(
           onTap: () {
-            setState(() { _ghIssues = []; _ghPRs = []; _ghTasks = []; _ghError = null; });
+            setState(() { _ghIssues = []; _ghPRs = []; _ghTasks = []; _ghProjects = []; _ghTasksSource = ''; _ghError = null; });
             _pollGithub();
           },
           child: const Row(children: [Icon(Icons.refresh, size: 11, color: AppColors.accentCyan), SizedBox(width: 3), Text('SYNC', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan))]),
@@ -2061,7 +2357,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
           isSelected: [_githubTab==0, _githubTab==1, _githubTab==2], onPressed: (i)=> setState(()=> _githubTab=i),
           borderRadius: BorderRadius.circular(7), selectedColor: Colors.black, fillColor: AppColors.accentCyan, color: AppColors.textSecondary, borderColor: AppColors.border, selectedBorderColor: AppColors.accentCyan,
           constraints: const BoxConstraints(minHeight: 24, minWidth: 44),
-          children: [Text('Issues (${_ghIssues.length})', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700)), Text('PRs (${_ghPRs.length})', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700)), Text('Tasks (${_ghTasks.length})', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700))],
+          children: [Text('Issues (${_ghIssues.length})', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700)), Text('PRs (${_ghPRs.length})', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700)), Text('Tasks (${_ghTasks.length})${_ghTasksFromProjects ? ' ▣' : ''}', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700))],
         ),
         const SizedBox(height: 8),
         if (data.isEmpty && !_ghLoading)
@@ -2553,7 +2849,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     return Drawer(
       backgroundColor: const Color(0xFF0A0A0A), width: 380,
       child: SafeArea(child: Column(children: [
-        Container(padding: const EdgeInsets.all(14), decoration: const BoxDecoration(color: AppColors.surface1, border: Border(bottom: BorderSide(color: AppColors.border))), child: Row(children: [Container(width: 36, height: 36, decoration: BoxDecoration(color: AppColors.accentCyan, borderRadius: BorderRadius.circular(8)), child: const Icon(Icons.smart_toy, size: 18, color: Colors.black)), const SizedBox(width: 10), Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [const Text('AI Assistant', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.textPrimary)), Text(_aiConfigured ? '$_aiModelName • control center aware' : 'No provider configured', style: const TextStyle(fontSize: 10, color: AppColors.textMuted), maxLines: 1, overflow: TextOverflow.ellipsis)]))])),
+        Container(padding: const EdgeInsets.all(14), decoration: const BoxDecoration(color: AppColors.surface1, border: Border(bottom: BorderSide(color: AppColors.border))), child: Row(children: [Container(width: 36, height: 36, decoration: BoxDecoration(color: AppColors.accentCyan, borderRadius: BorderRadius.circular(8)), child: const Icon(Icons.smart_toy, size: 18, color: Colors.black)), const SizedBox(width: 10), Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [const Text('AI Assistant', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.textPrimary)), Text(_aiConfigured ? '$_aiModelName • control center aware' : 'No provider configured', style: const TextStyle(fontSize: 10, color: AppColors.textMuted), maxLines: 1, overflow: TextOverflow.ellipsis)])), Builder(builder: (drawerCtx) => IconButton(tooltip: 'Audit trail', onPressed: () { Navigator.pop(drawerCtx); Navigator.push(context, MaterialPageRoute(builder: (_) => const AuditScreen())); }, icon: Container(padding: const EdgeInsets.all(6), decoration: BoxDecoration(color: AppColors.surface2, borderRadius: BorderRadius.circular(8), border: Border.all(color: AppColors.border)), child: const Icon(Icons.history, size: 15, color: AppColors.textSecondary))))])),
         if (!_aiConfigured)
           Expanded(
             child: Padding(

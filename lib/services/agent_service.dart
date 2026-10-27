@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:dartssh2/dartssh2.dart';
 import '../models/alert_entry.dart';
 import '../models/app_entry.dart';
+import '../models/app_proc.dart';
 import '../models/cron_entry.dart';
 import '../models/server_connection.dart';
 import 'ssh_key_loader.dart';
@@ -19,10 +20,16 @@ class AgentInstallResult {
 class AgentService {
   static const int agentPort = 9108;
 
-  /// The agent: stdlib-only Python, exposes {"cpu":0-1,"ram":0-1,"disk":0-1,"uptime_days":n}
+  /// Agent v2: stdlib-only Python.
+  /// /metrics -> {"cpu","ram","disk","uptime_days","version":2}
+  /// /procstats -> {"version":2,"top":[{"pid","name","cpu","mem_mb"}], "ports":{"3000":{"listening":true,"established":2}}}
+  /// APM-lite: top processes by CPU + per-port established connections.
+  static const int agentVersion = 2;
   static const String agentScript = r'''
 import json, os, time
 from http.server import BaseHTTPRequestHandler, HTTPServer
+
+AGENT_VERSION = 2
 
 def read_cpu():
     try:
@@ -67,12 +74,84 @@ def read_uptime_days():
             return int(float(f.read().split()[0]) // 86400)
     except Exception: return 0
 
+def _proc_snapshot():
+    procs = {}
+    try:
+        for pid in os.listdir('/proc'):
+            if not pid.isdigit():
+                continue
+            try:
+                with open('/proc/%s/stat' % pid) as f:
+                    p = f.read().rsplit(')', 1)[1].split()
+                utime, stime = int(p[11]), int(p[12])
+                with open('/proc/%s/status' % pid) as f:
+                    txt = f.read()
+                name, rss = pid, 0
+                for line in txt.split('\n'):
+                    if line.startswith('Name:'): name = line.split(':', 1)[1].strip()
+                    elif line.startswith('VmRSS:'): rss = int(line.split()[1]) // 1024
+                procs[int(pid)] = [utime + stime, name, rss]
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return procs
+
+def read_top_processes(n=12):
+    try:
+        with open('/proc/stat') as f:
+            total1 = sum(map(int, f.readline().split()[1:8]))
+        s1 = _proc_snapshot()
+        time.sleep(0.5)
+        with open('/proc/stat') as f:
+            total2 = sum(map(int, f.readline().split()[1:8]))
+        s2 = _proc_snapshot()
+        dt = max(1, total2 - total1)
+        out = []
+        for pid, (t1, name, rss) in s1.items():
+            if pid in s2:
+                cpu = max(0.0, min(1.0, (s2[pid][0] - t1) / dt))
+                out.append({'pid': pid, 'name': name, 'cpu': round(cpu, 3), 'mem_mb': s2[pid][2]})
+        out.sort(key=lambda e: e['cpu'], reverse=True)
+        return out[:n]
+    except Exception:
+        return []
+
+def read_ports():
+    ports = {}
+    for path in ('/proc/net/tcp', '/proc/net/tcp6'):
+        try:
+            with open(path) as f:
+                lines = f.read().split('\n')[1:]
+            for line in lines:
+                p = line.split()
+                if len(p) < 4:
+                    continue
+                try:
+                    local_port = int(p[1].split(':')[1], 16)
+                    state = p[3]
+                except Exception:
+                    continue
+                e = ports.setdefault(str(local_port), {'listening': False, 'established': 0})
+                if state == '0A':
+                    e['listening'] = True
+                elif state == '01':
+                    e['established'] += 1
+        except Exception:
+            continue
+    return ports
+
 class H(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path != '/metrics':
+        if self.path == '/metrics':
+            body = json.dumps({'cpu': round(read_cpu(), 3), 'ram': round(read_ram(), 3),
+                               'disk': round(read_disk(), 3), 'uptime_days': read_uptime_days(),
+                               'version': AGENT_VERSION}).encode()
+        elif self.path == '/procstats':
+            body = json.dumps({'version': AGENT_VERSION, 'top': read_top_processes(),
+                               'ports': read_ports()}).encode()
+        else:
             self.send_response(404); self.end_headers(); return
-        body = json.dumps({'cpu': round(read_cpu(), 3), 'ram': round(read_ram(), 3),
-                           'disk': round(read_disk(), 3), 'uptime_days': read_uptime_days()}).encode()
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Content-Length', str(len(body)))
@@ -622,6 +701,21 @@ WantedBy=multi-user.target
     } catch (e) {
       try { client?.close(); } catch (_) {}
       rethrow;
+    }
+  }
+
+  /// GET http://host:9108/procstats -> AppStats or null (agent v2+ only)
+  Future<AppStats?> fetchAppStats(String host) async {
+    try {
+      final hc = HttpClient()..connectionTimeout = const Duration(seconds: 5);
+      final req = await hc.get(host, agentPort, '/procstats');
+      final resp = await req.close().timeout(const Duration(seconds: 8));
+      if (resp.statusCode != 200) return null;
+      final body = await resp.transform(utf8.decoder).join();
+      hc.close();
+      return AppStats.fromJson(jsonDecode(body) as Map<String, dynamic>);
+    } catch (_) {
+      return null;
     }
   }
 

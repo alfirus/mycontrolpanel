@@ -167,12 +167,22 @@ lib/
 
 ## Roadmap
 
-- [ ] Real GitHub API (issues/PRs/Projects) via token
-- [ ] CI/CD from GitHub Actions API
-- [ ] Background alert polling + local notifications
-- [ ] Last-run / success tracking for cronjobs (journal harvesting)
-- [ ] APM-lite (per-app rps/error rates) via agent extension
-- [ ] `flutter_secure_storage` for credentials (Keychain/Keystore)
+- [ ] Background alert polling + push notifications (alert on new firing signals / failed CI runs while the app is closed)
+- [ ] Biometric app lock enforcement (toggle persists; needs `local_auth` + lock screen)
+- [ ] Sentry / Datadog integration (placeholder row in Settings)
+
+<details>
+<summary>Done</summary>
+
+- [x] Structured cronjob last-run tracking (log viewer per job + edit in place)
+- [x] APM-lite — agent v2 `/procstats`: top processes by CPU + per-port connections, surfaced in Apps + Server Details
+- [x] Secure credentials — `flutter_secure_storage` (Keychain/Keystore) for servers, PATs, AI keys, with SharedPreferences migration
+- [x] GitHub Projects v2 (GraphQL) for the Tasks tab, with assigned-issue fallback
+- [x] In-app updates from GitHub Releases (Windows/Linux/macOS)
+- [x] Streaming chat responses (SSE/NDJSON per provider) + Anthropic/Gemini-native and Ollama tool calling
+- [x] AI audit trail (append-only, capped at 200, filter + history viewer in chat drawer)
+
+</details>
 
 Feedback and PRs welcome — especially homelab/self-hosted setups.
 

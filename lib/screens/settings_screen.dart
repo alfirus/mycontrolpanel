@@ -11,6 +11,7 @@ import '../models/server_connection.dart';
 import '../services/ai_service.dart';
 import '../services/github_service.dart';
 import '../services/gitlab_service.dart';
+import '../services/secure_store.dart';
 import '../services/ssh_key_loader.dart';
 import '../services/update_service.dart';
 import '../widgets/pitch_card.dart';
@@ -67,40 +68,47 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _load() async {
+    await SecureStore.migrateIfNeeded();
     final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString('server_connections');
+    final servers = await SecureStore.readServers();
     setState(() {
-      if (raw != null) _servers = ServerConnection.decodeList(raw);
+      _servers = servers;
       _autoRefresh = prefs.getBool('auto_refresh') ?? true;
       _refreshInterval = prefs.getDouble('refresh_interval') ?? 15;
       _notifications = prefs.getBool('notifications') ?? true;
       _biometrics = prefs.getBool('biometrics') ?? false;
-      _githubToken = prefs.getString('github_token') ?? '';
-      _githubUser = prefs.getString('github_user') ?? '';
       _githubRepos = (prefs.getStringList('github_repos') ?? []).toList();
+      _gitlabProjects = (prefs.getStringList('gitlab_projects') ?? []).toList();
+      _loading = false;
+    });
+    // secrets (keychain) load async after first paint
+    final ghTok = await SecureStore.readSecret('github_token') ?? '';
+    final glTok = await SecureStore.readSecret('gitlab_token') ?? '';
+    final aiK = await SecureStore.readSecret('ai_key') ?? '';
+    if (!mounted) return;
+    setState(() {
+      _githubToken = ghTok;
+      _githubUser = prefs.getString('github_user') ?? '';
       _githubTokenCtrl.text = _githubToken;
-      _gitlabToken = prefs.getString('gitlab_token') ?? '';
+      _gitlabToken = glTok;
       _gitlabUser = prefs.getString('gitlab_user') ?? '';
       _gitlabBaseUrl = prefs.getString('gitlab_base_url') ?? 'https://gitlab.com';
-      _gitlabProjects = (prefs.getStringList('gitlab_projects') ?? []).toList();
       _gitlabTokenCtrl.text = _gitlabToken;
       _gitlabBaseCtrl.text = _gitlabBaseUrl;
       final aiIdx = prefs.getInt('ai_provider') ?? AiProvider.openai.index;
       _aiProvider = AiProvider.values[aiIdx.clamp(0, AiProvider.values.length - 1)];
       _aiBaseUrl = prefs.getString('ai_base_url') ?? _aiProvider.defaultBaseUrl;
-      _aiKey = prefs.getString('ai_key') ?? '';
+      _aiKey = aiK;
       _aiModel = prefs.getString('ai_model') ?? '';
       _aiModels = (prefs.getStringList('ai_models') ?? []).toList();
       _aiBaseCtrl.text = _aiBaseUrl;
       _aiKeyCtrl.text = _aiKey;
       _aiModelCtrl.text = _aiModel;
-      _loading = false;
     });
   }
 
   Future<void> _saveServers() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('server_connections', ServerConnection.encodeList(_servers));
+    await SecureStore.writeServers(_servers);
   }
 
   Future<void> _savePrefs() async {
@@ -157,6 +165,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     ));
     if (ok==true) {
       setState(()=> _servers.removeWhere((e)=> e.id==s.id));
+      await SecureStore.deleteServerCredential(s.id);
       await _saveServers();
     }
   }
@@ -498,7 +507,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     try {
       final login = await GithubService(token).validate();
       final prefs = await SharedPreferences.getInstance();
-      await prefs.setString('github_token', token);
+      await SecureStore.writeSecret('github_token', token);
       await prefs.setString('github_user', login);
       if (!mounted) return;
       setState(() {
@@ -550,7 +559,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<void> _disconnectGithub() async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.remove('github_token');
+    await SecureStore.deleteSecret('github_token');
     await prefs.remove('github_user');
     await prefs.remove('github_repos');
     if (!mounted) return;
@@ -679,7 +688,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     try {
       final login = await GitlabService(baseUrl: base, token: token).validate();
       final prefs = await SharedPreferences.getInstance();
-      await prefs.setString('gitlab_token', token);
+      await SecureStore.writeSecret('gitlab_token', token);
       await prefs.setString('gitlab_user', login);
       await prefs.setString('gitlab_base_url', base);
       if (!mounted) return;
@@ -730,7 +739,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<void> _disconnectGitlab() async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.remove('gitlab_token');
+    await SecureStore.deleteSecret('gitlab_token');
     await prefs.remove('gitlab_user');
     await prefs.remove('gitlab_base_url');
     await prefs.remove('gitlab_projects');
@@ -894,7 +903,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setInt('ai_provider', _aiProvider.index);
       await prefs.setString('ai_base_url', _aiBaseUrl);
-      await prefs.setString('ai_key', _aiKey);
+      await SecureStore.writeSecret('ai_key', _aiKey);
       await prefs.setStringList('ai_models', models);
       // keep current model if still valid, else auto-pick first
       String model = _aiModel;
@@ -923,7 +932,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setInt('ai_provider', _aiProvider.index);
     await prefs.setString('ai_base_url', _aiBaseUrl);
-    await prefs.setString('ai_key', _aiKeyCtrl.text.trim());
+    await SecureStore.writeSecret('ai_key', _aiKeyCtrl.text.trim());
     await prefs.setString('ai_model', model);
     if (!mounted) return;
     setState(() {
@@ -938,7 +947,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove('ai_provider');
     await prefs.remove('ai_base_url');
-    await prefs.remove('ai_key');
+    await SecureStore.deleteSecret('ai_key');
     await prefs.remove('ai_model');
     await prefs.remove('ai_models');
     if (!mounted) return;

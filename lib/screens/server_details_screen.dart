@@ -1,14 +1,15 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import '../theme/app_theme.dart';
 import '../models/alert_entry.dart';
 import '../models/app_entry.dart';
+import '../models/app_proc.dart';
 import '../models/cron_entry.dart';
 import '../models/mock_data.dart';
 import '../models/server_connection.dart';
 import '../services/agent_service.dart';
+import '../services/secure_store.dart';
 import '../services/ssh_key_loader.dart';
 import '../widgets/cron_dialogs.dart';
 import '../widgets/pitch_card.dart';
@@ -30,6 +31,8 @@ class _ServerDetailsScreenState extends State<ServerDetailsScreen> {
   List<CronEntry> _crons = [];
   List<AppEntry> _apps = [];
   List<AlertEntry> _alerts = [];
+  AppStats? _procStats;
+  bool _procsBusy = false;
   bool _loading = true;
   bool _metricsBusy = false;
   bool _cronsBusy = false;
@@ -49,9 +52,7 @@ class _ServerDetailsScreenState extends State<ServerDetailsScreen> {
   }
 
   Future<void> _load() async {
-    final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString('server_connections');
-    final list = raw == null ? <ServerConnection>[] : ServerConnection.decodeList(raw);
+    final list = await SecureStore.readServers();
     final conn = list.where((e) => e.id == widget.serverId).firstOrNull;
     if (!mounted) return;
     setState(() { _conn = conn; _loading = false; });
@@ -60,6 +61,7 @@ class _ServerDetailsScreenState extends State<ServerDetailsScreen> {
       _refreshCrons();
       _refreshApps();
       _refreshAlerts();
+      _refreshProcs();
     }
   }
 
@@ -149,6 +151,23 @@ class _ServerDetailsScreenState extends State<ServerDetailsScreen> {
     if (pass == null) return (false, null);
     _keyPass = pass;
     return (true, pass);
+  }
+
+  Future<void> _refreshProcs() async {
+    final c = _conn;
+    if (c == null) return;
+    setState(() => _procsBusy = true);
+    try {
+      final ps = await _agent.fetchAppStats(c.host);
+      if (!mounted) return;
+      setState(() {
+        _procStats = ps;
+        _procsBusy = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _procsBusy = false);
+    }
   }
 
   Future<String?> _askPassphrase() async {
@@ -271,7 +290,7 @@ class _ServerDetailsScreenState extends State<ServerDetailsScreen> {
               ? const Center(child: Text('Server not found (deleted?)', style: TextStyle(color: AppColors.textMuted)))
               : LayoutBuilder(builder: (ctx, constraints) {
                   final threeCol = constraints.maxWidth > 900;
-                  final cards = [_connectionCard(), _metricsCard(), _actionsCard(), _alertsCard(), _appsCard(), _cronsCard()];
+                  final cards = [_connectionCard(), _metricsCard(), _actionsCard(), _alertsCard(), _appsCard(), _procsCard(), _cronsCard()];
                   Widget col(Widget w) => threeCol ? Expanded(child: w) : w;
                   const gap = SizedBox(width: 12);
                   return SingleChildScrollView(
@@ -280,12 +299,14 @@ class _ServerDetailsScreenState extends State<ServerDetailsScreen> {
                       if (threeCol) ...[
                         Row(crossAxisAlignment: CrossAxisAlignment.start, children: [col(cards[0]), gap, col(cards[1]), gap, col(cards[2])]),
                         Row(crossAxisAlignment: CrossAxisAlignment.start, children: [col(cards[3]), gap, col(cards[4]), gap, col(cards[5])]),
+                        Row(crossAxisAlignment: CrossAxisAlignment.start, children: [Expanded(flex: 2, child: cards[6])]),
                       ] else ...[
                         _connectionCard(),
                         _metricsCard(),
                         _actionsCard(),
                         _alertsCard(),
                         _appsCard(),
+                        _procsCard(),
                         _cronsCard(),
                       ],
                       const SizedBox(height: 8),
@@ -510,9 +531,79 @@ class _ServerDetailsScreenState extends State<ServerDetailsScreen> {
     );
   }
 
+  Widget _procsCard() {
+    final top = (_procStats?.top ?? []).take(10).toList();
+    final ports = (_procStats?.ports.values.toList() ?? [])
+      ..sort((a, b) => b.established.compareTo(a.established));
+    final busyPorts = ports.where((p) => p.listening || p.established > 0).take(12).toList();
+    return PitchCard(
+      title: 'PROCESSES • APM-LITE',
+      subtitle: _procStats == null ? 'needs agent v2 — reinstall the agent' : 'top CPU • per-port connections',
+      trailing: _procsBusy
+          ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.accentCyan))
+          : InkWell(onTap: _refreshProcs, child: const Row(children: [Icon(Icons.refresh, size: 12, color: AppColors.accentCyan), SizedBox(width: 3), Text('REFRESH', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan))])),
+      child: _procsBusy && _procStats == null
+          ? const Padding(padding: EdgeInsets.all(12), child: Row(children: [SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.accentCyan)), SizedBox(width: 8), Text('Reading /proc…', style: TextStyle(fontSize: 11, color: AppColors.textMuted))]))
+          : _procStats == null
+              ? const Padding(
+                  padding: EdgeInsets.all(10),
+                  child: Row(children: [
+                    Icon(Icons.memory_outlined, size: 15, color: AppColors.textMuted),
+                    SizedBox(width: 8),
+                    Expanded(child: Text('Agent v1 installed — reinstall to enable process stats (INSTALL AGENT above).', style: TextStyle(fontSize: 11, color: AppColors.textMuted))),
+                  ]),
+                )
+              : Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  for (final p in top)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 5),
+                      child: Row(children: [
+                        SizedBox(
+                          width: 52,
+                          child: Text('${(p.cpu * 100).toInt()}%', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: p.cpu > 0.75 ? AppColors.critical : AppColors.textPrimary, fontFamily: AppFonts.mono), textAlign: TextAlign.right),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(child: Text('${p.name}  •  pid ${p.pid}  •  ${p.memMb}MB', style: const TextStyle(fontSize: 10, color: AppColors.textSecondary, fontFamily: AppFonts.mono), maxLines: 1, overflow: TextOverflow.ellipsis)),
+                        SizedBox(
+                          width: 64,
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(3),
+                            child: LinearProgressIndicator(value: p.cpu.clamp(0.0, 1.0), minHeight: 4, backgroundColor: AppColors.surface2, valueColor: AlwaysStoppedAnimation(p.cpu > 0.75 ? AppColors.critical : AppColors.accentCyan)),
+                          ),
+                        ),
+                      ]),
+                    ),
+                  if (busyPorts.isNotEmpty) ...[
+                    const SizedBox(height: 6),
+                    Wrap(spacing: 6, runSpacing: 4, children: [
+                      for (final pt in busyPorts)
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+                          decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(6), border: Border.all(color: AppColors.borderLight)),
+                          child: Text(':${pt.port} • ${pt.established} conn', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: AppColors.textSecondary, fontFamily: AppFonts.mono)),
+                        ),
+                    ]),
+                  ],
+                ]),
+      footer: _procStats == null
+          ? null
+          : Row(children: [
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: _installAgent,
+                  icon: const Icon(Icons.upgrade_outlined, size: 13),
+                  label: const Text('REINSTALL AGENT (LATEST)', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800)),
+                  style: OutlinedButton.styleFrom(foregroundColor: AppColors.textSecondary, side: const BorderSide(color: AppColors.border), padding: const EdgeInsets.symmetric(vertical: 9)),
+                ),
+              ),
+            ]),
+    );
+  }
+
   Widget _appTile(AppEntry a) {
     final color = a.source == 'docker' ? AppColors.accentBlue : a.source == 'port' ? AppColors.accentPurple : AppColors.success;
     final icon = a.source == 'docker' ? Icons.inventory_2_outlined : a.source == 'port' ? Icons.hub_outlined : Icons.settings_applications_outlined;
+    final proc = _procStats?.matchForApp(a.name);
     return Container(
       margin: const EdgeInsets.only(bottom: 8),
       padding: const EdgeInsets.all(10),
@@ -528,6 +619,12 @@ class _ServerDetailsScreenState extends State<ServerDetailsScreen> {
           ]),
           const SizedBox(height: 2),
           Text(a.detail, style: const TextStyle(fontSize: 10, color: AppColors.textMuted, fontFamily: AppFonts.mono), maxLines: 1, overflow: TextOverflow.ellipsis),
+          if (proc != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 3),
+              child: Text('live: pid ${proc.pid} • cpu ${(proc.cpu * 100).toInt()}% • ${proc.memMb}MB',
+                  style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: proc.cpu > 0.75 ? AppColors.critical : AppColors.success, fontFamily: AppFonts.mono)),
+            ),
         ])),
         StatusDot(color: AppColors.success, pulse: false),
       ]),
