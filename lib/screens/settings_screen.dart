@@ -74,6 +74,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _autoRefresh = prefs.getBool('auto_refresh') ?? true;
       _refreshInterval = prefs.getDouble('refresh_interval') ?? 15;
       _notifications = prefs.getBool('notifications') ?? true;
+      _biometrics = prefs.getBool('biometrics') ?? false;
       _githubToken = prefs.getString('github_token') ?? '';
       _githubUser = prefs.getString('github_user') ?? '';
       _githubRepos = (prefs.getStringList('github_repos') ?? []).toList();
@@ -107,6 +108,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     await prefs.setBool('auto_refresh', _autoRefresh);
     await prefs.setDouble('refresh_interval', _refreshInterval);
     await prefs.setBool('notifications', _notifications);
+    await prefs.setBool('biometrics', _biometrics);
   }
 
   @override
@@ -254,7 +256,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
               _switchTile('Auto-refresh', 'Poll servers every interval', _autoRefresh, (v){ setState(()=> _autoRefresh=v); _savePrefs(); }),
               _sliderTile('Refresh interval', '${_refreshInterval.toInt()}s', _refreshInterval, 5, 60, (v){ setState(()=> _refreshInterval=v); _savePrefs(); }),
               _switchTile('Notifications', 'Alert on critical incidents', _notifications, (v){ setState(()=> _notifications=v); _savePrefs(); }),
-              _switchTile('Biometrics', 'Require Face ID / Touch ID', _biometrics, (v)=> setState(()=> _biometrics=v)),
+              _switchTile('Biometrics', 'Face ID / Touch ID on launch (soon)', _biometrics, (v){ setState(()=> _biometrics=v); _savePrefs(); }),
+              const SizedBox(height: 4),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                decoration: BoxDecoration(color: AppColors.surface2, borderRadius: BorderRadius.circular(6), border: Border.all(color: AppColors.border)),
+                child: const Text('Auto-refresh polls live now. Push notifications + biometric lock screen are on the roadmap — toggles are saved and ready for them.', style: TextStyle(fontSize: 10, color: AppColors.textMuted)),
+              ),
               const SizedBox(height: 4),
               Row(children: [
                 const Text('Theme', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),

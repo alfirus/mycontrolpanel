@@ -17,6 +17,7 @@ import 'dart:convert';
 import 'package:path_provider/path_provider.dart';
 import '../services/agent_service.dart';
 import '../services/ai_service.dart';
+import '../widgets/cron_dialogs.dart';
 import '../services/update_installer.dart';
 import '../services/update_service.dart';
 import '../services/ai_tools.dart';
@@ -46,6 +47,8 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
   final ScrollController _chatScroll = ScrollController();
   final ScrollController _logScroll = ScrollController();
   Timer? _logTimer;
+  Timer? _autoTimer;
+  DateTime? _lastAutoPoll;
   List<LogLine> _liveLogs = List.of(mockLogs);
   List<ServerConnection> _savedServers = [];
   bool get _useRealServers => _savedServers.isNotEmpty;
@@ -222,15 +225,23 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     }
   }
 
+  bool _agentsPolling = false;
+
   Future<void> _pollAgents() async {
-    for (final c in _savedServers) {
-      final m = await _agent.fetch(c.host);
-      if (!mounted) return;
-      if (m != null) setState(() => _metrics[c.id] = m);
+    if (_agentsPolling) return; // re-entrancy guard for the interval timer
+    _agentsPolling = true;
+    try {
+      for (final c in _savedServers) {
+        final m = await _agent.fetch(c.host);
+        if (!mounted) return;
+        if (m != null) setState(() => _metrics[c.id] = m);
+      }
+      _pollCrons();
+      _pollApps();
+      _pollAlerts();
+    } finally {
+      _agentsPolling = false;
     }
-    _pollCrons();
-    _pollApps();
-    _pollAlerts();
   }
 
   /// Harvest alert signals from all saved servers (best-effort).
@@ -278,6 +289,27 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
   }
 
   /// Discover crontabs on all saved servers (best-effort, silent on failure).
+  /// Tap a cronjob → LOG / EDIT dialogs. Rescans that server on change.
+  void _openCron(CronEntry e) {
+    final matches = _savedServers.where((s) => s.id == e.serverId).toList();
+    if (matches.isEmpty) return;
+    final conn = matches.first;
+    showCronActions(
+      context,
+      entry: e,
+      conn: conn,
+      agent: _agent,
+      askPassphrase: () => _askKeyPassphrase(conn, actionLabel: 'VIEW LOG'),
+      onChanged: () {
+        setState(() {
+          _serverCrons.remove(conn.id);
+          _cronError = null;
+        });
+        _pollCrons();
+      },
+    );
+  }
+
   Future<void> _pollCrons() async {
     for (final c in _savedServers) {
       if (_cronLoading.contains(c.id) || _serverCrons.containsKey(c.id)) continue;
@@ -300,6 +332,18 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
   }
 
   Future<void> _installAgent(ServerConnection s) async {
+    // Re-entrancy guard: double-taps used to stack duplicate passphrase
+    // dialogs, making Cancel/Install appear dead (they only closed the top copy).
+    if (_installing.contains(s.id)) return;
+    setState(() => _installing.add(s.id));
+    try {
+      await _installAgentGuarded(s);
+    } finally {
+      if (mounted) setState(() => _installing.remove(s.id));
+    }
+  }
+
+  Future<void> _installAgentGuarded(ServerConnection s) async {
     // Key auth: resolve the key first (passphrase prompt if encrypted).
     // Only falls back to the guided manual install when the key can't be
     // loaded at all (e.g. unreadable path). Otherwise one-click runs directly.
@@ -314,7 +358,6 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
         return;
       }
     }
-    setState(() => _installing.add(s.id));
     final logLines = <String>[];
     String status = 'Starting...';
     // progress dialog
@@ -323,36 +366,54 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
         context: context, barrierDismissible: false,
         builder: (ctx) => StatefulBuilder(builder: (ctx, setD) {
           void onLog(String l) { logLines.add(l); setD(() => status = l.split('\n').last); }
-          // kick off install once
+          // kick off install once — fully guarded: nothing may fail silently
           if (logLines.isEmpty) {
-            _agent.install(s, onLog, keyPassphrase: keyPassphrase).then((r) async {
-              if (!mounted) return;
-              if (r.success) {
-                final m = await _agent.fetch(s.host);
-                if (m != null && mounted) setState(() => _metrics[s.id] = m);
+            () async {
+              AgentInstallResult? r;
+              Object? crash;
+              try {
+                r = await _agent.install(s, onLog, keyPassphrase: keyPassphrase);
+                if (r.success && mounted) {
+                  try {
+                    final m = await _agent.fetch(s.host);
+                    if (m != null && mounted) setState(() => _metrics[s.id] = m);
+                  } catch (_) {
+                    // metrics poll is best-effort; install already succeeded
+                  }
+                }
+              } catch (e) {
+                crash = e;
               }
-              if (context.mounted) Navigator.pop(context);
-              setState(() => _installing.remove(s.id));
               if (!mounted) return;
+              // Always dismiss the progress dialog; _installing reset by caller finally.
+              // Await the pop transition: pushing the next dialog in the same
+              // frame trips Navigator._debugLocked ("is not true").
+              await _dismissDialog();
+              if (!mounted) return;
+              if (crash != null) {
+                _showInstallLog(s, 'Unexpected error (please report):\n$crash');
+                return;
+              }
+              final result = r!;
               ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                backgroundColor: r.success ? AppColors.success.withValues(alpha: 0.14) : AppColors.critical.withValues(alpha: 0.14),
-                content: Text(r.success ? 'Agent installed on ${s.host} — live metrics flowing ✓' : 'Install failed on ${s.host}. Tap INSTALL AGENT to see log.',
-                    style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: r.success ? AppColors.success : AppColors.critical)),
+                backgroundColor: result.success ? AppColors.success.withValues(alpha: 0.14) : AppColors.critical.withValues(alpha: 0.14),
+                content: Text(result.success ? 'Agent installed on ${s.host} — live metrics flowing ✓' : 'Install failed on ${s.host}. Log opened with details.',
+                    style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: result.success ? AppColors.success : AppColors.critical)),
                 duration: const Duration(seconds: 4),
               ));
-              if (!r.success) {
-                if (r.log == 'SSH_KEY_AUTH') {
+              if (!result.success) {
+                if (result.log == 'SSH_KEY_AUTH') {
                   _showManualInstall(s);
-                } else if (r.log == 'SSH_KEY_NEEDS_PASSPHRASE') {
-                  if (context.mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(backgroundColor: AppColors.surface1, content: Text('Key needs a passphrase — enter it to retry one-click, or use manual install.', style: TextStyle(fontSize: 12, color: AppColors.warning)), duration: Duration(seconds: 4)));
-                  }
+                } else if (result.log == 'SSH_KEY_BAD_PASSPHRASE') {
+                  _showInstallLog(s, 'Wrong key passphrase. Tap INSTALL AGENT to retry with the correct one, or use the manual install.');
+                } else if (result.log == 'SSH_KEY_NEEDS_PASSPHRASE') {
+                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(backgroundColor: AppColors.surface1, content: Text('Key needs a passphrase — enter it to retry one-click, or use manual install.', style: TextStyle(fontSize: 12, color: AppColors.warning)), duration: Duration(seconds: 4)));
                   _showManualInstall(s);
                 } else {
-                  _showInstallLog(s, r.log);
+                  _showInstallLog(s, result.log);
                 }
               }
-            });
+            }();
           }
           return AlertDialog(
             backgroundColor: AppColors.surface1,
@@ -371,7 +432,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     }
   }
 
-  Future<String?> _askKeyPassphrase(ServerConnection s) async {
+  Future<String?> _askKeyPassphrase(ServerConnection s, {String actionLabel = 'INSTALL NOW'}) async {
     final c = TextEditingController();
     return showDialog<String>(
       context: context,
@@ -389,7 +450,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
         ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('CANCEL', style: TextStyle(color: AppColors.textSecondary))),
-          FilledButton(onPressed: () => Navigator.pop(ctx, c.text), style: FilledButton.styleFrom(backgroundColor: AppColors.accentCyan, foregroundColor: Colors.black), child: const Text('INSTALL NOW', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800))),
+          FilledButton(onPressed: () => Navigator.pop(ctx, c.text), style: FilledButton.styleFrom(backgroundColor: AppColors.accentCyan, foregroundColor: Colors.black), child: Text(actionLabel, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w800))),
         ],
       ),
     );
@@ -878,6 +939,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
   void initState() {
     super.initState();
     _loadSavedServers().then((_) => _maybeAutoCheckUpdates());
+    _startAutoRefresh();
     _logTimer = Timer.periodic(const Duration(seconds: 3), (_) {
       if (!mounted) return;
       setState(() {
@@ -890,10 +952,35 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
   @override
   void dispose() {
     _logTimer?.cancel();
+    _autoTimer?.cancel();
     _chatController.dispose();
     _chatScroll.dispose();
     _logScroll.dispose();
     super.dispose();
+  }
+
+  /// Real auto-refresh: honors Settings → auto_refresh + refresh_interval.
+  /// Ticks every 5s, re-polls only when the interval has elapsed.
+  void _startAutoRefresh() {
+    _autoTimer?.cancel();
+    _autoTimer = Timer.periodic(const Duration(seconds: 5), (_) async {
+      if (!mounted) return;
+      SharedPreferences? prefs;
+      try {
+        prefs = await SharedPreferences.getInstance();
+      } catch (_) {
+        return;
+      }
+      if (!(prefs.getBool('auto_refresh') ?? true)) return;
+      final interval = (prefs.getDouble('refresh_interval') ?? 15).toInt();
+      final now = DateTime.now();
+      if (_lastAutoPoll != null && now.difference(_lastAutoPoll!).inSeconds < interval) return;
+      _lastAutoPoll = now;
+      if (!mounted) return;
+      _pollAgents(); // metrics + crons + apps + alerts (each guarded internally)
+      _pollGithub();
+      _pollGitlab();
+    });
   }
 
   void _sendChat() async {
@@ -1157,6 +1244,15 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     );
   }
 
+  /// Pop the top dialog and wait for the transition, so a follow-up
+  /// showDialog doesn't trip Navigator._debugLocked ("is not true").
+  Future<void> _dismissDialog() async {
+    if (Navigator.canPop(context)) {
+      Navigator.pop(context);
+      await Future.delayed(const Duration(milliseconds: 350));
+    }
+  }
+
   /// Approve/Deny gate for write tools. True only on explicit Approve.
   Future<bool> _askToolApproval(ToolCall call) async {
     final pretty = _argsJson(call.arguments);
@@ -1322,7 +1418,15 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
               ),
             ),
           ),
-        Container(width: 32, height: 32, decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(8), border: Border.all(color: AppColors.border)), child: const Icon(Icons.hub_outlined, size: 16, color: AppColors.accentCyan)),
+        Container(
+          width: 32,
+          height: 32,
+          decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(8), border: Border.all(color: AppColors.border)),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: Image.asset('assets/app_icon.png', width: 32, height: 32, fit: BoxFit.cover),
+          ),
+        ),
         const SizedBox(width: 10),
         const Flexible(child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
           Text('MY CONTROL PANEL', maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 13, fontWeight: FontWeight.w800, letterSpacing: 1.0, color: AppColors.textPrimary)),
@@ -1709,30 +1813,39 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
             )
           : Column(children: [
               for (final e in display)
-                Container(
-                  margin: EdgeInsets.only(bottom: compact ? 6 : 8),
-                  padding: EdgeInsets.all(compact ? 8 : 10),
-                  decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(8), border: Border.all(color: AppColors.borderLight)),
-                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                    Row(children: [
-                      Container(width: 6, height: 6, decoration: const BoxDecoration(color: AppColors.success, shape: BoxShape.circle)),
-                      const SizedBox(width: 6),
-                      Expanded(child: Text(e.command, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: AppColors.textPrimary, fontFamily: AppFonts.mono), maxLines: compact ? 1 : 2, overflow: TextOverflow.ellipsis)),
-                    ]),
-                    const SizedBox(height: 4),
-                    SingleChildScrollView(
-                      scrollDirection: Axis.horizontal,
-                      child: Row(children: [
-                        Text(e.schedule, style: const TextStyle(fontSize: 10, color: AppColors.accentCyan, fontFamily: AppFonts.mono)),
-                        const SizedBox(width: 8),
-                        Pill(text: e.serverName.toUpperCase(), color: AppColors.accentBlue),
-                        const SizedBox(width: 6),
-                        Text(e.source, style: const TextStyle(fontSize: 9, color: AppColors.textMuted, fontFamily: AppFonts.mono)),
-                        const SizedBox(width: 6),
-                        const Pill(text: 'SCHEDULED', color: AppColors.success),
+                Material(
+                  color: Colors.transparent,
+                  child: InkWell(
+                    onTap: () => _openCron(e),
+                    borderRadius: BorderRadius.circular(8),
+                    child: Container(
+                      margin: EdgeInsets.only(bottom: compact ? 6 : 8),
+                      padding: EdgeInsets.all(compact ? 8 : 10),
+                      decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(8), border: Border.all(color: AppColors.borderLight)),
+                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        Row(children: [
+                          Container(width: 6, height: 6, decoration: const BoxDecoration(color: AppColors.success, shape: BoxShape.circle)),
+                          const SizedBox(width: 6),
+                          Expanded(child: Text(e.command, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: AppColors.textPrimary, fontFamily: AppFonts.mono), maxLines: compact ? 1 : 2, overflow: TextOverflow.ellipsis)),
+                          const SizedBox(width: 6),
+                          const Icon(Icons.chevron_right, size: 14, color: AppColors.textDim),
+                        ]),
+                        const SizedBox(height: 4),
+                        SingleChildScrollView(
+                          scrollDirection: Axis.horizontal,
+                          child: Row(children: [
+                            Text(e.schedule, style: const TextStyle(fontSize: 10, color: AppColors.accentCyan, fontFamily: AppFonts.mono)),
+                            const SizedBox(width: 8),
+                            Pill(text: e.serverName.toUpperCase(), color: AppColors.accentBlue),
+                            const SizedBox(width: 6),
+                            Text(e.source, style: const TextStyle(fontSize: 9, color: AppColors.textMuted, fontFamily: AppFonts.mono)),
+                            const SizedBox(width: 6),
+                            const Pill(text: 'SCHEDULED', color: AppColors.success),
+                          ]),
+                        ),
                       ]),
                     ),
-                  ]),
+                  ),
                 ),
               if (compact && all.length > display.length)
                 Center(child: Text('+ ${all.length - display.length} more • tap VIEW ALL', style: const TextStyle(fontSize: 10, color: AppColors.textMuted, fontWeight: FontWeight.w600))),

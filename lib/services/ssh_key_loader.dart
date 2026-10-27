@@ -79,6 +79,17 @@ class SshKeyLoader {
         return KeyLoadResult(error: 'Cannot read key file (sandbox blocked?): $e\nTip: use the folder button to grant access, or paste the key content.');
       }
     }
+    // Legacy DES-encrypted PEM (e.g. DEK-Info: DES-EDE3-CBC) can never be
+    // decrypted by dartssh2 (AES-only) — don't prompt, explain the fix.
+    final dek = RegExp(r'DEK-Info:\s*([A-Za-z0-9\-]+)').firstMatch(pem)?.group(1)?.toUpperCase() ?? '';
+    if (dek.isNotEmpty && dek.contains('DES')) {
+      return const KeyLoadResult(error:
+          'This key uses legacy DES encryption (DES-EDE3-CBC), which this app cannot decrypt — any passphrase will fail.\n\n'
+          'Convert it once on your Mac (keeps the same key, upgrades the cipher):\n'
+          'ssh-keygen -p -m RFC4716 -f ~/.ssh/<key>\n'
+          '(enter the old passphrase, then choose a new one)\n\n'
+          'Then re-import the converted file via the folder button in Settings or Terminal.');
+    }
     try {
       if (passphrase == null && SSHKeyPair.isEncryptedPem(pem)) {
         return const KeyLoadResult(needsPassphrase: true);

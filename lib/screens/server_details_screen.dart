@@ -10,6 +10,7 @@ import '../models/mock_data.dart';
 import '../models/server_connection.dart';
 import '../services/agent_service.dart';
 import '../services/ssh_key_loader.dart';
+import '../widgets/cron_dialogs.dart';
 import '../widgets/pitch_card.dart';
 
 /// Full detail for one saved server: connection, live metrics, its cronjobs, actions.
@@ -170,40 +171,87 @@ class _ServerDetailsScreenState extends State<ServerDetailsScreen> {
   Future<void> _installAgent() async {
     final c = _conn;
     if (c == null) return;
-    String? pass;
-    if (c.authMethod != AuthMethod.password) {
-      final (proceed, cached) = await _keyPassphrase();
-      if (!proceed) return;
-      pass = cached;
-    }
+    // Re-entrancy guard (same as server cards): double-taps used to stack
+    // duplicate passphrase dialogs, making Cancel/Install appear dead.
+    if (_installing) return;
     setState(() => _installing = true);
+    try {
+      String? pass;
+      if (c.authMethod != AuthMethod.password) {
+        final (proceed, cached) = await _keyPassphrase();
+        if (!proceed) return;
+        pass = cached;
+      }
     final lines = <String>[];
-    if (mounted) {
-      showDialog(
-        context: context, barrierDismissible: false,
-        builder: (ctx) => StatefulBuilder(builder: (ctx, setD) {
-          if (lines.isEmpty) {
-            _agent.install(c, (l) { lines.add(l); setD(() {}); }, keyPassphrase: pass).then((r) async {
-              if (context.mounted) Navigator.pop(context);
-              if (!mounted) return;
-              setState(() => _installing = false);
-              if (r.success) {
-                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(backgroundColor: AppColors.surface1, content: Text('Agent installed ✓ — refreshing metrics…', style: TextStyle(fontSize: 12, color: AppColors.success))));
-                _refreshMetrics();
-              } else {
-                ScaffoldMessenger.of(context).showSnackBar(SnackBar(backgroundColor: AppColors.critical.withValues(alpha: 0.14), content: SelectableText('Install failed:\n${r.log.split('\n').reversed.take(6).toList().reversed.join('\n')}', style: const TextStyle(fontSize: 11, color: AppColors.critical, fontFamily: AppFonts.mono)), duration: const Duration(seconds: 8)));
-              }
-            });
-          }
-          return AlertDialog(
-            backgroundColor: AppColors.surface1,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: const BorderSide(color: AppColors.border)),
-            title: Row(children: [const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.accentCyan)), const SizedBox(width: 10), Expanded(child: Text('Installing on ${c.host}', style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.textPrimary)))]),
-            content: SizedBox(width: 340, height: 220, child: SingleChildScrollView(child: SelectableText(lines.join('\n'), style: const TextStyle(fontSize: 10, color: AppColors.textSecondary, fontFamily: AppFonts.mono)))),
-          );
-        }),
-      );
+    if (!mounted) return;
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => StatefulBuilder(builder: (ctx, setD) {
+        if (lines.isEmpty) {
+          () async {
+            AgentInstallResult? r;
+            Object? crash;
+            try {
+              r = await _agent.install(c, (l) { lines.add(l); setD(() {}); }, keyPassphrase: pass);
+            } catch (e) {
+              crash = e;
+            }
+            if (!mounted) return;
+            await _dismissDialog();
+            if (!mounted) return;
+            if (crash != null) {
+              _showInstallLog('Unexpected error (please report):\n$crash');
+              return;
+            }
+            final result = r!;
+            if (result.success) {
+              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(backgroundColor: AppColors.surface1, content: Text('Agent installed ✓ — refreshing metrics…', style: TextStyle(fontSize: 12, color: AppColors.success))));
+              _refreshMetrics();
+            } else if (result.log == 'SSH_KEY_BAD_PASSPHRASE') {
+              setState(() => _keyPass = null); // wrong passphrase — ask again next time
+              _showInstallLog('Wrong key passphrase. Tap INSTALL AGENT to retry with the correct one, or use the manual install.');
+            } else {
+              _showInstallLog(result.log);
+            }
+          }();
+        }
+        return AlertDialog(
+          backgroundColor: AppColors.surface1,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: const BorderSide(color: AppColors.border)),
+          title: Row(children: [const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.accentCyan)), const SizedBox(width: 10), Expanded(child: Text('Installing on ${c.host}', style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.textPrimary)))]),
+          content: SizedBox(width: 340, height: 220, child: SingleChildScrollView(child: SelectableText(lines.join('\n'), style: const TextStyle(fontSize: 10, color: AppColors.textSecondary, fontFamily: AppFonts.mono)))),
+        );
+      }),
+    );
+    } finally {
+      if (mounted) setState(() => _installing = false);
     }
+  }
+
+  /// Pop the top dialog and wait for the transition to finish, so the
+  /// next showDialog doesn't trip Navigator._debugLocked.
+  Future<void> _dismissDialog() async {
+    if (Navigator.canPop(context)) {
+      Navigator.pop(context);
+      await Future.delayed(const Duration(milliseconds: 350));
+    }
+  }
+
+  void _showInstallLog(String log) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.surface1,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: const BorderSide(color: AppColors.border)),
+        title: const Text('Install log', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
+        content: SizedBox(
+          width: 380, height: 300,
+          child: SingleChildScrollView(child: SelectableText(log, style: const TextStyle(fontSize: 10, color: AppColors.textSecondary, fontFamily: AppFonts.mono))),
+        ),
+        actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('CLOSE', style: TextStyle(color: AppColors.textSecondary)))],
+      ),
+    );
   }
 
   @override
@@ -388,23 +436,48 @@ class _ServerDetailsScreenState extends State<ServerDetailsScreen> {
     );
   }
 
-  Widget _cronTile(CronEntry e) => Container(
-        margin: const EdgeInsets.only(bottom: 8),
-        padding: const EdgeInsets.all(10),
-        decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(8), border: Border.all(color: AppColors.borderLight)),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Row(children: [
-            Container(width: 6, height: 6, decoration: const BoxDecoration(color: AppColors.success, shape: BoxShape.circle)),
-            const SizedBox(width: 6),
-            Expanded(child: Text(e.command, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: AppColors.textPrimary, fontFamily: AppFonts.mono), maxLines: 2, overflow: TextOverflow.ellipsis)),
-          ]),
-          const SizedBox(height: 5),
-          Wrap(spacing: 6, runSpacing: 4, children: [
-            Text(e.schedule, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: AppColors.accentCyan, fontFamily: AppFonts.mono)),
-            Text(e.source, style: const TextStyle(fontSize: 9, color: AppColors.textMuted, fontFamily: AppFonts.mono)),
-            const Pill(text: 'SCHEDULED', color: AppColors.success),
-          ]),
-        ]),
+  void _openCron(CronEntry e) {
+    final c = _conn;
+    if (c == null) return;
+    showCronActions(
+      context,
+      entry: e,
+      conn: c,
+      agent: _agent,
+      askPassphrase: () async {
+        final (proceed, pass) = await _keyPassphrase();
+        return proceed ? pass : null;
+      },
+      onChanged: _refreshCrons,
+    );
+  }
+
+  Widget _cronTile(CronEntry e) => Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: () => _openCron(e),
+          borderRadius: BorderRadius.circular(8),
+          child: Container(
+            margin: const EdgeInsets.only(bottom: 8),
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(8), border: Border.all(color: AppColors.borderLight)),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Row(children: [
+                Container(width: 6, height: 6, decoration: const BoxDecoration(color: AppColors.success, shape: BoxShape.circle)),
+                const SizedBox(width: 6),
+                Expanded(child: Text(e.command, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: AppColors.textPrimary, fontFamily: AppFonts.mono), maxLines: 2, overflow: TextOverflow.ellipsis)),
+                const SizedBox(width: 6),
+                const Icon(Icons.chevron_right, size: 14, color: AppColors.textDim),
+              ]),
+              const SizedBox(height: 5),
+              Wrap(spacing: 6, runSpacing: 4, children: [
+                Text(e.schedule, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: AppColors.accentCyan, fontFamily: AppFonts.mono)),
+                Text(e.source, style: const TextStyle(fontSize: 9, color: AppColors.textMuted, fontFamily: AppFonts.mono)),
+                const Pill(text: 'SCHEDULED', color: AppColors.success),
+              ]),
+            ]),
+          ),
+        ),
       );
 
   Widget _appsCard() {
