@@ -49,7 +49,7 @@ jobs:
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
 
       - name: Setup Flutter
-        uses: subosito/flutter-action@1a449444c387b196624ae4d4f8c696479add0b2 # v2.23.0
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         with:
           channel: stable
 
@@ -94,7 +94,7 @@ jobs:
             -C build/linux/x64/release bundle
 
       - name: Upload artifact
-        uses: actions/upload-artifact@b7c17ad0d3a9c1381d09a0fbf1c9d8d5589ce49 # v4
+        uses: actions/upload-artifact@v4
         with:
           name: mycontrolpanel-${{ matrix.os }}-${{ steps.ver.outputs.version }}
           path: ${{ runner.temp }}/mycontrolpanel-${{ matrix.os }}-${{ steps.ver.outputs.version }}.*
@@ -113,7 +113,7 @@ jobs:
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
 
       - name: Download artifacts
-        uses: actions/download-artifact@f0eaeecd38b46cddbd5b5a0338d2dc41ff76d46d83 # v4
+        uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
@@ -126,7 +126,7 @@ jobs:
           cat SHA256SUMS.txt
 
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@da05d552a7cf9fa5c0d2a16149dc7b1cb4b4dc5a # v2
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.ver.outputs.tag }}
           name: MyControlPanel ${{ steps.ver.outputs.tag }}
