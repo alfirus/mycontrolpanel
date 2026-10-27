@@ -1,11 +1,15 @@
+import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:dartssh2/dartssh2.dart';
 
 class KeyLoadResult {
   final List<SSHKeyPair>? keys;
   final String? error;
   final bool needsPassphrase;
-  const KeyLoadResult({this.keys, this.error, this.needsPassphrase = false});
+  /// Non-secret description, e.g. "OPENSSH PRIVATE KEY, encrypted (bcrypt)".
+  final String detected;
+  const KeyLoadResult({this.keys, this.error, this.needsPassphrase = false, this.detected = 'unknown format'});
 }
 
 class SshKeyLoader {
@@ -55,6 +59,63 @@ class SshKeyLoader {
     return '-----BEGIN $kind-----\n$headerBlock$wrapped\n-----END $kind-----';
   }
 
+  /// Non-secret fingerprint of what the text looks like (never key material).
+  /// For OpenSSH the cipher/kdf live inside the base64 blob, so decode the
+  /// header (first ~100 bytes are enough: magic + ciphername + kdfname).
+  static String describe(String pem) {
+    final t = pem.trim();
+    if (t.contains('OPENSSH PRIVATE KEY')) {
+      return _describeOpenSsh(t);
+    }
+    final dek = RegExp(r'DEK-Info:\s*([A-Za-z0-9\-]+)').firstMatch(t)?.group(1)?.toUpperCase() ?? '';
+    if (t.contains('RSA PRIVATE KEY')) {
+      return dek.isEmpty ? 'RSA PRIVATE KEY, unencrypted' : 'RSA PRIVATE KEY, $dek encrypted';
+    }
+    if (t.contains('EC PRIVATE KEY')) {
+      return dek.isEmpty ? 'EC PRIVATE KEY, unencrypted' : 'EC PRIVATE KEY, $dek encrypted';
+    }
+    if (t.contains('PRIVATE KEY')) return 'unrecognized PEM private-key block';
+    return _describeFallback(t);
+  }
+
+  static String _describeOpenSsh(String pem) {
+    try {
+      final b64 = pem
+          .split('\n')
+          .map((l) => l.trim())
+          .where((l) => l.isNotEmpty && !l.startsWith('-----'))
+          .join();
+      final bytes = base64.decode(b64);
+      if (bytes.length < 19) return 'OPENSSH PRIVATE KEY (too short to parse)';
+      final view = ByteData.sublistView(bytes);
+      var off = 0;
+      String readStr() {
+        final len = view.getUint32(off);
+        off += 4;
+        final s = utf8.decode(bytes.sublist(off, off + len), allowMalformed: true);
+        off += len;
+        return s;
+      }
+      const magic = 'openssh-key-v1';
+      final head = utf8.decode(bytes.sublist(0, 14), allowMalformed: true);
+      if (!head.startsWith(magic)) return 'OPENSSH PRIVATE KEY (bad magic — possibly corrupted paste)';
+      off = 15; // magic + NUL
+      final cipher = readStr();
+      final kdf = readStr();
+      if (cipher == 'none') return 'OPENSSH PRIVATE KEY, unencrypted';
+      return 'OPENSSH PRIVATE KEY, encrypted ($cipher/$kdf)';
+    } catch (_) {
+      return 'OPENSSH PRIVATE KEY (header unreadable — possibly corrupted paste)';
+    }
+  }
+
+  static String _describeFallback(String t) {
+    if (t.length < 200 && !t.contains('\n') || (t.startsWith('/') || t.startsWith('~/'))) {
+      return 'looks like a file path, not key content';
+    }
+    return 'unrecognized content (${t.length} chars)';
+  }
+
   /// Resolves saved credential (file path OR pasted PEM) into key pairs.
   static Future<KeyLoadResult> load(String credential, {String? passphrase}) async {
     var pem = credential.trim();
@@ -79,18 +140,40 @@ class SshKeyLoader {
         return KeyLoadResult(error: 'Cannot read key file (sandbox blocked?): $e\nTip: use the folder button to grant access, or paste the key content.');
       }
     }
+    // Legacy DES-encrypted PEM (e.g. DEK-Info: DES-EDE3-CBC) can never be
+    // decrypted by dartssh2 (AES-only) — don't prompt, explain the fix.
+    final dek = RegExp(r'DEK-Info:\s*([A-Za-z0-9\-]+)').firstMatch(pem)?.group(1)?.toUpperCase() ?? '';
+    if (dek.isNotEmpty && dek.contains('DES')) {
+      return KeyLoadResult(error:
+          'This key uses legacy DES encryption (DES-EDE3-CBC), which this app cannot decrypt — any passphrase will fail.\n\n'
+          'Convert it once on your Mac (keeps the same key, upgrades the cipher):\n'
+          'ssh-keygen -p -m RFC4716 -f ~/.ssh/<key>\n'
+          '(enter the old passphrase, then choose a new one)\n\n'
+          'Then re-import the converted file via the folder button in Settings or Terminal.',
+          detected: describe(pem));
+    }
+    final desc = describe(pem);
     try {
       if (passphrase == null && SSHKeyPair.isEncryptedPem(pem)) {
-        return const KeyLoadResult(needsPassphrase: true);
+        return KeyLoadResult(needsPassphrase: true, detected: desc);
       }
       final keys = SSHKeyPair.fromPem(pem, passphrase);
-      return KeyLoadResult(keys: keys);
+      return KeyLoadResult(keys: keys, detected: desc);
     } catch (e) {
       final msg = e.toString();
       if (msg.contains('passphrase') || msg.contains('encrypted') || msg.contains('bcrypt')) {
-        return const KeyLoadResult(needsPassphrase: true);
+        // A passphrase WAS supplied but still rejected: wrong passphrase or
+        // unsupported KDF — say so instead of looping back to the prompt.
+        if (passphrase != null && passphrase.isNotEmpty) {
+          return KeyLoadResult(
+              error: 'Passphrase not accepted for this key.\nDetected: $desc.\n'
+                  'Either the passphrase is wrong, or the cipher is unsupported. '
+                  'Verify in your Mac terminal: ssh-keygen -y -f <keyfile> (it should print the public key).',
+              detected: desc);
+        }
+        return KeyLoadResult(needsPassphrase: true, detected: desc);
       }
-      return KeyLoadResult(error: 'Invalid key: $e');
+      return KeyLoadResult(error: 'Invalid key ($desc): $e', detected: desc);
     }
   }
 }

@@ -1,11 +1,12 @@
 /// A crontab entry discovered on a real server via SSH.
 class CronEntry {
-  final String schedule; // e.g. "0 * * * *"
+  final String schedule; // e.g. "0 * * * *" or "@daily"
   final String command;
   final String source; // e.g. "crontab", "/etc/crontab", "/etc/cron.d/app"
   final String serverId;
   final String serverName;
   final bool enabled;
+  final String rawLine; // exact original line (needed for in-place edits)
 
   const CronEntry({
     required this.schedule,
@@ -14,6 +15,7 @@ class CronEntry {
     required this.serverId,
     required this.serverName,
     this.enabled = true,
+    this.rawLine = '',
   });
 
   /// Parse classic 5-field cron lines from crontab output.
@@ -46,6 +48,7 @@ class CronEntry {
           source: source,
           serverId: serverId,
           serverName: serverName,
+          rawLine: line,
         ));
         continue;
       }
@@ -64,6 +67,7 @@ class CronEntry {
         source: source,
         serverId: serverId,
         serverName: serverName,
+        rawLine: line,
       ));
     }
     return entries;

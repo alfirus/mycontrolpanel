@@ -146,31 +146,35 @@ class AiService {
   /// Gemini: POST {base}/v1beta/models/{model}:generateContent.
   static const String clientAgent = 'MyControlPanel/1.0';
 
-  /// Tool route for a provider+model: chat-completions tools, Responses
-  /// function tools, or plain chat (no tools: Anthropic/Gemini-native, Ollama).
+  /// Tool route for a provider+model: chat-completions tools (OpenAI-family,
+  /// Zen/Go chat family, Ollama), Responses function tools, native Anthropic /
+  /// Gemini tools, or plain chat (streamed, no tools).
   static ToolRoute toolRoute(AiProvider provider, String model) {
     switch (provider) {
       case AiProvider.openai:
       case AiProvider.openaiCompatible:
       case AiProvider.openRouter:
       case AiProvider.lmStudio:
+      case AiProvider.ollama:
         return ToolRoute.chat;
       case AiProvider.openCodeGo:
+        if (_goAnthropicFamily(model)) return ToolRoute.anthropic;
+        if (model.toLowerCase() == 'gemini-4-argon') return ToolRoute.gemini;
         if (!_goChatFamily(model)) {
           if (_goResponsesFamily(model)) return ToolRoute.responses;
           return ToolRoute.plain;
         }
         return ToolRoute.chat;
       case AiProvider.openCodeZen:
-        if (!_zenChatFamily(model)) {
-          if (_zenResponsesFamily(model)) return ToolRoute.responses;
-          return ToolRoute.plain;
-        }
-        return ToolRoute.chat;
-      case AiProvider.ollama:
-      case AiProvider.anthropic:
-      case AiProvider.gemini:
+        if (_zenResponsesFamily(model)) return ToolRoute.responses;
+        if (_zenAnthropicFamily(model)) return ToolRoute.anthropic;
+        if (_zenGeminiFamily(model)) return ToolRoute.gemini;
+        if (_zenChatFamily(model)) return ToolRoute.chat;
         return ToolRoute.plain;
+      case AiProvider.anthropic:
+        return ToolRoute.anthropic;
+      case AiProvider.gemini:
+        return ToolRoute.gemini;
     }
   }
 
@@ -186,6 +190,21 @@ class AiService {
     final m = model.toLowerCase();
     return m.startsWith('gpt-') || m.startsWith('grok-') || m.startsWith('muse-spark-');
   }
+
+  static const _goAnthropicModels = {
+    'claude-haiku-5-5', 'minimax-m3',
+    'qwen3.8-max', 'qwen3.8-flash', 'qwen3.7-plus',
+  };
+  static bool _goAnthropicFamily(String model) => _goAnthropicModels.contains(model.toLowerCase());
+
+  static bool _zenAnthropicFamily(String model) {
+    final m = model.toLowerCase();
+    return m.startsWith('claude-') ||
+        const {'qwen3.8-flash', 'qwen3.7-max', 'qwen3.7-plus', 'qwen3.6-plus', 'qwen3.5-plus'}
+            .contains(m);
+  }
+
+  static bool _zenGeminiFamily(String model) => model.toLowerCase().startsWith('gemini-');
 
   static bool _goChatFamily(String model) {
     final m = model.toLowerCase();
@@ -243,6 +262,7 @@ class AiService {
     required String system,
     required List<Map<String, String>> messages,
     required List<Map<String, dynamic>> tools,
+    String path = '/chat/completions',
   }) async {
     Map<String, dynamic> bodyFor(List<Map<String, dynamic>> tls) => {
           'model': model,
@@ -254,12 +274,10 @@ class AiService {
           if (tls.isNotEmpty) 'tools': tls,
           if (tls.isNotEmpty) 'tool_choice': 'auto',
         };
-    Future<http.Response> post(Map<String, dynamic> b) => http.post(
-        Uri.parse('$baseUrl/chat/completions'),
-        headers: {'Content-Type': 'application/json', ...headers},
-        body: jsonEncode(b)).timeout(const Duration(seconds: 90));
+    Future<http.Response> post(Map<String, dynamic> b) => http.post(Uri.parse('$baseUrl$path'),
+        headers: {'Content-Type': 'application/json', ...headers}, body: jsonEncode(b))
+        .timeout(const Duration(seconds: 90));
     var r = await post(bodyFor(tools));
-    // Fallback: model rejects function calling (400 with tools) — retry plain.
     if (r.statusCode == 400 && tools.isNotEmpty) {
       r = await post(bodyFor(const []));
     }
@@ -274,6 +292,128 @@ class AiService {
             .where((c) => c.name.isNotEmpty))
         .toList();
     return ChatTurn(text: text.isEmpty ? null : text, calls: calls);
+  }
+
+  /// Anthropic Messages turn with native tools. [messages] are native
+  /// Anthropic message blocks ({role, content}). Returns text + calls plus the
+  /// raw assistant blocks the caller must echo back before tool results.
+  Future<ChatTurn> anthropicTurn({
+    required String baseUrl,
+    required String key,
+    required String model,
+    required String system,
+    required List<Map<String, dynamic>> messages,
+    required List<Map<String, dynamic>> tools,
+    String? endpoint,
+    bool gateway = false,
+  }) async {
+    final base = baseUrl.trim().replaceAll(RegExp(r'/+$'), '');
+    final url = endpoint ?? '$base/v1/messages';
+    final fnTools = [
+      for (final t in tools)
+        {
+          'name': (((t['function'] as Map?))?['name'] ?? '').toString(),
+          'description': ((((t['function'] as Map?))?['description'] ?? '')).toString(),
+          'input_schema': (((t['function'] as Map?))?['parameters'] ?? {'type': 'object'}),
+        },
+    ];
+    final body = {
+      'model': model,
+      'max_tokens': 2048,
+      if (system.isNotEmpty) 'system': system,
+      'messages': messages,
+      if (fnTools.isNotEmpty) 'tools': fnTools,
+      if (fnTools.isNotEmpty) 'tool_choice': {'type': 'auto'},
+    };
+    final r = await http.post(Uri.parse(url),
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': key,
+          if (gateway && key.isNotEmpty) 'Authorization': 'Bearer $key',
+          'anthropic-version': '2023-06-01',
+          'User-Agent': clientAgent,
+        },
+        body: jsonEncode(body)).timeout(const Duration(seconds: 90));
+    if (r.statusCode != 200) throw Exception(_err(r, 'messages'));
+    final j = jsonDecode(r.body) as Map;
+    final content = ((j['content'] as List?) ?? []).cast<Map<String, dynamic>>();
+    final text = StringBuffer();
+    final calls = <ToolCall>[];
+    for (final b in content) {
+      if (b['type'] == 'text') {
+        text.writeln((b['text'] ?? '').toString());
+      } else if (b['type'] == 'tool_use') {
+        var args = <String, dynamic>{};
+        final raw = b['input'];
+        if (raw is Map) args = Map<String, dynamic>.from(raw);
+        calls.add(ToolCall(id: (b['id'] ?? '').toString(), name: (b['name'] ?? '').toString(), arguments: args));
+      }
+    }
+    final t = text.toString().trim();
+    return ChatTurn(
+      text: t.isEmpty ? null : t,
+      calls: calls.where((c) => c.name.isNotEmpty).toList(),
+      native: content,
+    );
+  }
+
+  /// Gemini generateContent turn with native function declarations.
+  Future<ChatTurn> geminiTurn({
+    required String baseUrl,
+    required String key,
+    required String model,
+    required String system,
+    required List<Map<String, dynamic>> contents,
+    required List<Map<String, dynamic>> tools,
+    String? fullUrl,
+    bool gateway = false,
+  }) async {
+    final base = baseUrl.trim().replaceAll(RegExp(r'/+$'), '');
+    final url = fullUrl ?? '$base/v1beta/models/$model:generateContent?key=$key';
+    final decls = [
+      for (final t in tools)
+        {
+          'name': (((t['function'] as Map?))?['name'] ?? '').toString(),
+          'description': ((((t['function'] as Map?))?['description'] ?? '')).toString(),
+          'parameters': (((t['function'] as Map?))?['parameters'] ?? {'type': 'object'}),
+        },
+    ];
+    final body = {
+      'system_instruction': {'parts': [{'text': system}]},
+      'contents': contents,
+      'generationConfig': {'temperature': 0.3, 'maxOutputTokens': 2048},
+      if (decls.isNotEmpty) 'tools': [{'functionDeclarations': decls}],
+    };
+    final r = await http.post(Uri.parse(url),
+        headers: {
+          'Content-Type': 'application/json',
+          'User-Agent': clientAgent,
+          if (gateway && key.isNotEmpty) 'Authorization': 'Bearer $key',
+        },
+        body: jsonEncode(body)).timeout(const Duration(seconds: 90));
+    if (r.statusCode != 200) throw Exception(_err(r, 'generateContent'));
+    final j = jsonDecode(r.body) as Map;
+    final cands = (j['candidates'] as List?) ?? [];
+    final parts = (((cands.isEmpty ? null : cands.first as Map?)?['content']?['parts'] as List?) ?? [])
+        .cast<Map<String, dynamic>>();
+    final text = StringBuffer();
+    final calls = <ToolCall>[];
+    for (final p in parts) {
+      if (p['text'] != null) text.writeln(p['text'].toString());
+      final fc = p['functionCall'] as Map?;
+      if (fc != null) {
+        var args = <String, dynamic>{};
+        final raw = fc['args'];
+        if (raw is Map) args = Map<String, dynamic>.from(raw);
+        calls.add(ToolCall(id: '${fc['name']}_${DateTime.now().millisecondsSinceEpoch}', name: (fc['name'] ?? '').toString(), arguments: args));
+      }
+    }
+    final t = text.toString().trim();
+    return ChatTurn(
+      text: t.isEmpty ? null : t,
+      calls: calls.where((c) => c.name.isNotEmpty).toList(),
+      native: parts,
+    );
   }
 
   Map<String, String> openAiHeaders(AiProvider p, String key, String? sessionId) {
@@ -436,6 +576,315 @@ class AiService {
     }
     final t = text.toString().trim();
     return ResponsesTurn(text: t.isEmpty ? null : t, calls: calls.where((c) => c.name.isNotEmpty).toList(), outputItems: output);
+  }
+
+  /// Streaming plain reply (no tools). Routes per provider, calls onToken
+  /// per chunk, returns the full text. Sessions/keys handled like chat().
+  Future<String> streamChat({
+    required AiProvider provider,
+    required String baseUrl,
+    required String apiKey,
+    required String model,
+    required String system,
+    required List<Map<String, String>> messages,
+    String? sessionId,
+    required void Function(String token) onToken,
+  }) async {
+    final base = baseUrl.trim().replaceAll(RegExp(r'/+$'), '');
+    switch (provider) {
+      case AiProvider.anthropic:
+        return _anthropicStream(base, apiKey, model, system, messages, onToken);
+      case AiProvider.gemini:
+        return _geminiStream(base, apiKey, model, system, messages, onToken);
+      case AiProvider.ollama:
+        return _ollamaStream(base, model, system, messages, onToken);
+      case AiProvider.openCodeGo:
+        if (_goResponsesFamily(model)) {
+          return _responsesStream('https://opencode.ai/inference/go/openai/v1/responses', apiKey, model, system, messages, sessionId, onToken);
+        }
+        if (model.toLowerCase() == 'gemini-4-argon') {
+          return _geminiStream('https://opencode.ai/inference/go/google', apiKey, 'gemini-4-argon', system, messages, onToken);
+        }
+        return _openAiStream('$base/openai/v1', apiKey, model, system, messages, sessionId, p: provider, onToken: onToken);
+      case AiProvider.openCodeZen:
+        return _zenStreamChat(base, apiKey, model, system, messages, sessionId, onToken: onToken);
+      case AiProvider.openai:
+      case AiProvider.openaiCompatible:
+      case AiProvider.openRouter:
+      case AiProvider.lmStudio:
+        return _openAiStream(base, apiKey, model, system, messages, sessionId, p: provider, onToken: onToken);
+    }
+  }
+
+  Future<String> _zenStreamChat(String base, String key, String model, String system,
+      List<Map<String, String>> messages, String? sessionId, {required void Function(String) onToken}) async {
+    final m = model.toLowerCase();
+    final isResponses = m.startsWith('gpt-') || m.startsWith('grok-') || m.startsWith('muse-spark-');
+    if (isResponses) {
+      return _responsesStream('$base/responses', key.isEmpty ? 'public' : key, model, system, messages, sessionId, onToken);
+    }
+    if (m.startsWith('claude-')) {
+      return _anthropicStream('$base/messages', key, model, system, messages, onToken);
+    }
+    if (m.startsWith('gemini-')) {
+      return _geminiStream('$base/models', key, m, system, messages, onToken, pathSuffix: ':streamGenerateContent?alt=sse');
+    }
+    return _openAiStream('$base/chat/completions', key, model, system, messages, sessionId, p: AiProvider.openCodeZen, fullUrl: true, onToken: onToken);
+  }
+
+  Stream<String> _sseDataLines(http.StreamedResponse resp) async* {
+    await for (final chunk in resp.stream.transform(utf8.decoder).transform(const LineSplitter())) {
+      final line = chunk.trim();
+      if (line.startsWith('data:')) yield line.substring(5).trim();
+    }
+  }
+
+  /// POST and return the live stream + its client. Caller MUST drain the
+  /// stream, then close the client.
+  Future<({http.StreamedResponse resp, http.Client client})> _postStream(
+      String url, Map<String, String> headers, Map<String, dynamic> body) async {
+    final req = http.Request('POST', Uri.parse(url))
+      ..headers.addAll({'Content-Type': 'application/json', ...headers})
+      ..body = jsonEncode(body);
+    final client = http.Client();
+    http.StreamedResponse resp;
+    try {
+      resp = await client.send(req).timeout(const Duration(seconds: 30));
+    } catch (e) {
+      client.close();
+      rethrow;
+    }
+    if (resp.statusCode != 200) {
+      final errBody = await resp.stream.transform(utf8.decoder).join();
+      client.close();
+      String msg = 'HTTP ${resp.statusCode}';
+      try {
+        final j = jsonDecode(errBody) as Map;
+        final e = j['error'];
+        msg = e is Map ? (e['message'] ?? msg).toString() : e.toString();
+      } catch (_) {}
+      throw Exception(msg);
+    }
+    return (resp: resp, client: client);
+  }
+
+  Future<String> _openAiStream(String base, String key, String model, String system,
+      List<Map<String, String>> messages, String? sessionId,
+      {required AiProvider p, bool fullUrl = false, required void Function(String) onToken}) async {
+    final headers = openAiHeaders(p, key, sessionId);
+    final url = fullUrl ? base : '$base/chat/completions';
+    final body = {
+      'model': model,
+      'stream': true,
+      'messages': [
+        {'role': 'system', 'content': system},
+        ...messages,
+      ],
+      'temperature': 0.3,
+    };
+    final out = StringBuffer();
+    final (:resp, :client) = await _postStream(url, headers, body);
+    try {
+      await for (final data in _sseDataLines(resp)) {
+        if (data == '[DONE]') break;
+        try {
+          final j = jsonDecode(data) as Map;
+          final delta = (((j['choices'] as List?)?.isEmpty ?? true) ? null : (j['choices'] as List).first as Map?)?['delta']?['content'];
+          if (delta is String && delta.isNotEmpty) {
+            out.write(delta);
+            onToken(delta);
+          }
+        } catch (_) {}
+      }
+    } finally {
+      client.close();
+    }
+    final text = out.toString().trim();
+    if (text.isEmpty) throw Exception('Empty reply from $model');
+    return text;
+  }
+
+  Future<String> _responsesStream(String url, String key, String model, String system,
+      List<Map<String, String>> messages, String? sessionId, void Function(String) onToken) async {
+    final transcript = StringBuffer('$system\n\n');
+    for (final m in messages) {
+      transcript.writeln('${m['role'] == 'assistant' ? 'Assistant' : 'User'}: ${m['content']}');
+    }
+    final out = StringBuffer();
+    final (:resp, :client) = await _postStream(url, _gwHeaders(key, sessionId), {'model': model, 'stream': true, 'input': transcript.toString()});
+    try {
+      await for (final data in _sseDataLines(resp)) {
+        if (data == '[DONE]') break;
+        try {
+          final j = jsonDecode(data) as Map;
+          if (j['type'] == 'response.output_text.delta' && j['delta'] is String) {
+            out.write(j['delta'] as String);
+            onToken(j['delta'] as String);
+          }
+        } catch (_) {}
+      }
+    } finally {
+      client.close();
+    }
+    final text = out.toString().trim();
+    if (text.isEmpty) throw Exception('Empty reply from $model');
+    return text;
+  }
+
+  Future<String> _anthropicStream(String base, String key, String model, String system,
+      List<Map<String, String>> messages, void Function(String) onToken) async {
+    // base is either the API root (append /v1/messages) or a full messages URL (Zen per-model path).
+    final url = base.endsWith('/messages') ? base : '$base/v1/messages';
+    final convo = messages.where((m) => m['role'] != 'system').toList();
+    final out = StringBuffer();
+    final req = http.Request('POST', Uri.parse(url))
+      ..headers.addAll({
+        'Content-Type': 'application/json',
+        'x-api-key': key,
+        'anthropic-version': '2023-06-01',
+        'Accept': 'text/event-stream',
+        'User-Agent': clientAgent,
+      })
+      ..body = jsonEncode({'model': model, 'max_tokens': 2048, 'system': system, 'messages': convo, 'stream': true});
+    final client = http.Client();
+    http.StreamedResponse resp;
+    try {
+      resp = await client.send(req).timeout(const Duration(seconds: 30));
+    } catch (e) {
+      client.close();
+      rethrow;
+    }
+    if (resp.statusCode != 200) {
+      final errBody = await resp.stream.transform(utf8.decoder).join();
+      client.close();
+      throw Exception(_errStatic(http.Response(errBody, resp.statusCode), 'messages'));
+    }
+    try {
+      String event = '';
+      await for (final chunk in resp.stream.transform(utf8.decoder).transform(const LineSplitter())) {
+        final line = chunk.trim();
+        if (line.startsWith('event:')) {
+          event = line.substring(6).trim();
+        } else if (line.startsWith('data:')) {
+          final data = line.substring(5).trim();
+          if (event == 'content_block_delta') {
+            try {
+              final j = jsonDecode(data) as Map;
+              final t = ((j['delta'] as Map?)?['text'] ?? '').toString();
+              if (t.isNotEmpty) {
+                out.write(t);
+                onToken(t);
+              }
+            } catch (_) {}
+          }
+        }
+      }
+    } finally {
+      client.close();
+    }
+    final text = out.toString().trim();
+    if (text.isEmpty) throw Exception('Empty reply from $model');
+    return text;
+  }
+
+  Future<String> _geminiStream(String base, String key, String model, String system,
+      List<Map<String, String>> messages, void Function(String) onToken,
+      {String pathSuffix = ':streamGenerateContent?alt=sse'}) async {
+    // base is normally the API root; Zen passes a per-model path — detect it.
+    final isZenModelPath = base.contains('/models/');
+    final url = isZenModelPath
+        ? '$base$pathSuffix&key=$key'
+        : '$base/v1beta/models/$model:streamGenerateContent?alt=sse&key=$key';
+    final contents = [
+      for (final m in messages)
+        {
+          'role': m['role'] == 'assistant' ? 'model' : 'user',
+          'parts': [
+            {'text': m['content']}
+          ],
+        },
+    ];
+    final out = StringBuffer();
+    final (:resp, :client) = await _postStream(url, {'User-Agent': clientAgent}, {
+      'system_instruction': {'parts': [{'text': system}]},
+      'contents': contents,
+      'generationConfig': {'temperature': 0.3, 'maxOutputTokens': 2048},
+    });
+    try {
+      await for (final data in _sseDataLines(resp)) {
+        if (data == '[DONE]') break;
+        try {
+          final j = jsonDecode(data) as Map;
+          final cands = (j['candidates'] as List?) ?? [];
+          if (cands.isEmpty) continue;
+          final parts = (((cands.first as Map)['content'] as Map?)?['parts'] as List?) ?? [];
+          for (final p in parts) {
+            final t = (((p as Map)['text']) ?? '').toString();
+            if (t.isNotEmpty) {
+              out.write(t);
+              onToken(t);
+            }
+          }
+        } catch (_) {}
+      }
+    } finally {
+      client.close();
+    }
+    final text = out.toString().trim();
+    if (text.isEmpty) throw Exception('Empty reply from $model');
+    return text;
+  }
+
+  Future<String> _ollamaStream(String base, String model, String system,
+      List<Map<String, String>> messages, void Function(String) onToken) async {
+    final out = StringBuffer();
+    final req = http.Request('POST', Uri.parse('$base/api/chat'))
+      ..headers.addAll({'Content-Type': 'application/json', 'User-Agent': clientAgent})
+      ..body = jsonEncode({
+        'model': model,
+        'stream': true,
+        'messages': [
+          {'role': 'system', 'content': system},
+          ...messages,
+        ],
+      });
+    final client = http.Client();
+    http.StreamedResponse resp;
+    try {
+      resp = await client.send(req).timeout(const Duration(seconds: 30));
+    } catch (e) {
+      client.close();
+      rethrow;
+    }
+    if (resp.statusCode != 200) {
+      final errBody = await resp.stream.transform(utf8.decoder).join();
+      client.close();
+      String msg = 'HTTP ${resp.statusCode}';
+      try {
+        msg = ((jsonDecode(errBody) as Map)['error'] ?? msg).toString();
+      } catch (_) {}
+      throw Exception('$msg — is the model pulled? `ollama pull $model`');
+    }
+    try {
+      await for (final chunk in resp.stream.transform(utf8.decoder).transform(const LineSplitter())) {
+        final line = chunk.trim();
+        if (line.isEmpty) continue;
+        try {
+          final j = jsonDecode(line) as Map;
+          final t = (((j['message'] as Map?)?['content']) ?? '').toString();
+          if (t.isNotEmpty) {
+            out.write(t);
+            onToken(t);
+          }
+          if (j['done'] == true) break;
+        } catch (_) {}
+      }
+    } finally {
+      client.close();
+    }
+    final text = out.toString().trim();
+    if (text.isEmpty) throw Exception('Empty reply from $model');
+    return text;
   }
 
   Map<String, String> _gwHeaders(String key, String? sessionId) => {
@@ -633,7 +1082,7 @@ class AiService {
 }
 
 /// How tools are delivered for a provider+model.
-enum ToolRoute { chat, responses, plain }
+enum ToolRoute { chat, responses, anthropic, gemini, plain }
 
 /// A function call requested by the model.
 class ToolCall {
@@ -644,10 +1093,13 @@ class ToolCall {
 }
 
 /// One assistant turn: final text and/or requested tool calls.
+/// [native] carries provider-native assistant blocks the caller must echo
+/// back before tool results (Anthropic tool_use blocks, Gemini parts).
 class ChatTurn {
   final String? text;
   final List<ToolCall> calls;
-  const ChatTurn({this.text, required this.calls});
+  final List<Map<String, dynamic>> native;
+  const ChatTurn({this.text, required this.calls, this.native = const []});
 }
 
 /// One Responses-API turn: text, function calls, and raw output items

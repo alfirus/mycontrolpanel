@@ -5,10 +5,10 @@ import 'package:dartssh2/dartssh2.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import '../theme/app_theme.dart';
 import '../models/server_connection.dart';
 import '../services/agent_service.dart';
+import '../services/secure_store.dart';
 import '../services/ssh_key_loader.dart';
 import '../widgets/pitch_card.dart';
 
@@ -55,10 +55,10 @@ class TerminalScreenState extends State<TerminalScreen> {
   }
 
   Future<void> _load() async {
-    final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString('server_connections');
+    final servers = await SecureStore.readServers();
+    if (!mounted) return;
     setState(() {
-      _servers = raw == null ? [] : ServerConnection.decodeList(raw);
+      _servers = servers;
       if (_servers.isNotEmpty) {
         _selected = widget.initialServerId != null
             ? _servers.where((s) => s.id == widget.initialServerId).firstOrNull ?? _servers.first
@@ -161,14 +161,12 @@ class TerminalScreenState extends State<TerminalScreen> {
       _print('Picked file is not a private key.', AppColors.critical);
       return;
     }
-    final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString('server_connections');
-    if (raw == null) return;
-    final list = ServerConnection.decodeList(raw);
+    final list = await SecureStore.readServers();
     final idx = list.indexWhere((e) => e.id == s.id);
     if (idx == -1) return;
     list[idx] = list[idx].copyWith(credential: pem.trim(), authMethod: AuthMethod.sshKey);
-    await prefs.setString('server_connections', ServerConnection.encodeList(list));
+    await SecureStore.writeServers(list);
+    if (!mounted) return;
     setState(() => _selected = list[idx]);
     _print('Key imported (${f.name}) and saved to ${s.name} ✓ — tap CONNECT.', AppColors.success);
   }

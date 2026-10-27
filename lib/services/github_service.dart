@@ -58,6 +58,102 @@ class GithubService {
     }).toList();
   }
 
+  /// Projects v2 owned by the viewer: id, title, open item count.
+  /// Returns [] when the token lacks Projects access (falls back silently).
+  Future<List<Map<String, dynamic>>> projectsV2() async {
+    const q = 'query { viewer { login projectsV2(first: 10, orderBy: {field: UPDATED_AT, direction: DESC}) { nodes { id title url updatedAt items(first: 1) { totalCount } } } } }';
+    final r = await http.post(
+      Uri.parse('https://api.github.com/graphql'),
+      headers: {..._headers, 'Content-Type': 'application/json'},
+      body: jsonEncode({'query': q}),
+    );
+    if (r.statusCode != 200) throw Exception(_apiError(r, 'projects'));
+    final j = jsonDecode(r.body) as Map;
+    if (j.containsKey('errors')) {
+      final errs = (j['errors'] as List).map((e) => ((e as Map)['message'] ?? '').toString()).join('; ');
+      throw Exception('GitHub Projects: $errs');
+    }
+    final nodes = ((((j['data'] as Map?)?['viewer'] as Map?)?['projectsV2'] as Map?)?['nodes'] as List?) ?? [];
+    return nodes.map((n) {
+      final m = n as Map;
+      return {
+        'id': (m['id'] ?? '').toString(),
+        'title': ((m['title'] ?? 'Untitled')).toString(),
+        'url': ((m['url'] ?? '')).toString(),
+        'items': ((((m['items'] as Map?))?['totalCount'] as num?) ?? 0).toInt(),
+      };
+    }).toList();
+  }
+
+  /// Tasks from Projects v2: items across the viewer's recent projects,
+  /// skipping Done/Closed/Complete statuses. Throws when Projects is
+  /// unreachable (caller keeps the assigned-issue fallback).
+  Future<List<GithubItem>> projectTasks() async {
+    const q = 'query { viewer { login projectsV2(first: 5, orderBy: {field: UPDATED_AT, direction: DESC}) { nodes { title items(first: 30) { nodes { content { __typename ... on Issue { number title url updatedAt state author { login } labels(first: 5) { nodes { name } } comments { totalCount } assignees(first: 5) { nodes { login } } } ... on PullRequest { number title url updatedAt state author { login } labels(first: 5) { nodes { name } } comments { totalCount } assignees(first: 5) { nodes { login } } } ... on DraftIssue { title body updatedAt } } fieldValues(first: 8) { nodes { ... on ProjectV2ItemFieldSingleSelectValue { name } } } } } } } }';
+    final r = await http.post(
+      Uri.parse('https://api.github.com/graphql'),
+      headers: {..._headers, 'Content-Type': 'application/json'},
+      body: jsonEncode({'query': q}),
+    );
+    if (r.statusCode != 200) throw Exception(_apiError(r, 'project items'));
+    final j = jsonDecode(r.body) as Map;
+    if (j.containsKey('errors')) {
+      final errs = (j['errors'] as List).map((e) => ((e as Map)['message'] ?? '').toString()).join('; ');
+      throw Exception('GitHub Projects: $errs');
+    }
+    final out = <GithubItem>[];
+    final viewer = ((j['data'] as Map?)?['viewer'] as Map?);
+    final me = ((viewer?['login'] ?? '') as String);
+    final nodes = (((viewer?['projectsV2'] as Map?)?['nodes'] as List?) ?? []);
+    for (final pn in nodes) {
+      final pm = pn as Map;
+      final projectTitle = ((pm['title'] ?? 'Project')).toString();
+      final items = ((((pm['items'] as Map?))?['nodes'] as List?) ?? []);
+      for (final it in items) {
+        final im = it as Map;
+        final content = (im['content'] as Map?);
+        if (content == null) continue;
+        final statusNames = ((((im['fieldValues'] as Map?)?['nodes'] as List?) ?? [])
+                .whereType<Map>()
+                .map((f) => ((f['name'] ?? '') as String).toLowerCase()))
+            .toList();
+        if (statusNames.any((s) => s.contains('done') || s == 'closed' || s.contains('complete') || s.contains('archived'))) {
+          continue;
+        }
+        final type = (content['__typename'] ?? '').toString();
+        if (type == 'DraftIssue') {
+          out.add(GithubItem(
+            title: ((content['title'] ?? '(draft)')).toString(),
+            repo: projectTitle,
+            author: me,
+            number: 0,
+            state: 'open',
+            labels: const ['draft'],
+            updatedAt: DateTime.tryParse((content['updatedAt'] ?? '').toString()) ?? DateTime.now(),
+            comments: 0,
+          ));
+        } else {
+          final labels = ((((content['labels'] as Map?)?['nodes'] as List?) ?? []).map((l) => (((l as Map)['name']) ?? '').toString())).toList();
+          final assignees = ((((content['assignees'] as Map?)?['nodes'] as List?) ?? []).map((a) => (((a as Map)['login']) ?? '').toString())).toList();
+          final st = ((content['state'] ?? 'OPEN')).toString().toUpperCase();
+          out.add(GithubItem(
+            title: ((content['title'] ?? '')).toString(),
+            repo: projectTitle,
+            author: (((content['author'] as Map?)?['login']) ?? me).toString(),
+            number: (content['number'] as num? ?? 0).toInt(),
+            state: st == 'OPEN' ? 'open' : 'closed',
+            labels: labels,
+            updatedAt: DateTime.tryParse((content['updatedAt'] ?? '').toString()) ?? DateTime.now(),
+            comments: ((((content['comments'] as Map?)?['totalCount']) as num?) ?? 0).toInt(),
+            assignees: assignees,
+          ));
+        }
+      }
+    }
+    out.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+    return out;
+  }
+
   /// "Tasks" = open issues assigned to the token owner across all configured repos.
   Future<List<GithubItem>> myTasks(List<String> repos) async {
     final out = <GithubItem>[];

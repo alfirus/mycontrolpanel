@@ -11,19 +11,26 @@ import '../theme/app_theme.dart';
 import '../models/mock_data.dart';
 import '../models/alert_entry.dart';
 import '../models/app_entry.dart';
+import '../models/app_proc.dart';
 import '../models/cron_entry.dart';
 import '../models/server_connection.dart';
 import 'dart:convert';
 import 'package:path_provider/path_provider.dart';
 import '../services/agent_service.dart';
 import '../services/ai_service.dart';
+import '../services/secure_store.dart';
+import '../widgets/cron_dialogs.dart';
 import '../services/update_installer.dart';
 import '../services/update_service.dart';
 import '../services/ai_tools.dart';
+import '../services/audit_log.dart';
+import '../models/audit_entry.dart';
 import '../services/github_service.dart';
+import '../services/gitlab_service.dart';
 import '../services/ssh_key_loader.dart';
 import 'server_details_screen.dart';
 import '../widgets/pitch_card.dart';
+import 'audit_screen.dart';
 import 'settings_screen.dart';
 import 'terminal_screen.dart';
 
@@ -45,6 +52,8 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
   final ScrollController _chatScroll = ScrollController();
   final ScrollController _logScroll = ScrollController();
   Timer? _logTimer;
+  Timer? _autoTimer;
+  DateTime? _lastAutoPoll;
   List<LogLine> _liveLogs = List.of(mockLogs);
   List<ServerConnection> _savedServers = [];
   bool get _useRealServers => _savedServers.isNotEmpty;
@@ -59,6 +68,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
   Set<String> _appLoading = {};
   String? _appError;
   List<AppEntry> get _realApps => _serverApps.values.expand((e) => e).toList();
+  Map<String, AppStats> _procStats = {}; // server id -> APM-lite snapshot
   Map<String, List<AlertEntry>> _serverAlerts = {}; // server id -> harvested alerts
   Set<String> _alertLoading = {};
   String? _alertError;
@@ -83,10 +93,26 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
   List<GithubItem> _ghIssues = [];
   List<GithubItem> _ghPRs = [];
   List<GithubItem> _ghTasks = [];
+  List<Map<String, dynamic>> _ghProjects = [];
+  String _ghTasksSource = ''; // 'projects' or 'assigned'
+  bool get _ghTasksFromProjects => _ghTasksSource == 'projects';
   bool _ghLoading = false;
   String? _ghError;
   bool get _ghConfigured => _ghToken.isNotEmpty && _ghRepos.isNotEmpty;
   List<DeployItem> _ghRuns = [];
+  // GitLab live state (PAT + base URL + projects from Settings)
+  int _gitlabTab = 0; // 0 issues, 1 MRs, 2 tasks
+  String _glToken = '';
+  String _glUser = '';
+  String _glBase = 'https://gitlab.com';
+  List<String> _glProjects = [];
+  List<GithubItem> _glIssues = [];
+  List<GithubItem> _glMrs = [];
+  List<GithubItem> _glTasks = [];
+  List<DeployItem> _glPipes = [];
+  bool _glLoading = false;
+  String? _glError;
+  bool get _glConfigured => _glToken.isNotEmpty && _glProjects.isNotEmpty;
   String? _terminalServerId;
   String? _terminalPrefill;
   int _terminalKey = 0;
@@ -101,12 +127,12 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
       : mockServers;
 
   Future<void> _loadSavedServers() async {
+    await SecureStore.migrateIfNeeded();
     final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString('server_connections');
+    final servers = await SecureStore.readServers();
     if (!mounted) return;
     setState(() {
-      _savedServers = raw == null ? [] : ServerConnection.decodeList(raw);
-      _ghToken = prefs.getString('github_token') ?? '';
+      _savedServers = servers;
       _ghUser = prefs.getString('github_user') ?? '';
       _ghRepos = prefs.getStringList('github_repos') ?? [];
       _aiModelName = prefs.getString('ai_model') ?? '';
@@ -118,11 +144,24 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
       }
       _aiProvider = AiProvider.values[(prefs.getInt('ai_provider') ?? 0).clamp(0, AiProvider.values.length - 1)];
       _aiBaseUrl = prefs.getString('ai_base_url') ?? _aiProvider.defaultBaseUrl;
-      _aiKey = prefs.getString('ai_key') ?? '';
       _aiConfigured = _aiModelName.isNotEmpty;
+      _glUser = prefs.getString('gitlab_user') ?? '';
+      _glBase = prefs.getString('gitlab_base_url') ?? 'https://gitlab.com';
+      _glProjects = prefs.getStringList('gitlab_projects') ?? [];
+    });
+    // secrets (keychain) resolve async after first paint
+    final ghTok = await SecureStore.readSecret('github_token') ?? '';
+    final glTok = await SecureStore.readSecret('gitlab_token') ?? '';
+    final aiK = await SecureStore.readSecret('ai_key') ?? '';
+    if (!mounted) return;
+    setState(() {
+      _ghToken = ghTok;
+      _glToken = glTok;
+      _aiKey = aiK;
     });
     _pollAgents();
     _pollGithub();
+    _pollGitlab();
   }
 
   /// Fetch live GitHub Issues/PRs/Tasks/Runs for tracked repos.
@@ -141,8 +180,23 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
       }
       issues.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
       prs.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+      // Tasks prefer Projects v2 boards; fall back to assigned issues.
       List<GithubItem> tasks = [];
-      try { tasks = await svc.myTasks(_ghRepos); } catch (_) {}
+      var tasksSource = '';
+      List<Map<String, dynamic>> projects = [];
+      try {
+        projects = await svc.projectsV2();
+      } catch (_) {}
+      try {
+        tasks = await svc.projectTasks();
+        if (tasks.isNotEmpty) tasksSource = 'projects';
+      } catch (_) {}
+      if (tasks.isEmpty) {
+        try {
+          tasks = await svc.myTasks(_ghRepos);
+          if (tasks.isNotEmpty) tasksSource = 'assigned';
+        } catch (_) {}
+      }
       final runs = <DeployItem>[];
       for (final repo in _ghRepos) {
         try { runs.addAll(await svc.repoRuns(repo)); } catch (_) {}
@@ -153,6 +207,8 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
         _ghIssues = issues;
         _ghPRs = prs;
         _ghTasks = tasks;
+        _ghTasksSource = tasksSource;
+        _ghProjects = projects;
         _ghRuns = runs.take(12).toList();
         _ghLoading = false;
       });
@@ -165,15 +221,68 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     }
   }
 
-  Future<void> _pollAgents() async {
-    for (final c in _savedServers) {
-      final m = await _agent.fetch(c.host);
+  /// Fetch live GitLab Issues/MRs/Tasks for tracked projects.
+  Future<void> _pollGitlab() async {
+    if (!_glConfigured || _glLoading) return;
+    setState(() { _glLoading = true; _glError = null; });
+    try {
+      final svc = GitlabService(baseUrl: _glBase, token: _glToken);
+      await svc.validate();
+      final issues = <GithubItem>[], mrs = <GithubItem>[];
+      for (final p in _glProjects) {
+        try { issues.addAll(await svc.projectIssues(p)); } catch (_) {}
+        try { mrs.addAll(await svc.projectMRs(p)); } catch (_) {}
+      }
+      issues.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+      mrs.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+      List<GithubItem> tasks = [];
+      try { tasks = await svc.myTasks(_glProjects); } catch (_) {}
+      final pipes = <DeployItem>[];
+      for (final p in _glProjects) {
+        try { pipes.addAll(await svc.projectPipelines(p)); } catch (_) {}
+      }
+      pipes.sort((a, b) => b.time.compareTo(a.time));
       if (!mounted) return;
-      if (m != null) setState(() => _metrics[c.id] = m);
+      setState(() {
+        _glIssues = issues;
+        _glMrs = mrs;
+        _glTasks = tasks;
+        _glPipes = pipes.take(12).toList();
+        _glLoading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _glLoading = false;
+        _glError = e.toString().replaceFirst('Exception: ', '').split('\n').first;
+      });
     }
-    _pollCrons();
-    _pollApps();
-    _pollAlerts();
+  }
+
+  bool _agentsPolling = false;
+
+  Future<void> _pollAgents() async {
+    if (_agentsPolling) return; // re-entrancy guard for the interval timer
+    _agentsPolling = true;
+    try {
+      for (final c in _savedServers) {
+        final m = await _agent.fetch(c.host);
+        if (!mounted) return;
+        if (m != null) setState(() => _metrics[c.id] = m);
+        final ps = await _agent.fetchAppStats(c.host);
+        if (!mounted) return;
+        if (ps != null) {
+          setState(() => _procStats[c.id] = ps);
+        } else {
+          if (mounted) setState(() => _procStats.remove(c.id));
+        }
+      }
+      _pollCrons();
+      _pollApps();
+      _pollAlerts();
+    } finally {
+      _agentsPolling = false;
+    }
   }
 
   /// Harvest alert signals from all saved servers (best-effort).
@@ -221,6 +330,28 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
   }
 
   /// Discover crontabs on all saved servers (best-effort, silent on failure).
+  /// Tap a cronjob → LOG / EDIT dialogs. Rescans that server on change.
+  void _openCron(CronEntry e) {
+    final matches = _savedServers.where((s) => s.id == e.serverId).toList();
+    if (matches.isEmpty) return;
+    final conn = matches.first;
+    showCronActions(
+      context,
+      entry: e,
+      conn: conn,
+      agent: _agent,
+      askPassphrase: () => _cachedPassphrase(conn, actionLabel: 'VIEW LOG'),
+      onBadPassphrase: () => _forgetPassphrase(conn.id),
+      onChanged: () {
+        setState(() {
+          _serverCrons.remove(conn.id);
+          _cronError = null;
+        });
+        _pollCrons();
+      },
+    );
+  }
+
   Future<void> _pollCrons() async {
     for (final c in _savedServers) {
       if (_cronLoading.contains(c.id) || _serverCrons.containsKey(c.id)) continue;
@@ -243,6 +374,18 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
   }
 
   Future<void> _installAgent(ServerConnection s) async {
+    // Re-entrancy guard: double-taps used to stack duplicate passphrase
+    // dialogs, making Cancel/Install appear dead (they only closed the top copy).
+    if (_installing.contains(s.id)) return;
+    setState(() => _installing.add(s.id));
+    try {
+      await _installAgentGuarded(s);
+    } finally {
+      if (mounted) setState(() => _installing.remove(s.id));
+    }
+  }
+
+  Future<void> _installAgentGuarded(ServerConnection s) async {
     // Key auth: resolve the key first (passphrase prompt if encrypted).
     // Only falls back to the guided manual install when the key can't be
     // loaded at all (e.g. unreadable path). Otherwise one-click runs directly.
@@ -250,14 +393,13 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     if (s.authMethod != AuthMethod.password) {
       final pre = await SshKeyLoader.load(s.credential);
       if (pre.keys == null && pre.needsPassphrase) {
-        keyPassphrase = await _askKeyPassphrase(s);
+        keyPassphrase = await _cachedPassphrase(s);
         if (keyPassphrase == null || keyPassphrase.isEmpty) return; // cancelled
       } else if (pre.keys == null) {
         _showManualInstall(s);
         return;
       }
     }
-    setState(() => _installing.add(s.id));
     final logLines = <String>[];
     String status = 'Starting...';
     // progress dialog
@@ -266,36 +408,55 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
         context: context, barrierDismissible: false,
         builder: (ctx) => StatefulBuilder(builder: (ctx, setD) {
           void onLog(String l) { logLines.add(l); setD(() => status = l.split('\n').last); }
-          // kick off install once
+          // kick off install once — fully guarded: nothing may fail silently
           if (logLines.isEmpty) {
-            _agent.install(s, onLog, keyPassphrase: keyPassphrase).then((r) async {
-              if (!mounted) return;
-              if (r.success) {
-                final m = await _agent.fetch(s.host);
-                if (m != null && mounted) setState(() => _metrics[s.id] = m);
+            () async {
+              AgentInstallResult? r;
+              Object? crash;
+              try {
+                r = await _agent.install(s, onLog, keyPassphrase: keyPassphrase);
+                if (r.success && mounted) {
+                  try {
+                    final m = await _agent.fetch(s.host);
+                    if (m != null && mounted) setState(() => _metrics[s.id] = m);
+                  } catch (_) {
+                    // metrics poll is best-effort; install already succeeded
+                  }
+                }
+              } catch (e) {
+                crash = e;
               }
-              if (context.mounted) Navigator.pop(context);
-              setState(() => _installing.remove(s.id));
               if (!mounted) return;
+              // Always dismiss the progress dialog; _installing reset by caller finally.
+              // Await the pop transition: pushing the next dialog in the same
+              // frame trips Navigator._debugLocked ("is not true").
+              await _dismissDialog();
+              if (!mounted) return;
+              if (crash != null) {
+                _showInstallLog(s, 'Unexpected error (please report):\n$crash');
+                return;
+              }
+              final result = r!;
               ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                backgroundColor: r.success ? AppColors.success.withValues(alpha: 0.14) : AppColors.critical.withValues(alpha: 0.14),
-                content: Text(r.success ? 'Agent installed on ${s.host} — live metrics flowing ✓' : 'Install failed on ${s.host}. Tap INSTALL AGENT to see log.',
-                    style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: r.success ? AppColors.success : AppColors.critical)),
+                backgroundColor: result.success ? AppColors.success.withValues(alpha: 0.14) : AppColors.critical.withValues(alpha: 0.14),
+                content: Text(result.success ? 'Agent installed on ${s.host} — live metrics flowing ✓' : 'Install failed on ${s.host}. Log opened with details.',
+                    style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: result.success ? AppColors.success : AppColors.critical)),
                 duration: const Duration(seconds: 4),
               ));
-              if (!r.success) {
-                if (r.log == 'SSH_KEY_AUTH') {
+              if (!result.success) {
+                if (result.log == 'SSH_KEY_AUTH') {
                   _showManualInstall(s);
-                } else if (r.log == 'SSH_KEY_NEEDS_PASSPHRASE') {
-                  if (context.mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(backgroundColor: AppColors.surface1, content: Text('Key needs a passphrase — enter it to retry one-click, or use manual install.', style: TextStyle(fontSize: 12, color: AppColors.warning)), duration: Duration(seconds: 4)));
-                  }
+                } else if (result.log == 'SSH_KEY_BAD_PASSPHRASE') {
+                  _forgetPassphrase(s.id); // cached phrase was wrong — ask again next time
+                  _showInstallLog(s, 'Wrong key passphrase. Tap INSTALL AGENT to retry with the correct one, or use the manual install.');
+                } else if (result.log == 'SSH_KEY_NEEDS_PASSPHRASE') {
+                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(backgroundColor: AppColors.surface1, content: Text('Key needs a passphrase — enter it to retry one-click, or use manual install.', style: TextStyle(fontSize: 12, color: AppColors.warning)), duration: Duration(seconds: 4)));
                   _showManualInstall(s);
                 } else {
-                  _showInstallLog(s, r.log);
+                  _showInstallLog(s, result.log);
                 }
               }
-            });
+            }();
           }
           return AlertDialog(
             backgroundColor: AppColors.surface1,
@@ -314,8 +475,25 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     }
   }
 
-  Future<String?> _askKeyPassphrase(ServerConnection s) async {
+  /// In-memory passphrase cache: prompt once per app run per server.
+  final Map<String, String> _passCache = {};
+  void _forgetPassphrase(String serverId) => _passCache.remove(serverId);
+
+  Future<String?> _cachedPassphrase(ServerConnection s, {String actionLabel = 'INSTALL NOW'}) async {
+    final hit = _passCache[s.id];
+    if (hit != null && hit.isNotEmpty) return hit;
+    final pass = await _askKeyPassphrase(s, actionLabel: actionLabel);
+    if (pass != null && pass.isNotEmpty) _passCache[s.id] = pass;
+    return pass;
+  }
+
+  Future<String?> _askKeyPassphrase(ServerConnection s, {String actionLabel = 'INSTALL NOW'}) async {
     final c = TextEditingController();
+    final cred = s.credential.trim();
+    final isPath = !cred.contains('PRIVATE KEY') && !cred.contains('OPENSSH');
+    final desc = isPath
+        ? 'Saved as file path (sandbox may block reads — prefer import)'
+        : SshKeyLoader.describe(cred);
     return showDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -325,14 +503,24 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
         content: SizedBox(
           width: 320,
           child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-            const Text('Your saved key is encrypted. Enter its passphrase to run the one-click install directly — no terminal needed.', style: TextStyle(fontSize: 11, color: AppColors.textSecondary)),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+              decoration: BoxDecoration(color: AppColors.surface2, borderRadius: BorderRadius.circular(6), border: Border.all(color: AppColors.border)),
+              child: Row(children: [
+                const Icon(Icons.fingerprint, size: 13, color: AppColors.accentCyan),
+                const SizedBox(width: 6),
+                Expanded(child: Text(desc, style: const TextStyle(fontSize: 10, color: AppColors.textSecondary, fontFamily: AppFonts.mono))),
+              ]),
+            ),
+            const SizedBox(height: 8),
+            const Text('This exact key is encrypted. Enter ITS passphrase (not the server login password).', style: TextStyle(fontSize: 11, color: AppColors.textSecondary)),
             const SizedBox(height: 10),
             TextField(controller: c, obscureText: true, autofocus: true, style: const TextStyle(fontSize: 12, color: AppColors.textPrimary, fontFamily: AppFonts.mono), decoration: InputDecoration(hintText: 'Key passphrase', hintStyle: const TextStyle(fontSize: 11, color: AppColors.textMuted), filled: true, fillColor: AppColors.surface2, contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10), border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.border)), enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.border)), focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.accentCyan)))),
           ]),
         ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('CANCEL', style: TextStyle(color: AppColors.textSecondary))),
-          FilledButton(onPressed: () => Navigator.pop(ctx, c.text), style: FilledButton.styleFrom(backgroundColor: AppColors.accentCyan, foregroundColor: Colors.black), child: const Text('INSTALL NOW', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800))),
+          FilledButton(onPressed: () => Navigator.pop(ctx, c.text), style: FilledButton.styleFrom(backgroundColor: AppColors.accentCyan, foregroundColor: Colors.black), child: Text(actionLabel, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w800))),
         ],
       ),
     );
@@ -412,7 +600,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
   // preselected to this server with the install command ready to run.
   void _openInAppTerminal(ServerConnection s) {
     setState(() {
-      _navIndex = 11;
+      _navIndex = 12;
       _terminalServerId = s.id;
       _terminalPrefill = AgentService.manualInstallScript();
       _terminalKey++; // force rebuild with new prefill
@@ -806,7 +994,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
           onOpenTerminal: () {
             Navigator.pop(context); // back to shell first
             setState(() {
-              _navIndex = 11;
+              _navIndex = 12;
               _terminalServerId = serverId;
               _terminalPrefill = null;
               _terminalKey++;
@@ -821,6 +1009,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
   void initState() {
     super.initState();
     _loadSavedServers().then((_) => _maybeAutoCheckUpdates());
+    _startAutoRefresh();
     _logTimer = Timer.periodic(const Duration(seconds: 3), (_) {
       if (!mounted) return;
       setState(() {
@@ -833,10 +1022,35 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
   @override
   void dispose() {
     _logTimer?.cancel();
+    _autoTimer?.cancel();
     _chatController.dispose();
     _chatScroll.dispose();
     _logScroll.dispose();
     super.dispose();
+  }
+
+  /// Real auto-refresh: honors Settings → auto_refresh + refresh_interval.
+  /// Ticks every 5s, re-polls only when the interval has elapsed.
+  void _startAutoRefresh() {
+    _autoTimer?.cancel();
+    _autoTimer = Timer.periodic(const Duration(seconds: 5), (_) async {
+      if (!mounted) return;
+      SharedPreferences? prefs;
+      try {
+        prefs = await SharedPreferences.getInstance();
+      } catch (_) {
+        return;
+      }
+      if (!(prefs.getBool('auto_refresh') ?? true)) return;
+      final interval = (prefs.getDouble('refresh_interval') ?? 15).toInt();
+      final now = DateTime.now();
+      if (_lastAutoPoll != null && now.difference(_lastAutoPoll!).inSeconds < interval) return;
+      _lastAutoPoll = now;
+      if (!mounted) return;
+      _pollAgents(); // metrics + crons + apps + alerts (each guarded internally)
+      _pollGithub();
+      _pollGitlab();
+    });
   }
 
   void _sendChat() async {
@@ -864,21 +1078,40 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
         await _runToolLoop(convo);
       } else if (route == ToolRoute.responses) {
         await _runResponsesLoop(convo);
+      } else if (route == ToolRoute.anthropic) {
+        await _runAnthropicToolLoop(convo);
+      } else if (route == ToolRoute.gemini) {
+        await _runGeminiToolLoop(convo);
       } else {
-        final reply = await AiService().chat(
-          provider: _aiProvider,
-          baseUrl: _aiBaseUrl,
-          apiKey: _aiKey,
-          model: _aiModelName,
-          system: _aiSystemPrompt(),
-          sessionId: _aiSessionId,
-          messages: convo,
-        );
+        // Plain route: streamed reply straight into the bubble.
+        setState(() => _chatMessages.add({'role': 'assistant', 'text': ''}));
+        final idx = _chatMessages.length - 1;
+        final buf = StringBuffer();
+        try {
+          await AiService().streamChat(
+            provider: _aiProvider,
+            baseUrl: _aiBaseUrl,
+            apiKey: _aiKey,
+            model: _aiModelName,
+            system: _aiSystemPrompt(),
+            sessionId: _aiSessionId,
+            messages: convo,
+            onToken: (t) {
+              if (!mounted) return;
+              buf.write(t);
+              setState(() => _chatMessages[idx]['text'] = buf.toString());
+              if (_chatScroll.hasClients) {
+                _chatScroll.jumpTo(_chatScroll.position.maxScrollExtent);
+              }
+            },
+          );
+        } catch (e) {
+          if (!mounted) return;
+          final msg = 'AI error: ${e.toString().replaceFirst('Exception: ', '').split('\n').first}\n(Provider: ${_aiProvider.label} • model: $_aiModelName — check Settings → AI Provider.)';
+          setState(() => _chatMessages[idx]['text'] = buf.isEmpty ? msg : '${buf}\n\n$msg');
+        }
         if (!mounted) return;
-        setState(() {
-          _chatMessages.add({'role': 'assistant', 'text': reply});
-          _aiTyping = false;
-        });
+        setState(() => _aiTyping = false);
       }
     } catch (e) {
       if (!mounted) return;
@@ -891,11 +1124,16 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
   }
 
   /// Tool-calling loop (Stage 2): read tools run freely; gated write tools
-  /// pause for an Approve/Deny dialog first.
+  /// pause for an Approve/Deny dialog first. Ollama rides the same loop via
+  /// its OpenAI-compatible /api/chat endpoint.
   Future<void> _runToolLoop(List<Map<String, String>> convo) async {
     final svc = AiService();
     final headers = AiService().openAiHeaders(_aiProvider, _aiKey, _aiSessionId);
-    final base = AiService.chatBase(_aiProvider, _aiBaseUrl);
+    final isOllama = _aiProvider == AiProvider.ollama;
+    final base = isOllama
+        ? _aiBaseUrl.trim().replaceAll(RegExp(r'/+$'), '')
+        : AiService.chatBase(_aiProvider, _aiBaseUrl);
+    final path = isOllama ? '/api/chat' : '/chat/completions';
     final turns = <Map<String, dynamic>>[
       for (final m in convo) {'role': m['role']!, 'content': m['content']!},
     ];
@@ -907,9 +1145,10 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
         baseUrl: base,
         headers: headers,
         model: _aiModelName,
-        system: '${_aiSystemPrompt()}\n\nYou have tools for live data${_aiWriteEnabled ? ' and actions' : ''}. Prefer calling a read tool over guessing.${_aiWriteEnabled ? ' For restart_service, run_ssh_command, rerun_workflow, create_github_issue: the app asks the user to approve first — briefly say what you are about to do, then call the tool.' : ' Write actions are DISABLED by the user — you are read-only. If asked to change anything, explain the manual steps instead of calling a tool.'}',
+        system: '${_aiSystemPrompt()}\n\nYou have tools for live data${_aiWriteEnabled ? ' and actions' : ''}. Prefer calling a read tool over guessing.${_aiWriteEnabled ? ' For restart_service, run_ssh_command, rerun_workflow, retry_gitlab_pipeline, create_github_issue: the app asks the user to approve first — briefly say what you are about to do, then call the tool.' : ' Write actions are DISABLED by the user — you are read-only. If asked to change anything, explain the manual steps instead of calling a tool.'}',
         messages: turns.map((m) => {'role': m['role'].toString(), 'content': (m['content'] ?? '').toString()}).toList(),
         tools: tools,
+        path: path,
       );
       if (turn.text != null && turn.text!.isNotEmpty) {
         if (!mounted) return;
@@ -921,15 +1160,23 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
         setState(() => _aiTyping = false);
         return;
       }
+      // Normalize ids first (some providers omit them) so the assistant
+      // message and the follow-up tool results reference the same ids.
+      var callSeq = 0;
+      final calls = [
+        for (final c in turn.calls)
+          c.id.isNotEmpty ? c : ToolCall(id: 'call_${DateTime.now().millisecondsSinceEpoch}_${callSeq++}', name: c.name, arguments: c.arguments),
+      ];
       turns.add({
         'role': 'assistant',
         'content': turn.text ?? '',
         'tool_calls': [
-          for (final c in turn.calls)
+          for (final c in calls)
             {'id': c.id, 'type': 'function', 'function': {'name': c.name, 'arguments': _argsJson(c.arguments)}},
         ],
       });
-      for (final call in turn.calls) {
+      for (final call in calls) {
+        var toolDecision = 'auto';
         if (AiTools.gated.contains(call.name)) {
           // Kill-switch: model should not have these schemas when disabled,
           // but refuse anyway if one arrives.
@@ -937,6 +1184,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
             if (!mounted) return;
             setState(() => _chatMessages.add({'role': 'assistant', 'text': '_Write tools are disabled — enable them above to allow ${call.name}._'}));
             turns.add({'role': 'tool', 'tool_call_id': call.id, 'content': 'Write tools are disabled by the user. Explain manual steps instead.'});
+            _auditDecision(call, 'blocked', 'Blocked: write tools disabled.');
             continue;
           }
           final approved = await _askToolApproval(call);
@@ -944,11 +1192,13 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
           if (!approved) {
             setState(() => _chatMessages.add({'role': 'assistant', 'text': '_${call.name} denied by user — I won\'t run it._'}));
             turns.add({'role': 'tool', 'tool_call_id': call.id, 'content': 'Denied by user. Do not retry this call. Explain the manual alternative instead.'});
+            _auditDecision(call, 'denied', 'Denied by user at approval gate.');
             continue;
           }
           setState(() => _chatMessages.add({'role': 'assistant', 'text': '_Running ${call.name}…_'}));
+          toolDecision = 'approved';
         }
-        final result = await _safeExecute(call.name, call.arguments);
+        final result = await _auditedExecute(call, toolDecision);
         if (!mounted) return;
         turns.add({'role': 'tool', 'tool_call_id': call.id, 'content': result.output});
       }
@@ -967,6 +1217,35 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     } catch (e) {
       return ToolResult('Tool $name crashed: ${e.toString().split('\n').first}');
     }
+  }
+
+  /// Execute + audit. Decision: auto (read tools), approved, denied, blocked.
+  Future<ToolResult> _auditedExecute(ToolCall call, String decision) async {
+    final sw = Stopwatch()..start();
+    final result = await _safeExecute(call.name, call.arguments);
+    sw.stop();
+    unawaited(AuditLog.record(
+      tool: call.name,
+      args: call.arguments,
+      decision: decision,
+      result: result.output,
+      provider: _aiProvider.label,
+      model: _aiModelName,
+      durationMs: sw.elapsedMilliseconds,
+    ));
+    return result;
+  }
+
+  void _auditDecision(ToolCall call, String decision, String summary) {
+    unawaited(AuditLog.record(
+      tool: call.name,
+      args: call.arguments,
+      decision: decision,
+      result: summary,
+      provider: _aiProvider.label,
+      model: _aiModelName,
+      durationMs: 0,
+    ));
   }
 
   /// Tool loop for Responses-API models (Go/Zen responses family):
@@ -1011,11 +1290,13 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
       }
       input = [...input, ...turn.outputItems];
       for (final call in turn.calls) {
+        var toolDecision = 'auto';
         if (AiTools.gated.contains(call.name)) {
           if (!_aiWriteEnabled) {
             if (!mounted) return;
             setState(() => _chatMessages.add({'role': 'assistant', 'text': '_Write tools are disabled — enable them above to allow ${call.name}._'}));
             input.add({'type': 'function_call_output', 'call_id': call.id, 'output': 'Write tools are disabled by the user. Explain manual steps instead.'});
+            _auditDecision(call, 'blocked', 'Blocked: write tools disabled.');
             continue;
           }
           final approved = await _askToolApproval(call);
@@ -1023,13 +1304,174 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
           if (!approved) {
             setState(() => _chatMessages.add({'role': 'assistant', 'text': '_${call.name} denied by user — I won\'t run it._'}));
             input.add({'type': 'function_call_output', 'call_id': call.id, 'output': 'Denied by user. Do not retry this call. Explain the manual alternative instead.'});
+            _auditDecision(call, 'denied', 'Denied by user at approval gate.');
             continue;
           }
           setState(() => _chatMessages.add({'role': 'assistant', 'text': '_Running ${call.name}…_'}));
+        toolDecision = 'approved';
         }
-        final result = await _safeExecute(call.name, call.arguments);
+        final result = await _auditedExecute(call, toolDecision);
         if (!mounted) return;
         input.add({'type': 'function_call_output', 'call_id': call.id, 'output': result.output});
+      }
+    }
+    if (!mounted) return;
+    setState(() {
+      _chatMessages.add({'role': 'assistant', 'text': '_Stopped after ${AiTools.maxIterations} tool rounds — ask me to continue if needed._'});
+      _aiTyping = false;
+    });
+  }
+
+  List<Map<String, dynamic>> _toolSchemas() => _aiWriteEnabled
+      ? AiTools.schemas()
+      : AiTools.schemas().where((t) => !AiTools.gated.contains((((t['function'] as Map?)) ?? const {})['name'])).toList();
+
+  String _toolSystemSuffix() =>
+      ' Prefer calling a read tool over guessing.${_aiWriteEnabled ? ' For restart_service, run_ssh_command, rerun_workflow, retry_gitlab_pipeline, create_github_issue: the app asks the user to approve first — briefly say what you are about to do, then call the tool.' : ' Write actions are DISABLED by the user — you are read-only. If asked to change anything, explain the manual steps instead of calling a tool.'}';
+
+  /// Native Anthropic tool loop (Anthropic provider + Zen/Go anthropic models).
+  Future<void> _runAnthropicToolLoop(List<Map<String, String>> convo) async {
+    final svc = AiService();
+    final trimmed = _aiBaseUrl.trim().replaceAll(RegExp(r'/+$'), '');
+    late final String url;
+    if (_aiProvider == AiProvider.anthropic) {
+      url = '$trimmed/v1/messages';
+    } else if (_aiProvider == AiProvider.openCodeGo) {
+      url = 'https://opencode.ai/inference/go/anthropic/v1/messages';
+    } else {
+      url = '$trimmed/messages'; // Zen: {base}/messages
+    }
+    final messages = <Map<String, dynamic>>[
+      for (final m in convo)
+        if (m['role'] == 'user' || m['role'] == 'assistant') {'role': m['role']!, 'content': m['content']!},
+    ];
+    final tools = _toolSchemas();
+    final system = '${_aiSystemPrompt()}\n\nYou have tools for live data${_aiWriteEnabled ? ' and actions' : ''}.${_toolSystemSuffix()}';
+    for (var i = 0; i < AiTools.maxIterations; i++) {
+      final turn = await svc.anthropicTurn(
+        baseUrl: _aiBaseUrl,
+        key: _aiKey,
+        model: _aiModelName,
+        system: system,
+        messages: messages,
+        tools: tools,
+        endpoint: url,
+        gateway: _aiProvider != AiProvider.anthropic,
+      );
+      if (turn.text != null && turn.text!.isNotEmpty) {
+        if (!mounted) return;
+        setState(() => _chatMessages.add({'role': 'assistant', 'text': turn.text!}));
+        _scrollChatToEnd();
+      }
+      if (turn.calls.isEmpty) {
+        if (!mounted) return;
+        setState(() => _aiTyping = false);
+        return;
+      }
+      messages.add({'role': 'assistant', 'content': turn.native});
+      for (final call in turn.calls) {
+        var toolDecision = 'auto';
+        if (AiTools.gated.contains(call.name)) {
+          if (!_aiWriteEnabled) {
+            if (!mounted) return;
+            setState(() => _chatMessages.add({'role': 'assistant', 'text': '_Write tools are disabled — enable them above to allow ${call.name}._'}));
+            messages.add({'role': 'user', 'content': [{'type': 'tool_result', 'tool_use_id': call.id, 'content': 'Write tools are disabled by the user. Explain manual steps instead.'}]});
+            _auditDecision(call, 'blocked', 'Blocked: write tools disabled.');
+            continue;
+          }
+          final approved = await _askToolApproval(call);
+          if (!mounted) return;
+          if (!approved) {
+            setState(() => _chatMessages.add({'role': 'assistant', 'text': '_${call.name} denied by user — I won\'t run it._'}));
+            messages.add({'role': 'user', 'content': [{'type': 'tool_result', 'tool_use_id': call.id, 'content': 'Denied by user. Do not retry this call. Explain the manual alternative instead.'}]});
+            _auditDecision(call, 'denied', 'Denied by user at approval gate.');
+            continue;
+          }
+          setState(() => _chatMessages.add({'role': 'assistant', 'text': '_Running ${call.name}…_'}));
+        toolDecision = 'approved';
+        }
+        final result = await _auditedExecute(call, toolDecision);
+        if (!mounted) return;
+        messages.add({'role': 'user', 'content': [{'type': 'tool_result', 'tool_use_id': call.id, 'content': result.output}]});
+      }
+    }
+    if (!mounted) return;
+    setState(() {
+      _chatMessages.add({'role': 'assistant', 'text': '_Stopped after ${AiTools.maxIterations} tool rounds — ask me to continue if needed._'});
+      _aiTyping = false;
+    });
+  }
+
+  /// Native Gemini tool loop (direct + Go/Zen gateways).
+  Future<void> _runGeminiToolLoop(List<Map<String, String>> convo) async {
+    final svc = AiService();
+    final contents = <Map<String, dynamic>>[
+      for (final m in convo)
+        {
+          'role': m['role'] == 'assistant' ? 'model' : 'user',
+          'parts': [
+            {'text': m['content']!}
+          ],
+        },
+    ];
+    final tools = _toolSchemas();
+    final system = '${_aiSystemPrompt()}\n\nYou have function tools for live data${_aiWriteEnabled ? ' and actions' : ''}.${_toolSystemSuffix()}';
+    String? fullUrl;
+    var gateway = false;
+    if (_aiProvider == AiProvider.openCodeGo) {
+      fullUrl = 'https://opencode.ai/inference/go/google/v1beta/models/gemini-4-argon:generateContent?key=$_aiKey';
+      gateway = true;
+    } else if (_aiProvider == AiProvider.openCodeZen) {
+      final m = _aiModelName.trim().toLowerCase();
+      fullUrl = '${_aiBaseUrl.trim().replaceAll(RegExp(r'/+$'), '')}/models/$m:generateContent?key=$_aiKey';
+      gateway = true;
+    }
+    for (var i = 0; i < AiTools.maxIterations; i++) {
+      final turn = await svc.geminiTurn(
+        baseUrl: _aiBaseUrl,
+        key: _aiKey,
+        model: _aiModelName,
+        system: system,
+        contents: contents,
+        fullUrl: fullUrl,
+        gateway: gateway,
+        tools: tools,
+      );
+      if (turn.text != null && turn.text!.isNotEmpty) {
+        if (!mounted) return;
+        setState(() => _chatMessages.add({'role': 'assistant', 'text': turn.text!}));
+        _scrollChatToEnd();
+      }
+      if (turn.calls.isEmpty) {
+        if (!mounted) return;
+        setState(() => _aiTyping = false);
+        return;
+      }
+      contents.add({'role': 'model', 'parts': turn.native});
+      for (final call in turn.calls) {
+        var toolDecision = 'auto';
+        if (AiTools.gated.contains(call.name)) {
+          if (!_aiWriteEnabled) {
+            if (!mounted) return;
+            setState(() => _chatMessages.add({'role': 'assistant', 'text': '_Write tools are disabled — enable them above to allow ${call.name}._'}));
+            contents.add({'role': 'function', 'parts': [{'functionResponse': {'name': call.name, 'response': {'result': 'Write tools are disabled by the user. Explain manual steps instead.'}}}]});
+            _auditDecision(call, 'blocked', 'Blocked: write tools disabled.');
+            continue;
+          }
+          final approved = await _askToolApproval(call);
+          if (!mounted) return;
+          if (!approved) {
+            setState(() => _chatMessages.add({'role': 'assistant', 'text': '_${call.name} denied by user — I won\'t run it._'}));
+            contents.add({'role': 'function', 'parts': [{'functionResponse': {'name': call.name, 'response': {'result': 'Denied by user. Do not retry this call. Explain the manual alternative instead.'}}}]});
+            _auditDecision(call, 'denied', 'Denied by user at approval gate.');
+            continue;
+          }
+          setState(() => _chatMessages.add({'role': 'assistant', 'text': '_Running ${call.name}…_'}));
+        toolDecision = 'approved';
+        }
+        final result = await _auditedExecute(call, toolDecision);
+        if (!mounted) return;
+        contents.add({'role': 'function', 'parts': [{'functionResponse': {'name': call.name, 'response': {'result': result.output}}}]});
       }
     }
     if (!mounted) return;
@@ -1059,6 +1501,9 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
         runs: _ghRuns,
         githubToken: _ghToken,
         githubRepos: _ghRepos,
+        gitlabToken: _glToken,
+        gitlabBaseUrl: _glBase,
+        gitlabProjects: _glProjects,
         agent: _agent,
       );
 
@@ -1095,6 +1540,15 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
       horizontalRuleDecoration: const BoxDecoration(border: Border(top: BorderSide(color: AppColors.border))),
       checkbox: body.copyWith(color: AppColors.accentCyan),
     );
+  }
+
+  /// Pop the top dialog and wait for the transition, so a follow-up
+  /// showDialog doesn't trip Navigator._debugLocked ("is not true").
+  Future<void> _dismissDialog() async {
+    if (Navigator.canPop(context)) {
+      Navigator.pop(context);
+      await Future.delayed(const Duration(milliseconds: 350));
+    }
   }
 
   /// Approve/Deny gate for write tools. True only on explicit Approve.
@@ -1186,7 +1640,10 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     }
     b.writeln();
     if (_ghConfigured) {
-      b.writeln('GITHUB (@$_ghUser, repos: ${_ghRepos.join(', ')}): ${_ghIssues.length} open issues, ${_ghPRs.length} open PRs, ${_ghTasks.length} tasks.');
+      b.writeln('GITHUB (@$_ghUser, repos: ${_ghRepos.join(', ')}): ${_ghIssues.length} open issues, ${_ghPRs.length} open PRs, ${_ghTasks.length} tasks${_ghTasksFromProjects ? ' (from Projects v2 boards)' : ''}.');
+      if (_ghProjects.isNotEmpty) {
+        b.writeln('PROJECTS V2: ${_ghProjects.map((p) => '${p['title']} (${p['items']} items)').join(', ')}');
+      }
       for (final i in _ghIssues.take(5)) {
         b.writeln('- issue #${i.number}: ${i.title} (${i.repo})');
       }
@@ -1194,8 +1651,14 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
         b.writeln('- PR #${p.number}: ${p.title} (${p.repo})');
       }
       if (_ghRuns.isNotEmpty) {
-        b.writeln('RECENT ACTIONS RUNS:');
+        b.writeln('RECENT GITHUB ACTIONS RUNS:');
         for (final r in _ghRuns.take(5)) {
+          b.writeln('- ${r.app} #${r.version} ${r.status} on ${r.env} by ${r.actor}');
+        }
+      }
+      if (_glPipes.isNotEmpty) {
+        b.writeln('RECENT GITLAB PIPELINES:');
+        for (final r in _glPipes.take(5)) {
           b.writeln('- ${r.app} #${r.version} ${r.status} on ${r.env} by ${r.actor}');
         }
       }
@@ -1203,8 +1666,20 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
       b.writeln('GITHUB: not connected (demo data in UI).');
     }
     b.writeln();
+    if (_glConfigured) {
+      b.writeln('GITLAB (@$_glUser on $_glBase, projects: ${_glProjects.join(', ')}): ${_glIssues.length} open issues, ${_glMrs.length} open MRs, ${_glTasks.length} tasks.');
+      for (final i in _glIssues.take(5)) {
+        b.writeln('- issue !${i.number}: ${i.title} (${i.repo})');
+      }
+      for (final m in _glMrs.take(5)) {
+        b.writeln('- MR !${m.number}: ${m.title} (${m.repo})');
+      }
+    } else {
+      b.writeln('GITLAB: not connected (demo data in UI).');
+    }
+    b.writeln();
     if (_aiWriteEnabled) {
-      b.writeln('Write tools are ENABLED: you may restart services, run allowlisted diagnostic commands (incl. directory listings), re-run failed workflows, and file issues via tools. The app asks the user to approve each write before it runs — say what you will do, then call the tool. Never claim inability to act: use the tools.');
+      b.writeln('Write tools are ENABLED: you may restart services, run allowlisted diagnostic commands (incl. directory listings), re-run failed GitHub workflows, retry GitLab pipelines, and file GitHub issues via tools. The app asks the user to approve each write before it runs — say what you will do, then call the tool. Never claim inability to act: use the tools.');
     } else {
       b.writeln('Write tools are DISABLED: you are read-only. If asked to DO something, explain the manual steps and point to the relevant screen/terminal command.');
     }
@@ -1244,7 +1719,15 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
               ),
             ),
           ),
-        Container(width: 32, height: 32, decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(8), border: Border.all(color: AppColors.border)), child: const Icon(Icons.hub_outlined, size: 16, color: AppColors.accentCyan)),
+        Container(
+          width: 32,
+          height: 32,
+          decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(8), border: Border.all(color: AppColors.border)),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: Image.asset('assets/app_icon.png', width: 32, height: 32, fit: BoxFit.cover),
+          ),
+        ),
         const SizedBox(width: 10),
         const Flexible(child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
           Text('MY CONTROL PANEL', maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 13, fontWeight: FontWeight.w800, letterSpacing: 1.0, color: AppColors.textPrimary)),
@@ -1262,7 +1745,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
             Text('$op/${_servers.length} OPERATIONAL${_useRealServers ? '' : ' • DEMO'}', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: AppColors.textSecondary, letterSpacing: 0.5)),
           ]),
         ),
-        IconButton(onPressed: () => _goTo(10), icon: Container(padding: const EdgeInsets.all(6), decoration: BoxDecoration(color: _navIndex==10 ? AppColors.accentCyan.withValues(alpha:0.2) : AppColors.surface1, borderRadius: BorderRadius.circular(8), border: Border.all(color: _navIndex==10 ? AppColors.accentCyan : AppColors.border)), child: Icon(Icons.settings_outlined, size: 16, color: _navIndex==10 ? AppColors.accentCyan : AppColors.textSecondary))),
+        IconButton(onPressed: () => _goTo(11), icon: Container(padding: const EdgeInsets.all(6), decoration: BoxDecoration(color: _navIndex==11 ? AppColors.accentCyan.withValues(alpha:0.2) : AppColors.surface1, borderRadius: BorderRadius.circular(8), border: Border.all(color: _navIndex==11 ? AppColors.accentCyan : AppColors.border)), child: Icon(Icons.settings_outlined, size: 16, color: _navIndex==11 ? AppColors.accentCyan : AppColors.textSecondary))),
         IconButton(onPressed: (){}, icon: const Icon(Icons.notifications_none, size: 18, color: AppColors.textSecondary)),
         const SizedBox(width: 4),
         Builder(builder: (ctx) => IconButton(onPressed: ()=> Scaffold.of(ctx).openEndDrawer(), icon: Container(padding: const EdgeInsets.all(6), decoration: BoxDecoration(color: AppColors.accentCyan, borderRadius: BorderRadius.circular(8)), child: const Icon(Icons.smart_toy_outlined, size: 16, color: Colors.black)))),
@@ -1278,6 +1761,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
       ('Cronjobs', Icons.schedule_outlined, AppColors.accentPurple),
       ('Apps', Icons.apps_outlined, AppColors.accentGreen),
       ('GitHub', Icons.code_outlined, AppColors.textPrimary),
+      ('GitLab', Icons.layers_outlined, AppColors.accentPurple),
       ('Alerts', Icons.warning_amber_outlined, AppColors.warning),
       ('Deploys', Icons.rocket_launch_outlined, AppColors.accentCyan),
       ('Logs', Icons.terminal_outlined, AppColors.textSecondary),
@@ -1378,7 +1862,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
           _bottomItem(1, Icons.dns, 'Servers'),
           _bottomItem(4, Icons.code, 'GitHub'),
           _bottomItem(6, Icons.rocket_launch, 'Deploys'),
-          _bottomItem(10, Icons.settings, 'Settings'),
+          _bottomItem(11, Icons.settings, 'Settings'),
           Builder(builder: (ctx) => GestureDetector(onTap: ()=> Scaffold.of(ctx).openEndDrawer(), child: Container(margin: const EdgeInsets.all(8), width: 44, height: 44, decoration: BoxDecoration(color: AppColors.accentCyan, borderRadius: BorderRadius.circular(12)), child: const Icon(Icons.smart_toy_outlined, size: 18, color: Colors.black)))),
         ])),
       ),
@@ -1397,12 +1881,13 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     if (_navIndex == 2) return SingleChildScrollView(padding: const EdgeInsets.all(12), child: _cronsSegment());
     if (_navIndex == 3) return SingleChildScrollView(padding: const EdgeInsets.all(12), child: _appsSegment());
     if (_navIndex == 4) return SingleChildScrollView(padding: const EdgeInsets.all(12), child: _githubSegment());
-    if (_navIndex == 5) return SingleChildScrollView(padding: const EdgeInsets.all(12), child: _alertsSegment());
-    if (_navIndex == 6) return SingleChildScrollView(padding: const EdgeInsets.all(12), child: _deploysSegment());
-    if (_navIndex == 7) return SingleChildScrollView(padding: const EdgeInsets.all(12), child: _logsSegment());
-    if (_navIndex == 8) return SingleChildScrollView(padding: const EdgeInsets.all(12), child: _metricsSegment());
-    if (_navIndex == 9) return SingleChildScrollView(padding: const EdgeInsets.all(12), child: _securitySegment());
-    if (_navIndex == 10) return const SettingsScreen();
+    if (_navIndex == 5) return SingleChildScrollView(padding: const EdgeInsets.all(12), child: _gitlabSegment());
+    if (_navIndex == 6) return SingleChildScrollView(padding: const EdgeInsets.all(12), child: _alertsSegment());
+    if (_navIndex == 7) return SingleChildScrollView(padding: const EdgeInsets.all(12), child: _deploysSegment());
+    if (_navIndex == 8) return SingleChildScrollView(padding: const EdgeInsets.all(12), child: _logsSegment());
+    if (_navIndex == 9) return SingleChildScrollView(padding: const EdgeInsets.all(12), child: _metricsSegment());
+    if (_navIndex == 10) return SingleChildScrollView(padding: const EdgeInsets.all(12), child: _securitySegment());
+    if (_navIndex == 11) return const SettingsScreen();
     return TerminalScreen(key: ValueKey(_terminalKey), initialServerId: _terminalServerId, prefillCommand: _terminalPrefill);
   }
 
@@ -1446,13 +1931,15 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
         if (isDesktop) ...[
           Row(crossAxisAlignment: CrossAxisAlignment.start, children: [Expanded(child: _serversSegment(compact: true)), const SizedBox(width: gap), Expanded(child: _appsSegment(compact: true))]),
           Row(crossAxisAlignment: CrossAxisAlignment.start, children: [Expanded(child: _cronsSegment(compact: true)), const SizedBox(width: gap), Expanded(child: _alertsSegment(compact: true))]),
-          Row(crossAxisAlignment: CrossAxisAlignment.start, children: [Expanded(child: _githubSegment(compact: true)), const SizedBox(width: gap), Expanded(child: _deploysSegment(compact: true))]),
-          Row(crossAxisAlignment: CrossAxisAlignment.start, children: [Expanded(child: _metricsSegment(compact: true)), const SizedBox(width: gap), Expanded(child: _securitySegment(compact: true))]),
+          Row(crossAxisAlignment: CrossAxisAlignment.start, children: [Expanded(child: _githubSegment(compact: true)), const SizedBox(width: gap), Expanded(child: _gitlabSegment(compact: true))]),
+          Row(crossAxisAlignment: CrossAxisAlignment.start, children: [Expanded(child: _deploysSegment(compact: true)), const SizedBox(width: gap), Expanded(child: _metricsSegment(compact: true))]),
+          _securitySegment(compact: true),
           _logsSegment(compact: true),
         ] else ...[
           _serversSegment(compact: true), _appsSegment(compact: true), _cronsSegment(compact: true),
-          _alertsSegment(compact: true), _githubSegment(compact: true), _deploysSegment(compact: true),
-          _metricsSegment(compact: true), _securitySegment(compact: true), _logsSegment(compact: true),
+          _alertsSegment(compact: true), _githubSegment(compact: true), _gitlabSegment(compact: true),
+          _deploysSegment(compact: true), _metricsSegment(compact: true), _securitySegment(compact: true),
+          _logsSegment(compact: true),
         ],
         const SizedBox(height: 8),
         Text(_useRealServers ? 'MY CONTROL PANEL • ${_servers.length} REAL SERVERS • PITCH BLACK' : 'MY CONTROL PANEL • DEMO DATA • ADD SERVERS IN SETTINGS', style: const TextStyle(fontSize: 9, letterSpacing: 0.7, color: AppColors.textDim, fontWeight: FontWeight.w600)),
@@ -1493,11 +1980,11 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
       trailing: compact
           ? InkWell(onTap: () => _goTo(1), child: const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan)))
           : (_useRealServers
-              ? InkWell(onTap: () => _goTo(10), child: Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), decoration: BoxDecoration(color: AppColors.accentCyan.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(6), border: Border.all(color: AppColors.accentCyan.withValues(alpha: 0.2))), child: const Text('+ MANAGE', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan))))
+              ? InkWell(onTap: () => _goTo(11), child: Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), decoration: BoxDecoration(color: AppColors.accentCyan.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(6), border: Border.all(color: AppColors.accentCyan.withValues(alpha: 0.2))), child: const Text('+ MANAGE', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan))))
               : Wrap(spacing: 6, children: [_filterChip('all','All'),_filterChip('operational','OK'),_filterChip('degraded','Warn'),_filterChip('down','Down')])),
       child: Column(children: [
         if (filtered.isEmpty)
-          Padding(padding: const EdgeInsets.all(16), child: Column(children: [const Icon(Icons.dns_outlined, size: 24, color: AppColors.textMuted), const SizedBox(height: 8), const Text('No servers yet', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: AppColors.textPrimary)), const SizedBox(height: 8), FilledButton(onPressed: () => _goTo(10), style: FilledButton.styleFrom(backgroundColor: AppColors.accentCyan, foregroundColor: Colors.black), child: const Text('ADD SERVER IN SETTINGS', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800)))]))
+          Padding(padding: const EdgeInsets.all(16), child: Column(children: [const Icon(Icons.dns_outlined, size: 24, color: AppColors.textMuted), const SizedBox(height: 8), const Text('No servers yet', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: AppColors.textPrimary)), const SizedBox(height: 8), FilledButton(onPressed: () => _goTo(11), style: FilledButton.styleFrom(backgroundColor: AppColors.accentCyan, foregroundColor: Colors.black), child: const Text('ADD SERVER IN SETTINGS', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800)))]))
         else ...[
           for (final s in display)
             Container(
@@ -1627,30 +2114,39 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
             )
           : Column(children: [
               for (final e in display)
-                Container(
-                  margin: EdgeInsets.only(bottom: compact ? 6 : 8),
-                  padding: EdgeInsets.all(compact ? 8 : 10),
-                  decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(8), border: Border.all(color: AppColors.borderLight)),
-                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                    Row(children: [
-                      Container(width: 6, height: 6, decoration: const BoxDecoration(color: AppColors.success, shape: BoxShape.circle)),
-                      const SizedBox(width: 6),
-                      Expanded(child: Text(e.command, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: AppColors.textPrimary, fontFamily: AppFonts.mono), maxLines: compact ? 1 : 2, overflow: TextOverflow.ellipsis)),
-                    ]),
-                    const SizedBox(height: 4),
-                    SingleChildScrollView(
-                      scrollDirection: Axis.horizontal,
-                      child: Row(children: [
-                        Text(e.schedule, style: const TextStyle(fontSize: 10, color: AppColors.accentCyan, fontFamily: AppFonts.mono)),
-                        const SizedBox(width: 8),
-                        Pill(text: e.serverName.toUpperCase(), color: AppColors.accentBlue),
-                        const SizedBox(width: 6),
-                        Text(e.source, style: const TextStyle(fontSize: 9, color: AppColors.textMuted, fontFamily: AppFonts.mono)),
-                        const SizedBox(width: 6),
-                        const Pill(text: 'SCHEDULED', color: AppColors.success),
+                Material(
+                  color: Colors.transparent,
+                  child: InkWell(
+                    onTap: () => _openCron(e),
+                    borderRadius: BorderRadius.circular(8),
+                    child: Container(
+                      margin: EdgeInsets.only(bottom: compact ? 6 : 8),
+                      padding: EdgeInsets.all(compact ? 8 : 10),
+                      decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(8), border: Border.all(color: AppColors.borderLight)),
+                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        Row(children: [
+                          Container(width: 6, height: 6, decoration: const BoxDecoration(color: AppColors.success, shape: BoxShape.circle)),
+                          const SizedBox(width: 6),
+                          Expanded(child: Text(e.command, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: AppColors.textPrimary, fontFamily: AppFonts.mono), maxLines: compact ? 1 : 2, overflow: TextOverflow.ellipsis)),
+                          const SizedBox(width: 6),
+                          const Icon(Icons.chevron_right, size: 14, color: AppColors.textDim),
+                        ]),
+                        const SizedBox(height: 4),
+                        SingleChildScrollView(
+                          scrollDirection: Axis.horizontal,
+                          child: Row(children: [
+                            Text(e.schedule, style: const TextStyle(fontSize: 10, color: AppColors.accentCyan, fontFamily: AppFonts.mono)),
+                            const SizedBox(width: 8),
+                            Pill(text: e.serverName.toUpperCase(), color: AppColors.accentBlue),
+                            const SizedBox(width: 6),
+                            Text(e.source, style: const TextStyle(fontSize: 9, color: AppColors.textMuted, fontFamily: AppFonts.mono)),
+                            const SizedBox(width: 6),
+                            const Pill(text: 'SCHEDULED', color: AppColors.success),
+                          ]),
+                        ),
                       ]),
                     ),
-                  ]),
+                  ),
                 ),
               if (compact && all.length > display.length)
                 Center(child: Text('+ ${all.length - display.length} more • tap VIEW ALL', style: const TextStyle(fontSize: 10, color: AppColors.textMuted, fontWeight: FontWeight.w600))),
@@ -1688,6 +2184,12 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
   }
 
   /// Apps discovered live on the user's servers (systemd + docker + ports).
+  /// Extract port from a "listening :PORT" detail string.
+  String _portOf(String detail) {
+    final m = RegExp(r':(\d+)').firstMatch(detail);
+    return m?.group(1) ?? '';
+  }
+
   Widget _realAppsCard({bool compact = false}) {
     final all = _realApps;
     final display = compact ? all.take(4).toList() : all;
@@ -1732,7 +2234,12 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
             )
           : Column(children: [
               for (final a in display)
-                Container(
+                Builder(builder: (_) {
+                  final proc = _procStats[a.serverId]?.matchForApp(a.name);
+                  final est = a.source == 'port'
+                      ? _procStats[a.serverId]?.ports[_portOf(a.detail)]?.established
+                      : null;
+                  return Container(
                   margin: EdgeInsets.only(bottom: compact ? 6 : 8),
                   padding: EdgeInsets.all(compact ? 8 : 10),
                   decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(8), border: Border.all(color: AppColors.borderLight)),
@@ -1743,6 +2250,18 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
                       Row(children: [
                         Flexible(child: Text(a.name, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: AppColors.textPrimary), overflow: TextOverflow.ellipsis)),
                         const SizedBox(width: 5),
+                        if (proc != null)
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                            decoration: BoxDecoration(color: (proc.cpu > 0.75 ? AppColors.critical : AppColors.success).withValues(alpha: 0.12), borderRadius: BorderRadius.circular(4)),
+                            child: Text('CPU ${(proc.cpu * 100).toInt()}% • ${proc.memMb}MB', style: TextStyle(fontSize: 9, fontWeight: FontWeight.w800, color: proc.cpu > 0.75 ? AppColors.critical : AppColors.success, fontFamily: AppFonts.mono)),
+                          )
+                        else if (est != null && est > 0)
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                            decoration: BoxDecoration(color: AppColors.accentPurple.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(4)),
+                            child: Text('$est CONN', style: const TextStyle(fontSize: 9, fontWeight: FontWeight.w800, color: AppColors.accentPurple, fontFamily: AppFonts.mono)),
+                          ),
                         Pill(text: a.source.toUpperCase(), color: colorFor(a)),
                       ]),
                       const SizedBox(height: 4),
@@ -1762,7 +2281,8 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
                     ])),
                     StatusDot(color: AppColors.success, pulse: false),
                   ]),
-                ),
+                  );
+                }),
               if (compact && all.length > display.length)
                 Center(child: Text('+ ${all.length - display.length} more • tap VIEW ALL', style: const TextStyle(fontSize: 10, color: AppColors.textMuted, fontWeight: FontWeight.w600))),
             ]),
@@ -1783,7 +2303,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
       title: 'GITHUB • DEMO',
       subtitle: _ghToken.isNotEmpty ? 'Token saved — add repos in Settings to go live' : 'Add a token in Settings to go live',
       trailing: Row(mainAxisSize: MainAxisSize.min, children: [
-        InkWell(onTap: () => _goTo(10), child: Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), decoration: BoxDecoration(color: AppColors.accentCyan.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(6), border: Border.all(color: AppColors.accentCyan.withValues(alpha: 0.2))), child: const Text('+ CONNECT', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan)))),
+        InkWell(onTap: () => _goTo(11), child: Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), decoration: BoxDecoration(color: AppColors.accentCyan.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(6), border: Border.all(color: AppColors.accentCyan.withValues(alpha: 0.2))), child: const Text('+ CONNECT', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan)))),
         if (compact) ...[const SizedBox(width: 8), InkWell(onTap: () => _goTo(4), child: const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan)))],
       ]),
       child: Column(children: [
@@ -1819,13 +2339,13 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
           ? 'syncing…'
           : _ghError != null
               ? _ghError!
-              : '${_ghRepos.length} repo${_ghRepos.length == 1 ? '' : 's'} • ${_ghIssues.length} issues • ${_ghPRs.length} PRs • ${_ghTasks.length} tasks',
+              : '${_ghRepos.length} repo${_ghRepos.length == 1 ? '' : 's'} • ${_ghIssues.length} issues • ${_ghPRs.length} PRs • ${_ghTasks.length} tasks${_ghTasksFromProjects ? ' (Projects v2)' : ''}${_ghProjects.isNotEmpty ? ' • ${_ghProjects.length} boards' : ''}',
       trailing: Row(mainAxisSize: MainAxisSize.min, children: [
         if (_ghLoading) const SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.accentCyan)),
         if (_ghLoading) const SizedBox(width: 6),
         InkWell(
           onTap: () {
-            setState(() { _ghIssues = []; _ghPRs = []; _ghTasks = []; _ghError = null; });
+            setState(() { _ghIssues = []; _ghPRs = []; _ghTasks = []; _ghProjects = []; _ghTasksSource = ''; _ghError = null; });
             _pollGithub();
           },
           child: const Row(children: [Icon(Icons.refresh, size: 11, color: AppColors.accentCyan), SizedBox(width: 3), Text('SYNC', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan))]),
@@ -1837,7 +2357,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
           isSelected: [_githubTab==0, _githubTab==1, _githubTab==2], onPressed: (i)=> setState(()=> _githubTab=i),
           borderRadius: BorderRadius.circular(7), selectedColor: Colors.black, fillColor: AppColors.accentCyan, color: AppColors.textSecondary, borderColor: AppColors.border, selectedBorderColor: AppColors.accentCyan,
           constraints: const BoxConstraints(minHeight: 24, minWidth: 44),
-          children: [Text('Issues (${_ghIssues.length})', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700)), Text('PRs (${_ghPRs.length})', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700)), Text('Tasks (${_ghTasks.length})', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700))],
+          children: [Text('Issues (${_ghIssues.length})', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700)), Text('PRs (${_ghPRs.length})', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700)), Text('Tasks (${_ghTasks.length})${_ghTasksFromProjects ? ' ▣' : ''}', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700))],
         ),
         const SizedBox(height: 8),
         if (data.isEmpty && !_ghLoading)
@@ -1897,6 +2417,125 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     );
   }
 
+  /// Shared issue/MR row builder (GitLab uses the same shape as GitHub items).
+  Widget _vcsRow(GithubItem item, {bool compact = false, Color accent = AppColors.accentCyan}) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 6), padding: const EdgeInsets.all(8),
+      decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(8), border: Border.all(color: AppColors.borderLight)),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Container(padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1), decoration: BoxDecoration(color: AppColors.surface2, borderRadius: BorderRadius.circular(4), border: Border.all(color: AppColors.border)), child: Text(item.number > 0 ? '!${item.number}' : '#${item.number}', style: const TextStyle(fontSize: 9, fontWeight: FontWeight.w700, color: AppColors.textSecondary, fontFamily: AppFonts.mono))),
+          const SizedBox(width: 5),
+          Expanded(child: Text(item.title, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: AppColors.textPrimary), maxLines: compact ? 1 : 2, overflow: TextOverflow.ellipsis)),
+        ]),
+        const SizedBox(height: 5),
+        Row(children: [
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+            decoration: BoxDecoration(color: accent.withValues(alpha: 0.1), borderRadius: BorderRadius.circular(4), border: Border.all(color: accent.withValues(alpha: 0.25))),
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              Icon(Icons.book_outlined, size: 8, color: accent),
+              const SizedBox(width: 3),
+              Text(item.repo.toUpperCase(), style: TextStyle(fontSize: 8, fontWeight: FontWeight.w800, letterSpacing: 0.3, color: accent)),
+            ]),
+          ),
+          const SizedBox(width: 6),
+          const Icon(Icons.person_outline, size: 10, color: AppColors.textMuted),
+          const SizedBox(width: 2),
+          Flexible(child: Text(item.author, style: const TextStyle(fontSize: 10, color: AppColors.textMuted), maxLines: 1, overflow: TextOverflow.ellipsis)),
+          if (item.labels.isNotEmpty) ...[
+            const SizedBox(width: 6),
+            Flexible(child: Text(item.labels.take(2).join(' • '), style: const TextStyle(fontSize: 9, color: AppColors.accentPurple), maxLines: 1, overflow: TextOverflow.ellipsis)),
+          ],
+        ]),
+        const SizedBox(height: 4),
+        Row(children: [
+          Text(timeAgo(item.updatedAt), style: const TextStyle(fontSize: 10, color: AppColors.textDim)),
+          const SizedBox(width: 8),
+          const Icon(Icons.chat_bubble_outline, size: 10, color: AppColors.textDim),
+          Text(' ${item.comments}', style: const TextStyle(fontSize: 10, color: AppColors.textDim)),
+          const Spacer(),
+          Pill(text: item.state.toUpperCase(), color: item.state == 'open' ? AppColors.success : AppColors.textMuted),
+        ]),
+      ]),
+    );
+  }
+
+  Widget _gitlabSegment({bool compact = false}) {
+    if (_glConfigured && (_glIssues.isNotEmpty || _glMrs.isNotEmpty || _glTasks.isNotEmpty || _glLoading || _glError != null)) {
+      return _realGitlabCard(compact: compact);
+    }
+    final data = _gitlabTab == 0 ? mockIssues : _gitlabTab == 1 ? mockPRs : mockTasks;
+    final display = compact ? data.take(2).toList() : data;
+    return PitchCard(
+      title: 'GITLAB • DEMO',
+      subtitle: _glToken.isNotEmpty ? 'Token saved — add projects in Settings to go live' : 'Add a token in Settings to go live',
+      trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+        InkWell(onTap: () => _goTo(11), child: Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), decoration: BoxDecoration(color: AppColors.accentPurple.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(6), border: Border.all(color: AppColors.accentPurple.withValues(alpha: 0.2))), child: const Text('+ CONNECT', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentPurple)))),
+        if (compact) ...[const SizedBox(width: 8), InkWell(onTap: () => _goTo(5), child: const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan)))],
+      ]),
+      child: Column(children: [
+        ToggleButtons(
+          isSelected: [_gitlabTab == 0, _gitlabTab == 1, _gitlabTab == 2], onPressed: (i) => setState(() => _gitlabTab = i),
+          borderRadius: BorderRadius.circular(7), selectedColor: Colors.black, fillColor: AppColors.accentPurple, color: AppColors.textSecondary, borderColor: AppColors.border, selectedBorderColor: AppColors.accentPurple,
+          constraints: const BoxConstraints(minHeight: 24, minWidth: 44),
+          children: const [Text('Issues', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700)), Text('MRs', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700)), Text('Tasks', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700))],
+        ),
+        const SizedBox(height: 8),
+        for (final item in display) _vcsRow(item, compact: compact, accent: AppColors.accentPurple),
+      ]),
+    );
+  }
+
+  /// GitLab rendered from the user's live instance data.
+  Widget _realGitlabCard({bool compact = false}) {
+    final data = _gitlabTab == 0 ? _glIssues : _gitlabTab == 1 ? _glMrs : _glTasks;
+    final display = compact ? data.take(3).toList() : data;
+    final tabName = _gitlabTab == 0 ? 'issues' : _gitlabTab == 1 ? 'MRs' : 'tasks';
+    return PitchCard(
+      title: 'GITLAB • @$_glUser',
+      subtitle: _glLoading
+          ? 'syncing…'
+          : _glError != null
+              ? _glError!
+              : '${_glProjects.length} project${_glProjects.length == 1 ? '' : 's'} • ${_glIssues.length} issues • ${_glMrs.length} MRs • ${_glTasks.length} tasks',
+      trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+        if (_glLoading) const SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.accentPurple)),
+        if (_glLoading) const SizedBox(width: 6),
+        InkWell(
+          onTap: () {
+            setState(() { _glIssues = []; _glMrs = []; _glTasks = []; _glError = null; });
+            _pollGitlab();
+          },
+          child: const Row(children: [Icon(Icons.refresh, size: 11, color: AppColors.accentPurple), SizedBox(width: 3), Text('SYNC', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentPurple))]),
+        ),
+        if (compact) ...[const SizedBox(width: 10), InkWell(onTap: () => _goTo(5), child: const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan)))],
+      ]),
+      child: Column(children: [
+        ToggleButtons(
+          isSelected: [_gitlabTab == 0, _gitlabTab == 1, _gitlabTab == 2], onPressed: (i) => setState(() => _gitlabTab = i),
+          borderRadius: BorderRadius.circular(7), selectedColor: Colors.black, fillColor: AppColors.accentPurple, color: AppColors.textSecondary, borderColor: AppColors.border, selectedBorderColor: AppColors.accentPurple,
+          constraints: const BoxConstraints(minHeight: 24, minWidth: 44),
+          children: [Text('Issues (${_glIssues.length})', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700)), Text('MRs (${_glMrs.length})', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700)), Text('Tasks (${_glTasks.length})', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700))],
+        ),
+        const SizedBox(height: 8),
+        if (data.isEmpty && !_glLoading)
+          Padding(
+            padding: const EdgeInsets.all(12),
+            child: Row(children: [
+              Icon(_glError != null ? Icons.error_outline : Icons.check_circle, size: 15, color: _glError != null ? AppColors.warning : AppColors.success),
+              const SizedBox(width: 8),
+              Expanded(child: Text(_glError ?? 'No open $tabName — queue is clear ✓', style: const TextStyle(fontSize: 11, color: AppColors.textMuted))),
+            ]),
+          )
+        else
+          for (final item in display) _vcsRow(item, compact: compact, accent: AppColors.accentPurple),
+        if (compact && data.length > display.length)
+          Center(child: Text('+ ${data.length - display.length} more • tap VIEW ALL', style: const TextStyle(fontSize: 10, color: AppColors.textMuted, fontWeight: FontWeight.w600))),
+      ]),
+    );
+  }
+
   Widget _alertsSegment({bool compact = false}) {
     // Connected servers ALWAYS get the real card (with server badges) —
     // never demo alerts. Empty/error states explain themselves inside.
@@ -1905,7 +2544,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     return PitchCard(
       title: _useRealServers ? 'ALERTS • SCANNING…' : 'ALERTS • DEMO',
       subtitle: _useRealServers ? 'Harvesting signals from ${_savedServers.length} server${_savedServers.length == 1 ? '' : 's'}…' : '${mockAlerts.where((a)=>a.status=='firing').length} firing',
-      trailing: compact ? InkWell(onTap: () => _goTo(5), child: const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan))) : null,
+      trailing: compact ? InkWell(onTap: () => _goTo(6), child: const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan))) : null,
       child: Column(children: display.map((a) => Container(
         margin: EdgeInsets.only(bottom: compact ? 6 : 8), padding: EdgeInsets.all(compact ? 8 : 10),
         decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(8), border: Border.all(color: a.severity=='critical' ? AppColors.critical.withValues(alpha: 0.3) : AppColors.borderLight)),
@@ -1941,7 +2580,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
           },
           child: const Row(children: [Icon(Icons.refresh, size: 11, color: AppColors.accentCyan), SizedBox(width: 3), Text('RESCAN', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan))]),
         ),
-        if (compact) ...[const SizedBox(width: 10), InkWell(onTap: () => _goTo(5), child: const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan)))],
+        if (compact) ...[const SizedBox(width: 10), InkWell(onTap: () => _goTo(6), child: const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan)))],
       ]),
       child: all.isEmpty
           ? Padding(
@@ -2017,15 +2656,26 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     );
   }
 
+  /// Merged CI/CD timeline: GitHub Actions runs + GitLab pipelines, newest first.
+  List<DeployItem> get _allRuns {
+    final all = [..._ghRuns, ..._glPipes];
+    all.sort((a, b) => b.time.compareTo(a.time));
+    return all;
+  }
+
+  bool get _ciConfigured => _ghConfigured || _glConfigured;
+  bool get _ciLoading => _ghLoading || _glLoading;
+  String? get _ciError => _ghError ?? _glError;
+
   Widget _deploysSegment({bool compact = false}) {
-    // Live Actions runs once GitHub is configured.
-    if (_ghConfigured && (_ghRuns.isNotEmpty || _ghLoading || _ghError != null)) return _realDeploysCard(compact: compact);
+    // Live runs once either VCS is configured.
+    if (_ciConfigured && (_allRuns.isNotEmpty || _ciLoading || _ciError != null)) return _realDeploysCard(compact: compact);
     final display = compact ? mockDeploys.take(3).toList() : mockDeploys;
     return PitchCard(
       title: 'CI/CD • DEMO', subtitle: compact ? '3 of ${mockDeploys.length} shown' : 'Last 6 deployments',
       trailing: Row(mainAxisSize: MainAxisSize.min, children: [
-        InkWell(onTap: () => _goTo(10), child: Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), decoration: BoxDecoration(color: AppColors.accentCyan.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(6), border: Border.all(color: AppColors.accentCyan.withValues(alpha: 0.2))), child: const Text('+ CONNECT', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan)))),
-        if (compact) ...[const SizedBox(width: 8), InkWell(onTap: () => _goTo(6), child: const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan)))],
+        InkWell(onTap: () => _goTo(11), child: Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), decoration: BoxDecoration(color: AppColors.accentCyan.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(6), border: Border.all(color: AppColors.accentCyan.withValues(alpha: 0.2))), child: const Text('+ CONNECT', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan)))),
+        if (compact) ...[const SizedBox(width: 8), InkWell(onTap: () => _goTo(7), child: const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan)))],
       ]),
       child: Column(children: display.map((d) => Container(
         margin: EdgeInsets.only(bottom: compact ? 6 : 8), padding: EdgeInsets.all(compact ? 8 : 10),
@@ -2042,40 +2692,49 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     );
   }
 
-  /// CI/CD rendered from live GitHub Actions runs.
+  /// CI/CD rendered from live runs: GitHub Actions + GitLab pipelines.
   Widget _realDeploysCard({bool compact = false}) {
-    final display = compact ? _ghRuns.take(3).toList() : _ghRuns;
+    final all = _allRuns;
+    final display = compact ? all.take(3).toList() : all;
     IconData statusIcon(String s) => s == 'success' ? Icons.check : s == 'failed' ? Icons.close : Icons.sync;
     Color statusColorFor(String s) => s == 'success' ? AppColors.success : s == 'failed' ? AppColors.critical : AppColors.warning;
+    final sources = [
+      if (_ghConfigured) 'GH:${_ghRuns.length}',
+      if (_glConfigured) 'GL:${_glPipes.length}',
+    ].join(' • ');
     return PitchCard(
-      title: 'CI/CD • ACTIONS',
-      subtitle: _ghLoading
+      title: 'CI/CD • LIVE',
+      subtitle: _ciLoading
           ? 'syncing…'
-          : _ghError != null
-              ? _ghError!
-              : '${_ghRuns.length} runs • ${_ghRepos.length} repo${_ghRepos.length == 1 ? '' : 's'}',
+          : _ciError != null
+              ? _ciError!
+              : '${all.length} runs ($sources)',
       trailing: Row(mainAxisSize: MainAxisSize.min, children: [
-        if (_ghLoading) const SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.accentCyan)),
-        if (_ghLoading) const SizedBox(width: 6),
+        if (_ciLoading) const SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.accentCyan)),
+        if (_ciLoading) const SizedBox(width: 6),
         InkWell(
           onTap: () {
-            setState(() { _ghRuns = []; _ghError = null; });
+            setState(() { _ghRuns = []; _ghError = null; _glPipes = []; _glError = null; });
             _pollGithub();
+            _pollGitlab();
           },
           child: const Row(children: [Icon(Icons.refresh, size: 11, color: AppColors.accentCyan), SizedBox(width: 3), Text('SYNC', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan))]),
         ),
-        if (compact) ...[const SizedBox(width: 10), InkWell(onTap: () => _goTo(6), child: const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan)))],
+        if (compact) ...[const SizedBox(width: 10), InkWell(onTap: () => _goTo(7), child: const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan)))],
       ]),
-      child: _ghRuns.isEmpty && !_ghLoading
+      child: all.isEmpty && !_ciLoading
           ? Padding(
               padding: const EdgeInsets.all(12),
               child: Row(children: [
-                Icon(_ghError != null ? Icons.error_outline : Icons.info_outline, size: 15, color: _ghError != null ? AppColors.warning : AppColors.textMuted),
+                Icon(_ciError != null ? Icons.error_outline : Icons.info_outline, size: 15, color: _ciError != null ? AppColors.warning : AppColors.textMuted),
                 const SizedBox(width: 8),
-                Expanded(child: Text(_ghError ?? 'No workflow runs yet — push to a tracked repo to trigger Actions.', style: const TextStyle(fontSize: 11, color: AppColors.textMuted))),
+                Expanded(child: Text(_ciError ?? 'No runs yet — push to a tracked repo to trigger a build.', style: const TextStyle(fontSize: 11, color: AppColors.textMuted))),
               ]),
             )
-          : Column(children: display.map((d) => Container(
+          : Column(children: display.map((d) {
+              final isGl = d.vcs == 'gitlab';
+              final vcsColor = isGl ? AppColors.accentPurple : AppColors.textPrimary;
+              return Container(
               margin: EdgeInsets.only(bottom: compact ? 6 : 8), padding: EdgeInsets.all(compact ? 8 : 10),
               decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(8), border: Border.all(color: d.status == 'failed' ? AppColors.critical.withValues(alpha: 0.25) : AppColors.borderLight)),
               child: Row(children: [
@@ -2083,6 +2742,12 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
                 const SizedBox(width: 8),
                 Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                   Row(children: [
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                      decoration: BoxDecoration(color: vcsColor.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(3), border: Border.all(color: vcsColor.withValues(alpha: 0.25))),
+                      child: Text(isGl ? 'GL' : 'GH', style: TextStyle(fontSize: 8, fontWeight: FontWeight.w800, letterSpacing: 0.3, color: vcsColor)),
+                    ),
+                    const SizedBox(width: 5),
                     Flexible(child: Text(d.app, style: TextStyle(fontSize: compact ? 11 : 12, fontWeight: FontWeight.w700, color: AppColors.textPrimary), overflow: TextOverflow.ellipsis)),
                     const SizedBox(width: 5),
                     Text(d.version, style: const TextStyle(fontSize: 10, color: AppColors.accentCyan, fontFamily: AppFonts.mono)),
@@ -2094,7 +2759,8 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
                 ])),
                 const Icon(Icons.chevron_right, size: 14, color: AppColors.textDim),
               ]),
-            )).toList()),
+            );
+            }).toList()),
     );
   }
 
@@ -2103,7 +2769,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     final display = compact ? filtered.take(6).toList() : filtered;
     return PitchCard(
       title: 'LIVE LOG TAIL',
-      trailing: compact ? InkWell(onTap: () => _goTo(7), child: const Text('EXPAND →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan))) : null,
+      trailing: compact ? InkWell(onTap: () => _goTo(8), child: const Text('EXPAND →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan))) : null,
       child: Container(
         height: compact ? 160 : 280,
         decoration: BoxDecoration(color: const Color(0xFF050505), borderRadius: BorderRadius.circular(10), border: Border.all(color: AppColors.border)),
@@ -2126,7 +2792,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
   Widget _metricsSegment({bool compact = false}) {
     return PitchCard(
       title: 'METRICS',
-      trailing: compact ? InkWell(onTap: () => _goTo(8), child: const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan))) : null,
+      trailing: compact ? InkWell(onTap: () => _goTo(9), child: const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan))) : null,
       child: Column(children: [
         SizedBox(
           height: compact ? 110 : 160,
@@ -2163,7 +2829,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     final display = compact ? mockSecurity.take(3).toList() : mockSecurity;
     return PitchCard(
       title: 'SECURITY',
-      trailing: compact ? InkWell(onTap: () => _goTo(9), child: const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan))) : null,
+      trailing: compact ? InkWell(onTap: () => _goTo(10), child: const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan))) : null,
       child: Column(children: display.map((s) => Container(
         margin: EdgeInsets.only(bottom: compact ? 6 : 8), padding: EdgeInsets.all(compact ? 8 : 10),
         decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(8), border: Border.all(color: s.severity=='critical' ? AppColors.critical.withValues(alpha: 0.25) : AppColors.borderLight)),
@@ -2183,7 +2849,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     return Drawer(
       backgroundColor: const Color(0xFF0A0A0A), width: 380,
       child: SafeArea(child: Column(children: [
-        Container(padding: const EdgeInsets.all(14), decoration: const BoxDecoration(color: AppColors.surface1, border: Border(bottom: BorderSide(color: AppColors.border))), child: Row(children: [Container(width: 36, height: 36, decoration: BoxDecoration(color: AppColors.accentCyan, borderRadius: BorderRadius.circular(8)), child: const Icon(Icons.smart_toy, size: 18, color: Colors.black)), const SizedBox(width: 10), Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [const Text('AI Assistant', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.textPrimary)), Text(_aiConfigured ? '$_aiModelName • control center aware' : 'No provider configured', style: const TextStyle(fontSize: 10, color: AppColors.textMuted), maxLines: 1, overflow: TextOverflow.ellipsis)]))])),
+        Container(padding: const EdgeInsets.all(14), decoration: const BoxDecoration(color: AppColors.surface1, border: Border(bottom: BorderSide(color: AppColors.border))), child: Row(children: [Container(width: 36, height: 36, decoration: BoxDecoration(color: AppColors.accentCyan, borderRadius: BorderRadius.circular(8)), child: const Icon(Icons.smart_toy, size: 18, color: Colors.black)), const SizedBox(width: 10), Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [const Text('AI Assistant', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.textPrimary)), Text(_aiConfigured ? '$_aiModelName • control center aware' : 'No provider configured', style: const TextStyle(fontSize: 10, color: AppColors.textMuted), maxLines: 1, overflow: TextOverflow.ellipsis)])), Builder(builder: (drawerCtx) => IconButton(tooltip: 'Audit trail', onPressed: () { Navigator.pop(drawerCtx); Navigator.push(context, MaterialPageRoute(builder: (_) => const AuditScreen())); }, icon: Container(padding: const EdgeInsets.all(6), decoration: BoxDecoration(color: AppColors.surface2, borderRadius: BorderRadius.circular(8), border: Border.all(color: AppColors.border)), child: const Icon(Icons.history, size: 15, color: AppColors.textSecondary))))])),
         if (!_aiConfigured)
           Expanded(
             child: Padding(
@@ -2198,7 +2864,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
                 Builder(builder: (drawerCtx) => FilledButton.icon(
                       onPressed: () {
                         Navigator.pop(drawerCtx); // close drawer first
-                        _goTo(10); // Settings tab (reloads AI config on return)
+                        _goTo(11); // Settings tab (reloads AI config on return)
                       },
                       icon: const Icon(Icons.settings_outlined, size: 15),
                       label: const Text('CONFIGURE AI PROVIDER', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800)),

@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:dartssh2/dartssh2.dart';
 import '../models/alert_entry.dart';
 import '../models/app_entry.dart';
+import '../models/app_proc.dart';
 import '../models/cron_entry.dart';
 import '../models/server_connection.dart';
 import 'ssh_key_loader.dart';
@@ -19,10 +20,16 @@ class AgentInstallResult {
 class AgentService {
   static const int agentPort = 9108;
 
-  /// The agent: stdlib-only Python, exposes {"cpu":0-1,"ram":0-1,"disk":0-1,"uptime_days":n}
+  /// Agent v2: stdlib-only Python.
+  /// /metrics -> {"cpu","ram","disk","uptime_days","version":2}
+  /// /procstats -> {"version":2,"top":[{"pid","name","cpu","mem_mb"}], "ports":{"3000":{"listening":true,"established":2}}}
+  /// APM-lite: top processes by CPU + per-port established connections.
+  static const int agentVersion = 2;
   static const String agentScript = r'''
 import json, os, time
 from http.server import BaseHTTPRequestHandler, HTTPServer
+
+AGENT_VERSION = 2
 
 def read_cpu():
     try:
@@ -67,12 +74,84 @@ def read_uptime_days():
             return int(float(f.read().split()[0]) // 86400)
     except Exception: return 0
 
+def _proc_snapshot():
+    procs = {}
+    try:
+        for pid in os.listdir('/proc'):
+            if not pid.isdigit():
+                continue
+            try:
+                with open('/proc/%s/stat' % pid) as f:
+                    p = f.read().rsplit(')', 1)[1].split()
+                utime, stime = int(p[11]), int(p[12])
+                with open('/proc/%s/status' % pid) as f:
+                    txt = f.read()
+                name, rss = pid, 0
+                for line in txt.split('\n'):
+                    if line.startswith('Name:'): name = line.split(':', 1)[1].strip()
+                    elif line.startswith('VmRSS:'): rss = int(line.split()[1]) // 1024
+                procs[int(pid)] = [utime + stime, name, rss]
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return procs
+
+def read_top_processes(n=12):
+    try:
+        with open('/proc/stat') as f:
+            total1 = sum(map(int, f.readline().split()[1:8]))
+        s1 = _proc_snapshot()
+        time.sleep(0.5)
+        with open('/proc/stat') as f:
+            total2 = sum(map(int, f.readline().split()[1:8]))
+        s2 = _proc_snapshot()
+        dt = max(1, total2 - total1)
+        out = []
+        for pid, (t1, name, rss) in s1.items():
+            if pid in s2:
+                cpu = max(0.0, min(1.0, (s2[pid][0] - t1) / dt))
+                out.append({'pid': pid, 'name': name, 'cpu': round(cpu, 3), 'mem_mb': s2[pid][2]})
+        out.sort(key=lambda e: e['cpu'], reverse=True)
+        return out[:n]
+    except Exception:
+        return []
+
+def read_ports():
+    ports = {}
+    for path in ('/proc/net/tcp', '/proc/net/tcp6'):
+        try:
+            with open(path) as f:
+                lines = f.read().split('\n')[1:]
+            for line in lines:
+                p = line.split()
+                if len(p) < 4:
+                    continue
+                try:
+                    local_port = int(p[1].split(':')[1], 16)
+                    state = p[3]
+                except Exception:
+                    continue
+                e = ports.setdefault(str(local_port), {'listening': False, 'established': 0})
+                if state == '0A':
+                    e['listening'] = True
+                elif state == '01':
+                    e['established'] += 1
+        except Exception:
+            continue
+    return ports
+
 class H(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path != '/metrics':
+        if self.path == '/metrics':
+            body = json.dumps({'cpu': round(read_cpu(), 3), 'ram': round(read_ram(), 3),
+                               'disk': round(read_disk(), 3), 'uptime_days': read_uptime_days(),
+                               'version': AGENT_VERSION}).encode()
+        elif self.path == '/procstats':
+            body = json.dumps({'version': AGENT_VERSION, 'top': read_top_processes(),
+                               'ports': read_ports()}).encode()
+        else:
             self.send_response(404); self.end_headers(); return
-        body = json.dumps({'cpu': round(read_cpu(), 3), 'ram': round(read_ram(), 3),
-                           'disk': round(read_disk(), 3), 'uptime_days': read_uptime_days()}).encode()
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Content-Length', str(len(body)))
@@ -112,14 +191,21 @@ WantedBy=multi-user.target
     if (s.authMethod == AuthMethod.password) {
       passwordCb = () => s.credential;
     } else {
+      log('Resolving saved key…');
       final loaded = await SshKeyLoader.load(s.credential, passphrase: keyPassphrase);
       if (loaded.keys == null) {
         if (loaded.needsPassphrase && keyPassphrase == null) {
           return const AgentInstallResult(false, 'SSH_KEY_NEEDS_PASSPHRASE');
         }
+        if (loaded.needsPassphrase) {
+          return const AgentInstallResult(false, 'SSH_KEY_BAD_PASSPHRASE');
+        }
+        log('Key failed: ${loaded.error}');
         return const AgentInstallResult(false, 'SSH_KEY_AUTH');
       }
       keyPairs = loaded.keys;
+      log('Key loaded (${keyPairs!.length} identit${keyPairs!.length == 1 ? 'y' : 'ies'}).');
+      if (loaded.detected.isNotEmpty) log('Key type: ${loaded.detected}.');
     }
     SSHClient? client;
     try {
@@ -130,14 +216,16 @@ WantedBy=multi-user.target
           username: s.username,
           onPasswordRequest: passwordCb,
           identities: keyPairs ?? const []);
-      await client.authenticated;
+      await client.authenticated.timeout(const Duration(seconds: 20));
       log('SSH authenticated.');
 
-      Future<String> run(String cmd) async {
+      // Every command gets a timeout AND non-interactive sudo: a password
+      // prompt would otherwise hang forever with zero feedback.
+      Future<String> run(String cmd, {Duration timeout = const Duration(seconds: 45)}) async {
         log('\$ $cmd');
         final session = await client!.execute(cmd);
-        final out = await session.stdout.cast<List<int>>().transform(utf8.decoder).join();
-        final err = await session.stderr.cast<List<int>>().transform(utf8.decoder).join();
+        final out = await session.stdout.cast<List<int>>().transform(utf8.decoder).join().timeout(timeout);
+        final err = await session.stderr.cast<List<int>>().transform(utf8.decoder).join().timeout(const Duration(seconds: 5));
         final code = session.exitCode;
         if (out.trim().isNotEmpty) log(out.trim().split('\n').take(4).join('\n'));
         if (code != 0) throw Exception('exit $code: ${(err + out).trim().split('\n').first}');
@@ -145,29 +233,37 @@ WantedBy=multi-user.target
       }
 
       await run('python3 --version');
-      await run('sudo -n true 2>/dev/null || echo NO_SUDO_NOPASS');
-      await run('sudo mkdir -p /opt/mcp-agent && sudo chmod 755 /opt/mcp-agent');
-      // upload agent.py via heredoc over stdin
+      // Fail fast when passwordless sudo is missing — never hang on a prompt.
+      final sudoCheck = await run('sudo -n true 2>/dev/null && echo SUDO_OK || echo SUDO_NEED_PASS');
+      if (!sudoCheck.contains('SUDO_OK')) {
+        throw Exception(
+            'Passwordless sudo is not enabled for "${s.username}". One-click install needs it.\n'
+            'Fix on the server (as root): echo "${s.username} ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/${s.username}\n'
+            'Or use the manual install, where you type the sudo password yourself.');
+      }
+      log('Passwordless sudo confirmed.');
+      await run('sudo -n mkdir -p /opt/mcp-agent && sudo -n chmod 755 /opt/mcp-agent');
+      // upload agent.py via stdin
       final upload = await client.execute(
-          "sudo tee /opt/mcp-agent/agent.py > /dev/null && sudo chmod 644 /opt/mcp-agent/agent.py && echo UPLOADED");
+          "sudo -n tee /opt/mcp-agent/agent.py > /dev/null && sudo -n chmod 644 /opt/mcp-agent/agent.py && echo UPLOADED");
       upload.stdin.add(utf8.encode(agentScript));
-      await upload.stdin.close();
-      final upOut = await upload.stdout.cast<List<int>>().transform(utf8.decoder).join();
+      await upload.stdin.close().timeout(const Duration(seconds: 30));
+      final upOut = await upload.stdout.cast<List<int>>().transform(utf8.decoder).join().timeout(const Duration(seconds: 30));
       if (!upOut.contains('UPLOADED')) throw Exception('agent upload failed');
       log('Agent script uploaded.');
       // systemd unit
       final unit = await client.execute(
-          'sudo tee /etc/systemd/system/mcp-agent.service > /dev/null && echo UNIT_OK');
+          'sudo -n tee /etc/systemd/system/mcp-agent.service > /dev/null && echo UNIT_OK');
       unit.stdin.add(utf8.encode(serviceUnit));
-      await unit.stdin.close();
-      await unit.done;
+      await unit.stdin.close().timeout(const Duration(seconds: 30));
+      await unit.done.timeout(const Duration(seconds: 30));
       log('systemd unit written.');
-      await run('sudo systemctl daemon-reload && sudo systemctl enable --now mcp-agent && sleep 2 && sudo systemctl is-active mcp-agent');
+      await run('sudo -n systemctl daemon-reload && sudo -n systemctl enable --now mcp-agent && sleep 2 && sudo -n systemctl is-active mcp-agent');
       log('Service active.');
       await run('ss -ltn 2>/dev/null | grep 9108 || netstat -ltn 2>/dev/null | grep 9108 || echo PORT_CHECK_SKIP');
       // Configure host firewall for the agent port (best-effort — ignored if ufw absent)
       try {
-        await run('sudo ufw allow $agentPort/tcp 2>/dev/null || sudo firewall-cmd --permanent --add-port=$agentPort/tcp --quiet 2>/dev/null && sudo firewall-cmd --reload --quiet 2>/dev/null; echo FW_OK');
+        await run('sudo -n ufw allow $agentPort/tcp 2>/dev/null || sudo -n firewall-cmd --permanent --add-port=$agentPort/tcp --quiet 2>/dev/null && sudo -n firewall-cmd --reload --quiet 2>/dev/null; echo FW_OK');
         log('Firewall opened for TCP $agentPort (or no local firewall present).');
       } catch (_) {
         log('No local firewall rule applied (non-fatal — cloud security groups may still apply).');
@@ -478,6 +574,148 @@ WantedBy=multi-user.target
     } catch (e) {
       try { client?.close(); } catch (_) {}
       rethrow;
+    }
+  }
+
+  /// Tail logs for one cronjob: greps journal + syslog for the command's
+  /// program name (first token basename), newest first, capped at 200 lines.
+  Future<String> fetchCronLogs(ServerConnection s, CronEntry entry, {String? keyPassphrase}) async {
+    List<SSHKeyPair>? keys;
+    String? Function()? passwordCb;
+    if (s.authMethod == AuthMethod.password) {
+      passwordCb = () => s.credential;
+    } else {
+      final loaded = await SshKeyLoader.load(s.credential, passphrase: keyPassphrase);
+      if (loaded.keys == null) {
+        if (loaded.needsPassphrase) throw Exception('SSH key is encrypted — enter the passphrase in the Terminal tab first.');
+        throw Exception(loaded.error ?? 'key load failed');
+      }
+      keys = loaded.keys;
+    }
+    SSHClient? client;
+    try {
+      final socket = await SSHSocket.connect(s.host, s.port, timeout: const Duration(seconds: 10));
+      client = SSHClient(socket, username: s.username, onPasswordRequest: passwordCb, identities: keys ?? const []);
+      await client.authenticated.timeout(const Duration(seconds: 15));
+
+      Future<String> run(String cmd) async {
+        final session = await client!.execute(cmd);
+        final out = await session.stdout.cast<List<int>>().transform(utf8.decoder).join().timeout(const Duration(seconds: 20));
+        return out;
+      }
+
+      final firstToken = entry.command.trim().split(RegExp(r'\s+')).firstWhere((t) => t.isNotEmpty, orElse: () => '');
+      final prog = firstToken.split('/').last.replaceAll(RegExp(r'[^A-Za-z0-9@._:\-]'), '');
+      if (prog.isEmpty) return 'No searchable program name in: ${entry.command}';
+      final q = "'$prog'";
+      final out = await run(
+          "(journalctl --no-pager --since '7 days ago' 2>/dev/null | grep -i $q | tail -100; "
+          "echo '--- syslog ---'; "
+          "(sudo -n grep -hi $q /var/log/syslog /var/log/messages /var/log/cron* 2>/dev/null || grep -hi $q /var/log/syslog /var/log/messages /var/log/cron* 2>/dev/null) | tail -100)");
+      client.close();
+      final text = out.trim();
+      return text.isEmpty ? 'No log lines mentioning "$prog" in the last 7 days.' : text;
+    } catch (e) {
+      try { client?.close(); } catch (_) {}
+      rethrow;
+    }
+  }
+
+  /// Rewrite one crontab line in place. System files use sudo tee.
+  /// [entry.rawLine] must match exactly one line in the source.
+  Future<void> updateCron(ServerConnection s, CronEntry entry, String newSchedule, String newCommand, {String? keyPassphrase}) async {
+    List<SSHKeyPair>? keys;
+    String? Function()? passwordCb;
+    if (s.authMethod == AuthMethod.password) {
+      passwordCb = () => s.credential;
+    } else {
+      final loaded = await SshKeyLoader.load(s.credential, passphrase: keyPassphrase);
+      if (loaded.keys == null) {
+        if (loaded.needsPassphrase) throw Exception('SSH key is encrypted — enter the passphrase in the Terminal tab first.');
+        throw Exception(loaded.error ?? 'key load failed');
+      }
+      keys = loaded.keys;
+    }
+    newSchedule = newSchedule.trim();
+    newCommand = newCommand.trim();
+    if (newSchedule.isEmpty || newCommand.isEmpty) throw Exception('Schedule and command are required.');
+    if (entry.rawLine.isEmpty) throw Exception('Cannot safely edit: original line unknown. Rescan and retry.');
+    SSHClient? client;
+    try {
+      final socket = await SSHSocket.connect(s.host, s.port, timeout: const Duration(seconds: 10));
+      client = SSHClient(socket, username: s.username, onPasswordRequest: passwordCb, identities: keys ?? const []);
+      await client.authenticated.timeout(const Duration(seconds: 15));
+
+      Future<String> run(String cmd) async {
+        final session = await client!.execute(cmd);
+        final out = await session.stdout.cast<List<int>>().transform(utf8.decoder).join().timeout(const Duration(seconds: 15));
+        final err = await session.stderr.cast<List<int>>().transform(utf8.decoder).join().timeout(const Duration(seconds: 5));
+        if (session.exitCode != 0) throw Exception('exit ${session.exitCode}: ${(err + out).trim().split('\n').first}');
+        return out;
+      }
+
+      // Preserve the user field for system crontabs (/etc/crontab, /etc/cron.d/*).
+      String prefix = '';
+      if (entry.source != 'crontab') {
+        final parts = entry.rawLine.trim().split(RegExp(r'\s+'));
+        if (entry.rawLine.trim().startsWith('@')) {
+          if (parts.length >= 3) prefix = '${parts[1]} ';
+        } else if (parts.length >= 6) {
+          prefix = '${parts[5]} ';
+        }
+      }
+      final newLine = '$newSchedule $prefix$newCommand';
+
+      if (entry.source == 'crontab') {
+        final current = await run('crontab -l');
+        final lines = current.split('\n');
+        var replaced = 0;
+        final updated = lines.map((l) {
+          if (l.trim() == entry.rawLine.trim()) {
+            replaced++;
+            return newLine;
+          }
+          return l;
+        }).toList();
+        if (replaced != 1) throw Exception('Expected exactly 1 matching line, found $replaced — crontab changed underneath. Rescan and retry.');
+        final session = await client.execute('crontab -');
+        session.stdin.add(utf8.encode('${updated.join('\n')}\n'));
+        await session.stdin.close();
+        await session.done;
+        if (session.exitCode != 0) throw Exception('crontab install failed (exit ${session.exitCode})');
+      } else {
+        final path = entry.source;
+        if (!path.startsWith('/etc/crontab') && !path.startsWith('/etc/cron.d/')) {
+          throw Exception('Refusing to edit unexpected path: $path');
+        }
+        final check = await run("grep -cFx '${entry.rawLine.trim().replaceAll("'", "'\\''")}' $path || echo 0");
+        if (check.trim().split('\n').last.trim() != '1') {
+          throw Exception('Expected exactly 1 matching line in $path — file changed underneath. Rescan and retry.');
+        }
+        await run("sudo cp -p $path $path.mcp-bak && "
+            "grep -vFx '${entry.rawLine.trim().replaceAll("'", "'\\''")}' $path | sudo tee $path > /dev/null && "
+            "echo '$newLine' | sudo tee -a $path > /dev/null && "
+            "echo SAVED");
+      }
+      client.close();
+    } catch (e) {
+      try { client?.close(); } catch (_) {}
+      rethrow;
+    }
+  }
+
+  /// GET http://host:9108/procstats -> AppStats or null (agent v2+ only)
+  Future<AppStats?> fetchAppStats(String host) async {
+    try {
+      final hc = HttpClient()..connectionTimeout = const Duration(seconds: 5);
+      final req = await hc.get(host, agentPort, '/procstats');
+      final resp = await req.close().timeout(const Duration(seconds: 8));
+      if (resp.statusCode != 200) return null;
+      final body = await resp.transform(utf8.decoder).join();
+      hc.close();
+      return AppStats.fromJson(jsonDecode(body) as Map<String, dynamic>);
+    } catch (_) {
+      return null;
     }
   }
 
