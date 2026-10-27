@@ -14,12 +14,15 @@ activity, CI/CD, log tail, and an AI assistant with full control-center context.
 
 ## Screenshots
 
-> Screenshots live in `docs/screenshots/`. Drop `overview.png` and
-> `server-details.png` (1600px wide) there and they appear here automatically.
+> Screenshots coming soon — Overview + Server Details captures
+> will live in `docs/screenshots/` (`overview.png`, `server-details.png`,
+> 1600px wide) and will appear here automatically once added.
 
+<!-- Uncomment when the PNGs land:
 | Overview | Server details |
 |---|---|
 | ![Overview](docs/screenshots/overview.png) | ![Server details](docs/screenshots/server-details.png) |
+-->
 
 To capture them:
 
