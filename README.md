@@ -7,9 +7,40 @@ Connect your servers (SSH password or key) and monitor them live:
 server metrics, cronjobs, running apps, alert signals — plus GitHub
 activity, CI/CD, log tail, and an AI assistant with full control-center context.
 
-![Pitch black UI](https://img.shields.io/badge/UI-pitch%20black%20%23000000-black)
+![License: MIT](https://img.shields.io/badge/License-MIT-green)
 ![Flutter](https://img.shields.io/badge/Flutter-3.41-blue)
 ![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Windows%20%7C%20Linux%20%7C%20iOS%20%7C%20Android-lightgrey)
+![UI](https://img.shields.io/badge/UI-pitch%20black%20%23000000-black)
+
+## Screenshots
+
+> Screenshots live in `docs/screenshots/`. Drop `overview.png` and
+> `server-details.png` (1600px wide) there and they appear here automatically.
+
+| Overview | Server details |
+|---|---|
+| ![Overview](docs/screenshots/overview.png) | ![Server details](docs/screenshots/server-details.png) |
+
+To capture them:
+
+```bash
+flutter run -d macos   # or windows / linux
+# resize window to ~1600x1000, open Overview, screenshot to docs/screenshots/overview.png
+# open a Server Details screen, screenshot to docs/screenshots/server-details.png
+```
+
+## What works today vs what's mock
+
+**Live over SSH (real):**
+Server metrics (CPU/RAM/disk, latency, uptime), cronjob discovery
+(`crontab`, `/etc/crontab`, `/etc/cron.d/*`), running apps (systemd,
+Docker, listening ports), alert harvesting (failed units, disk ≥80/90%,
+brute-force, load, kernel errors, reboots), one-click metrics-agent
+install, built-in SSH + local terminal.
+
+**UI-ready, API still to wire (honest mock):**
+GitHub issues/PRs, CI/CD timeline, security findings, AI chat replies,
+log-tail stream. All screens and models exist; API wiring is on the roadmap.
 
 ## Features
 
@@ -19,13 +50,13 @@ activity, CI/CD, log tail, and an AI assistant with full control-center context.
 | **Cronjobs** | Schedules discovered live (`crontab`, `/etc/crontab`, `/etc/cron.d/*`) | SSH discovery |
 | **Apps** | Running services (systemd), Docker containers, listening ports | SSH discovery |
 | **Alerts** | Failed units, disk ≥80/90%, SSH brute force, load, kernel errors, reboots | SSH harvest |
+| **Terminal** | Built-in SSH + local shell, per-server sessions | `dartssh2` / `Process` |
 | **GitHub** | Issues / PRs / Tasks tabbed view | Mock (API-ready) |
 | **CI/CD & Deployments** | Deployment timeline with success/failed/running | Mock (API-ready) |
 | **Live Log Tail** | Streaming terminal (`:050505`) with level filters | Simulated stream |
 | **Metrics & Uptime** | Latency p95 chart + Uptime/p95/Errors/Req-min KPIs | Agent + mock |
 | **Security Watch** | Findings with severity + category | Mock (API-ready) |
 | **AI Chatbox** | Floating assistant aware of all segments | Mock replies (LLM-ready) |
-| **Terminal** | Built-in SSH + local shell, per-server sessions | `dartssh2` / `Process` |
 | **Settings** | Server connections (password / SSH key / token), app prefs | `SharedPreferences` |
 
 ### Server Details
@@ -143,6 +174,8 @@ lib/
 - [ ] APM-lite (per-app rps/error rates) via agent extension
 - [ ] `flutter_secure_storage` for credentials (Keychain/Keystore)
 
+Feedback and PRs welcome — especially homelab/self-hosted setups.
+
 ## License
 
-Private — all rights reserved unless stated otherwise.
+MIT — see [LICENSE](LICENSE).
