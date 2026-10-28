@@ -1,0 +1,31 @@
+name: MOCK-gap tracker
+description: A demo/mock dataset still standing in for live wiring
+title: "[mock-gap]: "
+labels: [mock-gap]
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: Gap area
+      options:
+        - GitHub API (issues/PRs)
+        - Actions timeline
+        - Alert polling
+        - Secure storage
+        - Other mock_data.dart fallback
+    validations:
+      required: true
+  - type: input
+    id: location
+    attributes:
+      label: Code location
+      description: e.g. lib/screens/control_center_screen.dart:2300
+    validations:
+      required: true
+  - type: textarea
+    id: done
+    attributes:
+      label: Done when
+      description: Observable behavior that retires the mock (live source, error states, DEMO badge removal).
+    validations:
+      required: true
