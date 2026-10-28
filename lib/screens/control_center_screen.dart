@@ -32,6 +32,7 @@ import '../services/ssh_key_loader.dart';
 import '../services/log_tail_service.dart';
 import '../services/metrics_history.dart';
 import '../services/alert_watch.dart';
+import '../services/alert_notifications.dart';
 import '../services/deployments_service.dart';
 import '../services/alert_notifications.dart';
 import 'server_details_screen.dart';
