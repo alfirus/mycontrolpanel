@@ -122,4 +122,32 @@ class SecureStore {
   static Future<void> deleteServerCredential(String serverId) async {
     await deleteSecret(_credKey(serverId));
   }
+
+  /// Key rotation (mandated cutover, Option A): overwrite the keychain entry
+  /// for [serverId] with [newCredential] without touching the masked prefs
+  /// JSON (it already holds only the `secure:` marker). Best-effort.
+  static Future<void> rotateServerCredential(
+      String serverId, String newCredential) async {
+    try {
+      if (newCredential.isEmpty) {
+        await deleteSecret(_credKey(serverId));
+      } else {
+        await writeSecret(_credKey(serverId), newCredential);
+      }
+    } catch (_) {}
+  }
+
+  /// Delete keychain entries whose server no longer exists (e.g. after
+  /// clear-all or an import that drops hosts). Best-effort, never throws.
+  static Future<void> pruneServerCredentials(Set<String> validIds) async {
+    try {
+      final all = await _sec.readAll();
+      for (final key in all.keys) {
+        if (!key.startsWith(_credPrefix)) continue;
+        if (!validIds.contains(key.substring(_credPrefix.length))) {
+          await deleteSecret(key);
+        }
+      }
+    } catch (_) {}
+  }
 }
