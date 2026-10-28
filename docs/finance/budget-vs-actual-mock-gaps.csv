@@ -1,0 +1,5 @@
+gap_id,gap,metric,budget_volume,budget_rate_placeholder,budget_amount,actual_volume,actual_amount,variance_formula,status
+G1,github_api,REST calls per seat per day,0,TBD,TBD,0,0,actual-budget,mock
+G2,actions_timeline,Actions runs + CI minutes,0,TBD,TBD,0,0,actual-budget,mock
+G3,alert_polling,notification deliveries per severity,0,TBD,TBD,0,0,actual-budget,mock
+G4,secure_storage,rotations per quarter,0,TBD flat,TBD,0,0,actual-budget,mock

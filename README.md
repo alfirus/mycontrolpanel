@@ -12,11 +12,17 @@ activity, CI/CD, log tail, and an AI assistant with full control-center context.
 ![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Windows%20%7C%20Linux%20%7C%20iOS%20%7C%20Android-lightgrey)
 ![UI](https://img.shields.io/badge/UI-pitch%20black%20%23000000-black)
 
+![MyControlPanel — IT Control Center hero](assets/marketing/hero.png)
+
 ## Screenshots
 
 | Overview | Server details |
 |---|---|
 | ![Overview](docs/screenshots/overview.png) | ![Server details](docs/screenshots/server-details.png) |
+
+| Laptop | Phone |
+|---|---|
+| ![Laptop lifestyle](assets/marketing/hero-laptop.png) | ![Phone lifestyle](assets/marketing/hero-phone.png) |
 
 To capture them:
 
@@ -26,15 +32,14 @@ flutter run -d macos   # or windows / linux
 # open a Server Details screen, screenshot to docs/screenshots/server-details.png
 ```
 
-## What works today vs what's mock
+## What works today vs what's next
 
-| Segment | Status | Source |
-|---|---|---|
-| Server metrics, cronjobs, apps, alerts, log tail, terminal | **Live** when servers are configured (**Partial** — demo data when none are) | SSH discovery + `:9108` agent, see [Setup guide](docs/setup.md) |
-| GitHub, GitLab, CI/CD, Security findings | **Mock** (tabs hard-titled `• DEMO`) | Demo datasets; wiring is roadmap Phase 1 |
-| AI Chatbox | **Partial** — real provider streaming when configured, mock replies otherwise | Bring your own key/token |
+| Security findings | ◻️ UI-ready | Screens + models exist; API wiring on roadmap |
 
-Full per-screen matrix + gaps: [Live vs Mock](docs/roadmap.md).
+Legend: ✅ works today · ◻️ UI-ready, API still to wire.
+Roadmap items (background polling, biometric lock, Sentry/Datadog) are tracked
+in [Roadmap](#roadmap) below — nothing above is presented as live unless it is.
+Full per-screen matrix + phased plan: [docs/roadmap.md](docs/roadmap.md).
 
 ## Features
 
@@ -45,13 +50,16 @@ Full per-screen matrix + gaps: [Live vs Mock](docs/roadmap.md).
 | **Apps** | Running services (systemd), Docker containers, listening ports | SSH discovery |
 | **Alerts** | Failed units, disk ≥80/90%, SSH brute force, load, kernel errors, reboots | SSH harvest |
 | **Terminal** | Built-in SSH + local shell, per-server sessions | `dartssh2` / `Process` |
-| **GitHub** | Issues / PRs / Tasks tabbed view | Mock (API-ready) |
-| **CI/CD & Deployments** | Deployment timeline with success/failed/running | Mock (API-ready) |
-| **Live Log Tail** | Streaming terminal (`:050505`) with level filters | Simulated stream |
+| **GitHub** | Issues / PRs / Tasks tabbed view | UI-ready (API wiring on roadmap) |
+| **GitLab** | Issues / MRs / Tasks, API-backed with mock fallback | Live API + fallback |
+| **CI/CD & Deployments** | Deployment timeline with success/failed/running | Demo data (wiring on roadmap) |
+| **Live Log Tail** | Real journal/syslog/docker tail over SSH (`:050505` stream) with level filters | Live over SSH; demo heartbeat with no servers |
 | **Metrics & Uptime** | Latency p95 chart + Uptime/p95/Errors/Req-min KPIs | Agent + mock |
-| **Security Watch** | Findings with severity + category | Mock (API-ready) |
-| **AI Chatbox** | Floating assistant aware of all segments | Mock replies (LLM-ready) |
-| **Settings** | Server connections (password / SSH key / token), app prefs | `SharedPreferences` |
+| **Security Watch** | Findings with severity + category | UI-ready (API wiring on roadmap) |
+| **AI Chatbox** | Streaming assistant aware of all segments, tool calling, audit trail | Live (bring provider key / Ollama) |
+| **Settings** | Server connections (password / SSH key / token), app prefs | `flutter_secure_storage` (Keychain/Keystore) |
+
+![Feature map — one control center, every signal](docs/infographics/feature-map.png)
 
 ### Server Details
 
@@ -72,6 +80,17 @@ Cronjobs (each capped at 10 with a **View All** full-list screen), and Actions
                                 └──────────────────┘
 ```
 
+![SSH to metrics-agent flow](docs/infographics/ssh-agent-flow.png)
+
+### Read-only by enforcement, not by promise
+
+The app only reads by design — but design is a promise, and promises don't
+stop writes. Enforcement does: connect with a dedicated `monitor` user that
+has no sudo and key-only SSH, so the OS itself refuses anything but reads.
+Metrics need no SSH whatsoever — they come from the agent's `GET /metrics`
+on `:9108`. Full setup (account, permissions, one-command revoke):
+[read-only access runbook](docs/runbooks/read-only-access.md).
+
 1. **Add a server** — Settings → Add Server (host, port, user, password or SSH key).
    Keys can be imported via file picker (sandbox-safe) or pasted as PEM content.
 2. **Install the metrics agent** — one click per server card (password, key, or
@@ -80,8 +99,9 @@ Cronjobs (each capped at 10 with a **View All** full-list screen), and Actions
 3. **Everything populates** — metrics, crons, apps, alerts stream in over SSH;
    rescan manually or by switching tabs.
 
-> Credentials are stored locally via `SharedPreferences`.
-> Private keys imported via picker are stored as content, never as paths.
+> Servers, passwords and private keys live in the OS keychain/keystore via
+> `flutter_secure_storage` (migrated one-time from legacy prefs).
+> Tokens are per-host; nothing secret is committed — CI runs gitleaks.
 
 ## Getting started
 
@@ -182,6 +202,13 @@ lib/
 </details>
 
 Feedback and PRs welcome — especially homelab/self-hosted setups.
+
+## Pricing
+
+**Community (MIT) is the only edition today** — free, unlimited servers,
+public repo. Pro and MSP bundles are *proposed* post-traction concepts with
+no prices and no sale dates; quoting them is off-limits until Sofia + Finance
+sign the license call (PR #28). Full tier framing: [docs/packaging.md](docs/packaging.md).
 
 ## License
 
