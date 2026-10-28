@@ -1,10 +1,15 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import '../models/mock_data.dart';
+import 'service_contracts.dart';
 
 /// Minimal GitHub REST client (classic PAT or fine-grained token).
 /// Needs `repo` scope (or Contents/Issues/Pull requests read for fine-grained).
-class GithubService {
+///
+/// Implements [GithubRepo] so screens can depend on the abstraction via
+/// `Services.current.github`; the token still comes from Settings, exactly
+/// as before.
+class GithubService implements GithubRepo {
   final String token;
   GithubService(this.token);
 
@@ -272,4 +277,49 @@ class GithubService {
       return 'GitHub $what failed (${r.statusCode})';
     }
   }
+}
+
+/// Live [GithubRepo] wired into [Services] (see service_locator.dart).
+///
+/// Resolves the token lazily per call from [tokenProvider] (backed by the
+/// OS keychain via SecureStore) so the DI container stays synchronous.
+/// Every method throws [StateError] when no token is configured instead
+/// of firing an unauthenticated request.
+class LiveGithubRepo implements GithubRepo {
+  final Future<String?> Function() tokenProvider;
+  LiveGithubRepo(this.tokenProvider);
+
+  Future<GithubService> _svc() async {
+    final t = (await tokenProvider())?.trim() ?? '';
+    if (t.isEmpty) {
+      throw StateError(
+          'GitHub token not configured — add it in Settings → GitHub, then retry.');
+    }
+    return GithubService(t);
+  }
+
+  @override
+  Future<String> validate() async => (await _svc()).validate();
+
+  @override
+  Future<List<GithubItem>> repoIssues(String repo) async =>
+      (await _svc()).repoIssues(repo);
+
+  @override
+  Future<List<GithubItem>> repoPRs(String repo) async =>
+      (await _svc()).repoPRs(repo);
+
+  @override
+  Future<List<DeployItem>> repoRuns(String repo, {int limit = 8}) async =>
+      (await _svc()).repoRuns(repo, limit: limit);
+
+  @override
+  Future<bool> rerunRun(String repo, int runId) async =>
+      (await _svc()).rerunRun(repo, runId);
+
+  @override
+  Future<int> createIssue(String repo, String title,
+          {String body = '', List<String> labels = const []}) async =>
+      (await _svc())
+          .createIssue(repo, title, body: body, labels: labels);
 }
