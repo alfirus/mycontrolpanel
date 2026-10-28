@@ -88,6 +88,9 @@ Cronjobs (each capped at 10 with a **View All** full-list screen), and Actions
 
 ## Getting started
 
+Server setup, SSH keys, agent install, and troubleshooting live in the
+[Setup + operations guide](docs/setup.md).
+
 ### Prerequisites
 
 - [Flutter SDK](https://docs.flutter.dev/get-started/install) ≥ 3.41 (stable)
