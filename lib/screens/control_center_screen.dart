@@ -8,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:uuid/uuid.dart';
 import '../theme/app_theme.dart';
+import '../theme/design_tokens.dart';
 import '../models/mock_data.dart';
 import '../models/alert_entry.dart';
 import '../models/app_entry.dart';
@@ -723,17 +724,22 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
       final cpu = (m['cpu'] as num).toDouble(), ram = (m['ram'] as num).toDouble(), disk = (m['disk'] as num).toDouble();
       return Column(children: [
         Row(children: [
-          Expanded(child: MetricBar(label: 'CPU', value: cpu, color: cpu > 0.75 ? AppColors.critical : AppColors.accentCyan)),
+          // Spec 02 §2.3: shared AppThresholds at every call site; hue means
+          // state, not metric — sub-threshold bars share one neutral color.
+          Expanded(child: MetricBar(label: 'CPU', value: cpu, color: cpu > AppThresholds.cpuCritical ? AppColors.critical : AppColors.textSecondary)),
           const SizedBox(width: 8),
-          Expanded(child: MetricBar(label: 'RAM', value: ram, color: ram > 0.85 ? AppColors.critical : AppColors.accentBlue)),
+          Expanded(child: MetricBar(label: 'RAM', value: ram, color: ram > AppThresholds.ramCritical ? AppColors.critical : AppColors.textSecondary)),
           const SizedBox(width: 8),
-          Expanded(child: MetricBar(label: 'DISK', value: disk, color: disk > 0.8 ? AppColors.warning : AppColors.textSecondary)),
+          Expanded(child: MetricBar(label: 'DISK', value: disk, color: disk > AppThresholds.diskCritical ? AppColors.critical : disk > AppThresholds.diskWarn ? AppColors.warning : AppColors.textSecondary)),
         ]),
         const SizedBox(height: 6),
         Row(children: [
           Container(width: 6, height: 6, decoration: const BoxDecoration(color: AppColors.success, shape: BoxShape.circle)),
           const SizedBox(width: 6),
-          Text('LIVE • agent :9108 • up ${m['uptime_days']}d', style: const TextStyle(fontSize: 9, fontWeight: FontWeight.w700, color: AppColors.success, letterSpacing: 0.4)),
+          // Spec 02 §2.5: footer grows to 11px; uptime is its own segment.
+          Text('LIVE • agent :9108', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: AppColors.success, letterSpacing: 0.4)),
+          const SizedBox(width: 8),
+          Text('UPTIME ${m['uptime_days']}d', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: AppColors.textPrimary, letterSpacing: 0.4)),
           const Spacer(),
           InkWell(onTap: () => _pollAgents(), child: const Row(children: [Icon(Icons.refresh, size: 11, color: AppColors.textMuted), SizedBox(width: 3), Text('REFRESH', style: TextStyle(fontSize: 9, fontWeight: FontWeight.w800, color: AppColors.textMuted))])),
         ]),
@@ -2107,7 +2113,18 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
                     const SizedBox(width: 8),
                     Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                       Row(children: [Flexible(child: Text(s.name, style: TextStyle(color: AppColors.textPrimary, fontSize: compact ? 12 : 13, fontWeight: FontWeight.w700), overflow: TextOverflow.ellipsis)), const SizedBox(width: 5), Container(padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1), decoration: BoxDecoration(color: AppColors.surface2, borderRadius: BorderRadius.circular(4)), child: Text(s.os.split(' ').first, style: const TextStyle(fontSize: 8, color: AppColors.textMuted)))]),
-                      Text('${s.ip} • ${s.region} • ${_useRealServers && s.latencyMs == 0 ? 'no metrics yet' : '${s.latencyMs.toInt()}ms'}', style: TextStyle(fontSize: compact ? 10 : 11, color: AppColors.textMuted)),
+                      // Spec 02 §2.2: reachability line promoted to textSecondary;
+                      // latency is the scanned value — textPrimary semibold.
+                      Text.rich(TextSpan(
+                        style: TextStyle(fontSize: compact ? 10 : 11, color: AppColors.textSecondary),
+                        children: [
+                          TextSpan(text: '${s.ip} • ${s.region} • '),
+                          if (_useRealServers && s.latencyMs == 0)
+                            const TextSpan(text: 'no metrics yet')
+                          else
+                            TextSpan(text: '${s.latencyMs.toInt()}ms', style: const TextStyle(color: AppColors.textPrimary, fontWeight: FontWeight.w600)),
+                        ],
+                      )),
                     ])),
                     Pill(text: s.status.name.toUpperCase(), color: statusColor(s.status)),
                   ]),
@@ -2119,14 +2136,23 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
                     })
                   else ...[
                     Row(children: [
-                      Expanded(child: MetricBar(label: 'CPU', value: s.cpu, color: s.cpu > 0.75 ? AppColors.critical : AppColors.accentCyan)),
+                      Expanded(child: MetricBar(label: 'CPU', value: s.cpu, color: s.cpu > AppThresholds.cpuCritical ? AppColors.critical : AppColors.textSecondary)),
                       const SizedBox(width: 8),
-                      Expanded(child: MetricBar(label: 'RAM', value: s.ram, color: s.ram > 0.85 ? AppColors.critical : AppColors.accentBlue)),
+                      Expanded(child: MetricBar(label: 'RAM', value: s.ram, color: s.ram > AppThresholds.ramCritical ? AppColors.critical : AppColors.textSecondary)),
                       const SizedBox(width: 8),
-                      Expanded(child: MetricBar(label: 'DISK', value: s.disk, color: s.disk > 0.8 ? AppColors.warning : AppColors.textSecondary)),
+                      Expanded(child: MetricBar(label: 'DISK', value: s.disk, color: s.disk > AppThresholds.diskCritical ? AppColors.critical : s.disk > AppThresholds.diskWarn ? AppColors.warning : AppColors.textSecondary)),
                     ]),
                     const SizedBox(height: 6),
-                    SizedBox(height: compact ? 18 : 24, child: _miniSparkline(s.sparkline, s.status==Status.degraded ? AppColors.warning : AppColors.success)),
+                    // Spec 02 §2.4: the trend exists as text too, wrapped in a
+                    // Semantics label so screen readers get name + peak.
+                    SizedBox(height: compact ? 18 : 24, child: Row(children: [
+                      Expanded(child: _miniSparkline(s.sparkline, s.status==Status.degraded ? AppColors.warning : AppColors.success)),
+                      const SizedBox(width: 8),
+                      Semantics(
+                        label: 'CPU trend, peak ${sparklineP95(s.sparkline)} percent over 5 minutes',
+                        child: Text('cpu p95 ${sparklineP95(s.sparkline)}%', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: AppColors.textSecondary)),
+                      ),
+                    ])),
                   ],
                 ]),
               ),
