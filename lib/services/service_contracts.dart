@@ -15,6 +15,7 @@ import '../models/alert_entry.dart';
 import '../models/app_entry.dart';
 import '../models/app_proc.dart';
 import '../models/cron_entry.dart';
+import '../models/mock_data.dart';
 import '../models/server_connection.dart';
 import 'agent_protocol.dart';
 
@@ -42,6 +43,33 @@ abstract class CronRepository {
 abstract class AppRepository {
   Future<List<AppEntry>> fetchApps(ServerConnection s,
       {String? keyPassphrase});
+}
+
+/// GitHub issues / PRs / Actions proxy behind the app's token.
+///
+/// Unmocks the CI + backlog screens: live data flows through
+/// [GithubService], previews and widget tests through
+/// [MockGithubRepository]. Method names mirror [GithubService] 1:1 so
+/// the concrete class implements this contract with no adapter logic.
+abstract class GithubRepo {
+  /// Who owns the token (login). Throws on 4xx/5xx — never null.
+  Future<String> validate();
+
+  /// Open issues (PRs excluded) for `owner/repo`, newest first.
+  Future<List<GithubItem>> repoIssues(String repo);
+
+  /// Open pull requests for `owner/repo`, newest first.
+  Future<List<GithubItem>> repoPRs(String repo);
+
+  /// Recent Actions workflow runs for `owner/repo` as deploy items.
+  Future<List<DeployItem>> repoRuns(String repo, {int limit = 8});
+
+  /// Re-run a workflow run. True on accepted (201/204).
+  Future<bool> rerunRun(String repo, int runId);
+
+  /// Open an issue. Returns the new issue number.
+  Future<int> createIssue(String repo, String title,
+      {String body = '', List<String> labels = const []});
 }
 
 /// Alert harvesting (failed units, disk, brute force, load, kernel, reboots).
