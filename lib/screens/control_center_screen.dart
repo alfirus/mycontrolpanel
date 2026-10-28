@@ -41,6 +41,13 @@ import 'audit_screen.dart';
 import 'settings_screen.dart';
 import 'terminal_screen.dart';
 
+/// Bottom-nav primary destinations (spec `docs/design/03-navigation-ia.md`
+/// F3). Every other destination lives behind the MORE overflow sheet, so no
+/// destination is reachable on desktop but stranded on mobile. The grouping
+/// IA itself is NOT decided here — that needs Lina's sign-off (spec 03 §3).
+const primaryNavIndices = {0, 1, 4, 7, 11};
+const overflowNavIndices = {2, 3, 5, 6, 8, 9, 10, 12};
+
 class ControlCenterScreen extends StatefulWidget {
   const ControlCenterScreen({super.key});
   @override
@@ -1899,7 +1906,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
       ('GitLab', Icons.layers_outlined, AppColors.accentPurple),
       ('Alerts', Icons.warning_amber_outlined, AppColors.warning),
       ('Deploys', Icons.rocket_launch_outlined, AppColors.accentCyan),
-      ('Logs', Icons.terminal_outlined, AppColors.textSecondary),
+      ('Logs', Icons.article_outlined, AppColors.textSecondary),
       ('Metrics', Icons.show_chart_outlined, AppColors.success),
       ('Security', Icons.shield_outlined, AppColors.critical),
       ('Settings', Icons.settings_outlined, AppColors.textSecondary),
@@ -1998,8 +2005,64 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
           _bottomItem(4, Icons.code, 'GitHub'),
           _bottomItem(6, Icons.rocket_launch, 'Deploys'),
           _bottomItem(11, Icons.settings, 'Settings'),
+          _moreItem(),
           Builder(builder: (ctx) => GestureDetector(onTap: ()=> Scaffold.of(ctx).openEndDrawer(), child: Container(margin: const EdgeInsets.all(8), width: 44, height: 44, decoration: BoxDecoration(color: AppColors.accentCyan, borderRadius: BorderRadius.circular(12)), child: const Icon(Icons.smart_toy_outlined, size: 18, color: Colors.black)))),
         ])),
+      ),
+    );
+  }
+
+  /// MORE overflow (spec 03 F3): every destination missing from the bottom
+  /// nav stays one tap away on phones via this sheet — same icons as the
+  /// rail, selected row highlighted. Grouping IA still needs Lina (§3).
+  Widget _moreItem() {
+    final active = overflowNavIndices.contains(_navIndex);
+    return Expanded(child: InkWell(onTap: _openMoreNav, child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+      Icon(Icons.more_horiz, size: 18, color: active ? AppColors.accentCyan : AppColors.textMuted),
+      const SizedBox(height: 3),
+      Text('More', style: TextStyle(fontSize: 9, fontWeight: FontWeight.w600, color: active ? AppColors.accentCyan : AppColors.textMuted)),
+    ])));
+  }
+
+  void _openMoreNav() {
+    const entries = [
+      (2, 'Cronjobs', Icons.schedule_outlined),
+      (3, 'Apps', Icons.apps_outlined),
+      (5, 'GitLab', Icons.layers_outlined),
+      (6, 'Alerts', Icons.warning_amber_outlined),
+      (8, 'Logs', Icons.article_outlined),
+      (9, 'Metrics', Icons.show_chart_outlined),
+      (10, 'Security', Icons.shield_outlined),
+      (12, 'Terminal', Icons.terminal_outlined),
+    ];
+    assert(entries.every((e) => overflowNavIndices.contains(e.$1)),
+        'MORE sheet must list exactly the overflow destinations');
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: AppColors.surface0,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16)), side: BorderSide(color: AppColors.border)),
+      builder: (ctx) => SafeArea(
+        child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Padding(padding: EdgeInsets.fromLTRB(16, 14, 16, 6), child: Text('MORE DESTINATIONS', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, letterSpacing: 0.7, color: AppColors.textMuted))),
+          Flexible(
+            child: ListView(
+              shrinkWrap: true,
+              children: [
+                for (final e in entries)
+                  ListTile(
+                    dense: true,
+                    leading: Container(width: 28, height: 28, decoration: BoxDecoration(color: _navIndex == e.$1 ? AppColors.accentCyan.withValues(alpha: 0.14) : AppColors.surface2, borderRadius: BorderRadius.circular(7), border: Border.all(color: _navIndex == e.$1 ? AppColors.accentCyan.withValues(alpha: 0.25) : AppColors.border)), child: Icon(e.$3, size: 14, color: _navIndex == e.$1 ? AppColors.accentCyan : AppColors.textSecondary)),
+                    title: Text(e.$2, style: TextStyle(fontSize: 12, fontWeight: _navIndex == e.$1 ? FontWeight.w700 : FontWeight.w500, color: _navIndex == e.$1 ? AppColors.textPrimary : AppColors.textSecondary)),
+                    trailing: _navIndex == e.$1 ? Container(width: 6, height: 6, decoration: const BoxDecoration(color: AppColors.accentCyan, shape: BoxShape.circle)) : null,
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      _goTo(e.$1);
+                    },
+                  ),
+              ],
+            ),
+          ),
+        ]),
       ),
     );
   }
