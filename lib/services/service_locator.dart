@@ -16,6 +16,7 @@ import '../models/cron_entry.dart';
 import '../models/server_connection.dart';
 import 'agent_protocol.dart';
 import 'agent_service.dart';
+import 'github_service.dart';
 import 'mock_services.dart';
 import 'secure_store.dart';
 import 'service_contracts.dart';
@@ -30,6 +31,7 @@ class Services {
   final AlertRepository alerts;
   final KeyLoader keys;
   final SecretStore secrets;
+  final GithubRepo github;
 
   const Services({
     required this.metrics,
@@ -39,6 +41,7 @@ class Services {
     required this.alerts,
     required this.keys,
     required this.secrets,
+    required this.github,
   });
 
   static Services? _current;
@@ -68,6 +71,7 @@ class MockServices extends Services {
           alerts: const MockAlertRepository(),
           keys: const MockKeyLoader(),
           secrets: _ErrorSecretStore(),
+          github: const MockGithubRepository(),
         );
 }
 
@@ -92,6 +96,8 @@ class LiveServices extends Services {
           alerts: _AgentAlertAdapter(),
           keys: _SshKeyLoaderAdapter(),
           secrets: _SecureStoreAdapter(),
+          github: LiveGithubRepo(
+              () => SecureStore.readSecret('github_token')),
         );
 }
 
@@ -100,7 +106,7 @@ class _AgentMetricsAdapter implements MetricsPoller {
 
   @override
   Future<AgentMetrics> pollMetrics(ServerConnection server) async {
-    final raw = await _agent.fetch(server.host);
+    final raw = await _agent.fetch(server.host, serverId: server.id);
     if (raw == null) {
       throw const AgentProtocolException(
           AgentErrorCode.unreachable, '/metrics unreachable');
@@ -114,7 +120,7 @@ class _AgentProcStatsAdapter implements ProcStatsPoller {
 
   @override
   Future<AppStats> pollProcStats(ServerConnection server) async {
-    final stats = await _agent.fetchAppStats(server.host);
+    final stats = await _agent.fetchAppStats(server.host, serverId: server.id);
     if (stats == null) {
       throw const AgentProtocolException(
           AgentErrorCode.unreachable, '/procstats unreachable');

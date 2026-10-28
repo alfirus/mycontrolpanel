@@ -24,6 +24,15 @@ const int kAgentPort = 9108;
 const String kMetricsPath = '/metrics';
 const String kProcStatsPath = '/procstats';
 
+/// v4+ liveness probe. Cheap by design (no /proc scan): load balancers,
+/// Zara's polling job, and the app install-verify all hit this first.
+const String kHealthPath = '/health';
+
+/// v4+ log sources for `GET /logs?source=`. Mirrors the agent's
+/// `ALLOWED_LOG_SOURCES`; the server allowlists again, so this is a
+/// client-side convenience for fail-fast validation + docs.
+const List<String> kAgentLogSources = ['journal', 'syslog'];
+
 /// Client timeouts: connect 5s, /metrics read 6s, /procstats read 8s.
 /// Install-verify polls reuse the /metrics budget per attempt.
 const Duration kAgentConnectTimeout = Duration(seconds: 5);
@@ -34,6 +43,14 @@ const Duration kProcStatsReadTimeout = Duration(seconds: 8);
 /// v2 agents ignore this header; clients MUST send it when a per-host
 /// agent token is configured so rollout needs no app update.
 const String kAgentAuthHeader = 'X-MCP-Agent-Token';
+
+/// Headers to attach for v4 token auth. Returns {} when no token is
+/// configured (open agent) — pure, so polling code and tests share it.
+Map<String, String> agentAuthHeaders(String? token) {
+  final t = (token ?? '').trim();
+  if (t.isEmpty) return const {};
+  return {kAgentAuthHeader: t};
+}
 
 /// Machine-readable failure codes surfaced to the UI / alert pipeline.
 enum AgentErrorCode {
@@ -86,6 +103,45 @@ class AgentMetrics {
         'uptime_days': uptimeDays,
         'version': agentVersion,
       };
+}
+
+/// Validated /health payload (agent v4+).
+class AgentHealth {
+  final int agentVersion;
+  final int agentUptimeS;
+
+  const AgentHealth({
+    required this.agentVersion,
+    required this.agentUptimeS,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'status': 'ok',
+        'version': agentVersion,
+        'agent_uptime_s': agentUptimeS,
+      };
+}
+
+/// Validates a decoded /health body. Throws [AgentProtocolException].
+AgentHealth parseAgentHealth(Map<String, dynamic> json) {
+  if (json['status'] != 'ok') {
+    throw const AgentProtocolException(
+        AgentErrorCode.badPayload, '"/health.status" is not "ok"');
+  }
+  final version = json['version'];
+  if (version is! num || version.toInt() < kMinAgentVersion) {
+    throw const AgentProtocolException(
+        AgentErrorCode.staleAgent, '/health version missing or stale');
+  }
+  final uptime = json['agent_uptime_s'];
+  if (uptime is! num || uptime.toInt() < 0) {
+    throw const AgentProtocolException(
+        AgentErrorCode.badPayload, '"/health.agent_uptime_s" invalid');
+  }
+  return AgentHealth(
+    agentVersion: version.toInt(),
+    agentUptimeS: uptime.toInt(),
+  );
 }
 
 /// Validates a decoded /metrics body. Throws [AgentProtocolException].
@@ -147,9 +203,17 @@ AgentProtocolException agentHttpError(int statusCode, String path) {
     return const AgentProtocolException(
         AgentErrorCode.unauthorized, 'agent requires a token (HTTP 401)');
   }
+  if (statusCode == 400) {
+    return AgentProtocolException(AgentErrorCode.badPayload,
+        '"$path" bad request — check query parameters (HTTP 400)');
+  }
   if (statusCode == 404) {
     return AgentProtocolException(AgentErrorCode.badPayload,
         '"$path" unknown — stale agent (HTTP 404)');
+  }
+  if (statusCode == 405) {
+    return AgentProtocolException(AgentErrorCode.badPayload,
+        '"$path" method not allowed — agent only serves GET (HTTP 405)');
   }
   return AgentProtocolException(
       AgentErrorCode.badPayload, '"$path" HTTP $statusCode');
