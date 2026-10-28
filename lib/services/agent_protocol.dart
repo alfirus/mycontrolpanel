@@ -24,6 +24,10 @@ const int kAgentPort = 9108;
 const String kMetricsPath = '/metrics';
 const String kProcStatsPath = '/procstats';
 
+/// v3+ capacity signals (load, memory detail, GPU, CPU count, boot epoch).
+/// The alert polling job reads this for load-vs-nproc evaluation.
+const String kSysstatsPath = '/sysstats';
+
 /// v4+ liveness probe. Cheap by design (no /proc scan): load balancers,
 /// Zara's polling job, and the app install-verify all hit this first.
 const String kHealthPath = '/health';

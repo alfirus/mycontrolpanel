@@ -94,6 +94,15 @@ Cronjobs (each capped at 10 with a **View All** full-list screen), and Actions
 
 ![SSH to metrics-agent flow](docs/infographics/ssh-agent-flow.png)
 
+### Read-only by enforcement, not by promise
+
+The app only reads by design — but design is a promise, and promises don't
+stop writes. Enforcement does: connect with a dedicated `monitor` user that
+has no sudo and key-only SSH, so the OS itself refuses anything but reads.
+Metrics need no SSH whatsoever — they come from the agent's `GET /metrics`
+on `:9108`. Full setup (account, permissions, one-command revoke):
+[read-only access runbook](docs/runbooks/read-only-access.md).
+
 1. **Add a server** — Settings → Add Server (host, port, user, password or SSH key).
    Keys can be imported via file picker (sandbox-safe) or pasted as PEM content.
 2. **Install the metrics agent** — one click per server card (password, key, or
