@@ -3,12 +3,12 @@ import 'package:my_control_panel/services/agent_service.dart';
 
 void main() {
   group('agent v4 health+auth contract', () {
-    test('agentVersion is 4', () {
-      expect(AgentService.agentVersion, 4);
+    test('agentVersion is 5', () {
+      expect(AgentService.agentVersion, 5);
     });
 
-    test('script declares AGENT_VERSION = 4', () {
-      expect(AgentService.agentScript.contains('AGENT_VERSION = 4'), isTrue);
+    test('script declares AGENT_VERSION = 5', () {
+      expect(AgentService.agentScript.contains('AGENT_VERSION = 5'), isTrue);
     });
 
     test('v2/v3 endpoints preserved (backward compatible)', () {
