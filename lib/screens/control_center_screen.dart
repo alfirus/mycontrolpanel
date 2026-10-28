@@ -8,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:uuid/uuid.dart';
 import '../theme/app_theme.dart';
+import '../theme/design_tokens.dart';
 import '../models/mock_data.dart';
 import '../models/alert_entry.dart';
 import '../models/app_entry.dart';
@@ -31,11 +32,21 @@ import '../services/ssh_key_loader.dart';
 import '../services/log_tail_service.dart';
 import '../services/metrics_history.dart';
 import '../services/alert_watch.dart';
+import '../services/deployments_service.dart';
 import 'server_details_screen.dart';
 import '../widgets/pitch_card.dart';
+import '../widgets/state_view.dart';
+import '../widgets/run_detail_sheet.dart';
 import 'audit_screen.dart';
 import 'settings_screen.dart';
 import 'terminal_screen.dart';
+
+/// Bottom-nav primary destinations (spec `docs/design/03-navigation-ia.md`
+/// F3). Every other destination lives behind the MORE overflow sheet, so no
+/// destination is reachable on desktop but stranded on mobile. The grouping
+/// IA itself is NOT decided here — that needs Lina's sign-off (spec 03 §3).
+const primaryNavIndices = {0, 1, 4, 7, 11};
+const overflowNavIndices = {2, 3, 5, 6, 8, 9, 10, 12};
 
 class ControlCenterScreen extends StatefulWidget {
   const ControlCenterScreen({super.key});
@@ -210,7 +221,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
       }
       final runs = <DeployItem>[];
       for (final repo in _ghRepos) {
-        try { runs.addAll(await svc.repoRuns(repo)); } catch (_) {}
+        try { for (final d in await svc.repoRuns(repo)) { runs.add(d.withRepo(repo)); } } catch (_) {}
       }
       runs.sort((a, b) => b.time.compareTo(a.time));
       if (!mounted) return;
@@ -278,7 +289,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     try {
       for (final c in _savedServers) {
         final sw = Stopwatch()..start();
-        final m = await _agent.fetch(c.host);
+        final m = await _agent.fetch(c.host, serverId: c.id);
         sw.stop();
         if (!mounted) return;
         if (m != null) {
@@ -294,7 +305,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
             });
           }
         }
-        final ps = await _agent.fetchAppStats(c.host);
+        final ps = await _agent.fetchAppStats(c.host, serverId: c.id);
         if (!mounted) return;
         if (ps != null) {
           setState(() => _procStats[c.id] = ps);
@@ -510,7 +521,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
                 r = await _agent.install(s, onLog, keyPassphrase: keyPassphrase);
                 if (r.success && mounted) {
                   try {
-                    final m = await _agent.fetch(s.host);
+                    final m = await _agent.fetch(s.host, serverId: s.id);
                     if (m != null && mounted) setState(() => _metrics[s.id] = m);
                   } catch (_) {
                     // metrics poll is best-effort; install already succeeded
@@ -674,7 +685,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
           FilledButton(onPressed: () async {
             Navigator.pop(ctx);
             ScaffoldMessenger.of(context).showSnackBar(const SnackBar(backgroundColor: AppColors.surface1, content: Text('Verifying agent...', style: TextStyle(fontSize: 12, color: AppColors.textSecondary))));
-            final m = await _agent.fetch(s.host);
+            final m = await _agent.fetch(s.host, serverId: s.id);
             if (!mounted) return;
             if (m != null) {
               setState(() => _metrics[s.id] = m);
@@ -720,17 +731,43 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
       final cpu = (m['cpu'] as num).toDouble(), ram = (m['ram'] as num).toDouble(), disk = (m['disk'] as num).toDouble();
       return Column(children: [
         Row(children: [
-          Expanded(child: MetricBar(label: 'CPU', value: cpu, color: cpu > 0.75 ? AppColors.critical : AppColors.accentCyan)),
+          // Spec 02 §2.3: shared AppThresholds at every call site; hue means
+          // state, not metric — sub-threshold bars share one neutral color.
+          Expanded(child: MetricBar(label: 'CPU', value: cpu, color: cpu > AppThresholds.cpuCritical ? AppColors.critical : AppColors.textSecondary)),
           const SizedBox(width: 8),
-          Expanded(child: MetricBar(label: 'RAM', value: ram, color: ram > 0.85 ? AppColors.critical : AppColors.accentBlue)),
+          Expanded(child: MetricBar(label: 'RAM', value: ram, color: ram > AppThresholds.ramCritical ? AppColors.critical : AppColors.textSecondary)),
           const SizedBox(width: 8),
-          Expanded(child: MetricBar(label: 'DISK', value: disk, color: disk > 0.8 ? AppColors.warning : AppColors.textSecondary)),
+          Expanded(child: MetricBar(label: 'DISK', value: disk, color: disk > AppThresholds.diskCritical ? AppColors.critical : disk > AppThresholds.diskWarn ? AppColors.warning : AppColors.textSecondary)),
         ]),
         const SizedBox(height: 6),
+        // Spec 02 parity rule: the live card renders the same five bands in
+        // the same order as demo — this is band 4 (trend), fed by the
+        // in-memory poll history. Omitted until 2+ polls; never faked.
+        // Bands 1-2 (header + reachability) render above via the caller, so
+        // the no-agent box below likewise never replaces them.
+        Builder(builder: (_) {
+          final pts = trendPoints(_cpuHistory[c.host] ?? []);
+          if (pts.isEmpty) return const SizedBox.shrink();
+          final peak = sparklineP95(pts);
+          return Padding(
+            padding: const EdgeInsets.only(bottom: 6),
+            child: SizedBox(height: compact ? 18 : 24, child: Row(children: [
+              Expanded(child: _miniSparkline(pts, s.status == Status.degraded ? AppColors.warning : AppColors.success)),
+              const SizedBox(width: 8),
+              Semantics(
+                label: 'CPU trend, peak $peak percent over recent polls',
+                child: Text('cpu p95 $peak%', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: AppColors.textSecondary)),
+              ),
+            ])),
+          );
+        }),
         Row(children: [
           Container(width: 6, height: 6, decoration: const BoxDecoration(color: AppColors.success, shape: BoxShape.circle)),
           const SizedBox(width: 6),
-          Text('LIVE • agent :9108 • up ${m['uptime_days']}d', style: const TextStyle(fontSize: 9, fontWeight: FontWeight.w700, color: AppColors.success, letterSpacing: 0.4)),
+          // Spec 02 §2.5: footer grows to 11px; uptime is its own segment.
+          Text('LIVE • agent :9108', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: AppColors.success, letterSpacing: 0.4)),
+          const SizedBox(width: 8),
+          Text('UPTIME ${m['uptime_days']}d', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: AppColors.textPrimary, letterSpacing: 0.4)),
           const Spacer(),
           InkWell(onTap: () => _pollAgents(), child: const Row(children: [Icon(Icons.refresh, size: 11, color: AppColors.textMuted), SizedBox(width: 3), Text('REFRESH', style: TextStyle(fontSize: 9, fontWeight: FontWeight.w800, color: AppColors.textMuted))])),
         ]),
@@ -778,7 +815,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
   Future<void> _checkAgent(ServerConnection c) async {
     setState(() => _checking.add(c.id));
     String verdict;
-    final m = await _agent.fetch(c.host);
+    final m = await _agent.fetch(c.host, serverId: c.id);
     if (m != null) {
       if (mounted) setState(() { _metrics[c.id] = m; _checking.remove(c.id); });
       if (!mounted) return;
@@ -1869,7 +1906,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
       ('GitLab', Icons.layers_outlined, AppColors.accentPurple),
       ('Alerts', Icons.warning_amber_outlined, AppColors.warning),
       ('Deploys', Icons.rocket_launch_outlined, AppColors.accentCyan),
-      ('Logs', Icons.terminal_outlined, AppColors.textSecondary),
+      ('Logs', Icons.article_outlined, AppColors.textSecondary),
       ('Metrics', Icons.show_chart_outlined, AppColors.success),
       ('Security', Icons.shield_outlined, AppColors.critical),
       ('Settings', Icons.settings_outlined, AppColors.textSecondary),
@@ -1968,8 +2005,64 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
           _bottomItem(4, Icons.code, 'GitHub'),
           _bottomItem(6, Icons.rocket_launch, 'Deploys'),
           _bottomItem(11, Icons.settings, 'Settings'),
+          _moreItem(),
           Builder(builder: (ctx) => GestureDetector(onTap: ()=> Scaffold.of(ctx).openEndDrawer(), child: Container(margin: const EdgeInsets.all(8), width: 44, height: 44, decoration: BoxDecoration(color: AppColors.accentCyan, borderRadius: BorderRadius.circular(12)), child: const Icon(Icons.smart_toy_outlined, size: 18, color: Colors.black)))),
         ])),
+      ),
+    );
+  }
+
+  /// MORE overflow (spec 03 F3): every destination missing from the bottom
+  /// nav stays one tap away on phones via this sheet — same icons as the
+  /// rail, selected row highlighted. Grouping IA still needs Lina (§3).
+  Widget _moreItem() {
+    final active = overflowNavIndices.contains(_navIndex);
+    return Expanded(child: InkWell(onTap: _openMoreNav, child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+      Icon(Icons.more_horiz, size: 18, color: active ? AppColors.accentCyan : AppColors.textMuted),
+      const SizedBox(height: 3),
+      Text('More', style: TextStyle(fontSize: 9, fontWeight: FontWeight.w600, color: active ? AppColors.accentCyan : AppColors.textMuted)),
+    ])));
+  }
+
+  void _openMoreNav() {
+    const entries = [
+      (2, 'Cronjobs', Icons.schedule_outlined),
+      (3, 'Apps', Icons.apps_outlined),
+      (5, 'GitLab', Icons.layers_outlined),
+      (6, 'Alerts', Icons.warning_amber_outlined),
+      (8, 'Logs', Icons.article_outlined),
+      (9, 'Metrics', Icons.show_chart_outlined),
+      (10, 'Security', Icons.shield_outlined),
+      (12, 'Terminal', Icons.terminal_outlined),
+    ];
+    assert(entries.every((e) => overflowNavIndices.contains(e.$1)),
+        'MORE sheet must list exactly the overflow destinations');
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: AppColors.surface0,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16)), side: BorderSide(color: AppColors.border)),
+      builder: (ctx) => SafeArea(
+        child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Padding(padding: EdgeInsets.fromLTRB(16, 14, 16, 6), child: Text('MORE DESTINATIONS', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, letterSpacing: 0.7, color: AppColors.textMuted))),
+          Flexible(
+            child: ListView(
+              shrinkWrap: true,
+              children: [
+                for (final e in entries)
+                  ListTile(
+                    dense: true,
+                    leading: Container(width: 28, height: 28, decoration: BoxDecoration(color: _navIndex == e.$1 ? AppColors.accentCyan.withValues(alpha: 0.14) : AppColors.surface2, borderRadius: BorderRadius.circular(7), border: Border.all(color: _navIndex == e.$1 ? AppColors.accentCyan.withValues(alpha: 0.25) : AppColors.border)), child: Icon(e.$3, size: 14, color: _navIndex == e.$1 ? AppColors.accentCyan : AppColors.textSecondary)),
+                    title: Text(e.$2, style: TextStyle(fontSize: 12, fontWeight: _navIndex == e.$1 ? FontWeight.w700 : FontWeight.w500, color: _navIndex == e.$1 ? AppColors.textPrimary : AppColors.textSecondary)),
+                    trailing: _navIndex == e.$1 ? Container(width: 6, height: 6, decoration: const BoxDecoration(color: AppColors.accentCyan, shape: BoxShape.circle)) : null,
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      _goTo(e.$1);
+                    },
+                  ),
+              ],
+            ),
+          ),
+        ]),
       ),
     );
   }
@@ -2104,7 +2197,18 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
                     const SizedBox(width: 8),
                     Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                       Row(children: [Flexible(child: Text(s.name, style: TextStyle(color: AppColors.textPrimary, fontSize: compact ? 12 : 13, fontWeight: FontWeight.w700), overflow: TextOverflow.ellipsis)), const SizedBox(width: 5), Container(padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1), decoration: BoxDecoration(color: AppColors.surface2, borderRadius: BorderRadius.circular(4)), child: Text(s.os.split(' ').first, style: const TextStyle(fontSize: 8, color: AppColors.textMuted)))]),
-                      Text('${s.ip} • ${s.region} • ${_useRealServers && s.latencyMs == 0 ? 'no metrics yet' : '${s.latencyMs.toInt()}ms'}', style: TextStyle(fontSize: compact ? 10 : 11, color: AppColors.textMuted)),
+                      // Spec 02 §2.2: reachability line promoted to textSecondary;
+                      // latency is the scanned value — textPrimary semibold.
+                      Text.rich(TextSpan(
+                        style: TextStyle(fontSize: compact ? 10 : 11, color: AppColors.textSecondary),
+                        children: [
+                          TextSpan(text: '${s.ip} • ${s.region} • '),
+                          if (_useRealServers && s.latencyMs == 0)
+                            const TextSpan(text: 'no metrics yet')
+                          else
+                            TextSpan(text: '${s.latencyMs.toInt()}ms', style: const TextStyle(color: AppColors.textPrimary, fontWeight: FontWeight.w600)),
+                        ],
+                      )),
                     ])),
                     Pill(text: s.status.name.toUpperCase(), color: statusColor(s.status)),
                   ]),
@@ -2116,14 +2220,23 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
                     })
                   else ...[
                     Row(children: [
-                      Expanded(child: MetricBar(label: 'CPU', value: s.cpu, color: s.cpu > 0.75 ? AppColors.critical : AppColors.accentCyan)),
+                      Expanded(child: MetricBar(label: 'CPU', value: s.cpu, color: s.cpu > AppThresholds.cpuCritical ? AppColors.critical : AppColors.textSecondary)),
                       const SizedBox(width: 8),
-                      Expanded(child: MetricBar(label: 'RAM', value: s.ram, color: s.ram > 0.85 ? AppColors.critical : AppColors.accentBlue)),
+                      Expanded(child: MetricBar(label: 'RAM', value: s.ram, color: s.ram > AppThresholds.ramCritical ? AppColors.critical : AppColors.textSecondary)),
                       const SizedBox(width: 8),
-                      Expanded(child: MetricBar(label: 'DISK', value: s.disk, color: s.disk > 0.8 ? AppColors.warning : AppColors.textSecondary)),
+                      Expanded(child: MetricBar(label: 'DISK', value: s.disk, color: s.disk > AppThresholds.diskCritical ? AppColors.critical : s.disk > AppThresholds.diskWarn ? AppColors.warning : AppColors.textSecondary)),
                     ]),
                     const SizedBox(height: 6),
-                    SizedBox(height: compact ? 18 : 24, child: _miniSparkline(s.sparkline, s.status==Status.degraded ? AppColors.warning : AppColors.success)),
+                    // Spec 02 §2.4: the trend exists as text too, wrapped in a
+                    // Semantics label so screen readers get name + peak.
+                    SizedBox(height: compact ? 18 : 24, child: Row(children: [
+                      Expanded(child: _miniSparkline(s.sparkline, s.status==Status.degraded ? AppColors.warning : AppColors.success)),
+                      const SizedBox(width: 8),
+                      Semantics(
+                        label: 'CPU trend, peak ${sparklineP95(s.sparkline)} percent over 5 minutes',
+                        child: Text('cpu p95 ${sparklineP95(s.sparkline)}%', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: AppColors.textSecondary)),
+                      ),
+                    ])),
                   ],
                 ]),
               ),
@@ -2408,7 +2521,18 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
       title: 'GITHUB • DEMO',
       subtitle: _ghToken.isNotEmpty ? 'Token saved — add repos in Settings to go live' : 'Add a token in Settings to go live',
       trailing: Row(mainAxisSize: MainAxisSize.min, children: [
-        InkWell(onTap: () => _goTo(11), child: Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), decoration: BoxDecoration(color: AppColors.accentCyan.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(6), border: Border.all(color: AppColors.accentCyan.withValues(alpha: 0.2))), child: const Text('+ CONNECT', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan)))),
+        FilledButton(
+          onPressed: () => _goTo(11),
+          style: FilledButton.styleFrom(
+            backgroundColor: AppColors.accentCyan,
+            foregroundColor: Colors.black,
+            minimumSize: const Size(48, 40),
+            tapTargetSize: MaterialTapTargetSize.padded,
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+            textStyle: const TextStyle(fontSize: 10, fontWeight: FontWeight.w800),
+          ),
+          child: const Text('OPEN SETTINGS'),
+        ),
         if (compact) ...[const SizedBox(width: 8), InkWell(onTap: () => _goTo(4), child: const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan)))],
       ]),
       child: Column(children: [
@@ -2433,6 +2557,12 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     );
   }
 
+  /// Retry helper shared by the SYNC button and the StateView RETRY action.
+  void _retryGithub() {
+    setState(() { _ghIssues = []; _ghPRs = []; _ghTasks = []; _ghProjects = []; _ghTasksSource = ''; _ghError = null; });
+    _pollGithub();
+  }
+
   /// GitHub rendered from the user's live API data.
   Widget _realGithubCard({bool compact = false}) {
     final data = _githubTab == 0 ? _ghIssues : _githubTab == 1 ? _ghPRs : _ghTasks;
@@ -2448,12 +2578,15 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
       trailing: Row(mainAxisSize: MainAxisSize.min, children: [
         if (_ghLoading) const SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.accentCyan)),
         if (_ghLoading) const SizedBox(width: 6),
-        InkWell(
-          onTap: () {
-            setState(() { _ghIssues = []; _ghPRs = []; _ghTasks = []; _ghProjects = []; _ghTasksSource = ''; _ghError = null; });
-            _pollGithub();
-          },
-          child: const Row(children: [Icon(Icons.refresh, size: 11, color: AppColors.accentCyan), SizedBox(width: 3), Text('SYNC', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan))]),
+        TextButton.icon(
+          onPressed: _retryGithub,
+          icon: const Icon(Icons.refresh, size: 11, color: AppColors.accentCyan),
+          label: const Text('SYNC', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan)),
+          style: TextButton.styleFrom(
+            minimumSize: const Size(48, 32),
+            tapTargetSize: MaterialTapTargetSize.padded,
+            padding: const EdgeInsets.symmetric(horizontal: 6),
+          ),
         ),
         if (compact) ...[const SizedBox(width: 10), InkWell(onTap: () => _goTo(4), child: const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan)))],
       ]),
@@ -2465,14 +2598,22 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
           children: [Text('Issues (${_ghIssues.length})', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700)), Text('PRs (${_ghPRs.length})', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700)), Text('Tasks (${_ghTasks.length})${_ghTasksFromProjects ? ' ▣' : ''}', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700))],
         ),
         const SizedBox(height: 8),
-        if (data.isEmpty && !_ghLoading)
-          Padding(
-            padding: const EdgeInsets.all(12),
-            child: Row(children: [
-              Icon(_ghError != null ? Icons.error_outline : Icons.check_circle, size: 15, color: _ghError != null ? AppColors.warning : AppColors.success),
-              const SizedBox(width: 8),
-              Expanded(child: Text(_ghError ?? 'No open $tabName — queue is clear ✓', style: const TextStyle(fontSize: 11, color: AppColors.textMuted))),
-            ]),
+        if (_ghLoading && data.isEmpty)
+          StateView(
+            state: PanelState.loading,
+            loadingLabel: 'Syncing GitHub…',
+            compact: compact,
+          )
+        else if (data.isEmpty)
+          StateView(
+            state: _ghError != null ? PanelState.error : PanelState.empty,
+            icon: _ghError != null ? Icons.error_outline : Icons.check_circle,
+            headline: _ghError != null ? 'GITHUB SYNC FAILED' : 'QUEUE IS CLEAR',
+            body: _ghError ?? 'No open $tabName across ${_ghRepos.length} repo${_ghRepos.length == 1 ? '' : 's'} ✓',
+            actionLabel: _ghError != null ? 'RETRY' : null,
+            onAction: _ghError != null ? _retryGithub : null,
+            semanticLabel: _ghError != null ? 'GitHub sync failed' : 'GitHub queue is clear',
+            compact: compact,
           )
         else
           for (final item in display)
@@ -2761,12 +2902,9 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     );
   }
 
-  /// Merged CI/CD timeline: GitHub Actions runs + GitLab pipelines, newest first.
-  List<DeployItem> get _allRuns {
-    final all = [..._ghRuns, ..._glPipes];
-    all.sort((a, b) => b.time.compareTo(a.time));
-    return all;
-  }
+  /// Merged CI/CD timeline via [DeploymentsService] (newest first).
+  List<DeployItem> get _allRuns =>
+      DeploymentsService.merge(_ghRuns, _glPipes);
 
   bool get _ciConfigured => _ghConfigured || _glConfigured;
   bool get _ciLoading => _ghLoading || _glLoading;
@@ -2797,6 +2935,32 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     );
   }
 
+  /// Retry helper shared by the SYNC button and the StateView RETRY action.
+  void _retryDeploys() {
+    setState(() { _ghRuns = []; _ghError = null; _glPipes = []; _glError = null; });
+    _pollGithub();
+    _pollGitlab();
+  }
+
+  /// Open the run detail sheet (approve-first rerun/retry). No-op for
+  /// demo rows: they carry no ids so the sheet shows detail only.
+  void _openRun(DeployItem d) {
+    if (!mounted) return;
+    showRunDetailSheet(
+      context: context,
+      run: d,
+      githubToken: _ghToken,
+      githubRepos: _ghRepos,
+      gitlabBaseUrl: _glBase,
+      gitlabToken: _glToken,
+      onChanged: () {
+        setState(() { _ghRuns = []; _glPipes = []; _ghError = null; _glError = null; });
+        _pollGithub();
+        _pollGitlab();
+      },
+    );
+  }
+
   /// CI/CD rendered from live runs: GitHub Actions + GitLab pipelines.
   Widget _realDeploysCard({bool compact = false}) {
     final all = _allRuns;
@@ -2817,29 +2981,42 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
       trailing: Row(mainAxisSize: MainAxisSize.min, children: [
         if (_ciLoading) const SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.accentCyan)),
         if (_ciLoading) const SizedBox(width: 6),
-        InkWell(
-          onTap: () {
-            setState(() { _ghRuns = []; _ghError = null; _glPipes = []; _glError = null; });
-            _pollGithub();
-            _pollGitlab();
-          },
-          child: const Row(children: [Icon(Icons.refresh, size: 11, color: AppColors.accentCyan), SizedBox(width: 3), Text('SYNC', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan))]),
+        TextButton.icon(
+          onPressed: _retryDeploys,
+          icon: const Icon(Icons.refresh, size: 11, color: AppColors.accentCyan),
+          label: const Text('SYNC', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan)),
+          style: TextButton.styleFrom(
+            minimumSize: const Size(48, 32),
+            tapTargetSize: MaterialTapTargetSize.padded,
+            padding: const EdgeInsets.symmetric(horizontal: 6),
+          ),
         ),
         if (compact) ...[const SizedBox(width: 10), InkWell(onTap: () => _goTo(7), child: const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan)))],
       ]),
-      child: all.isEmpty && !_ciLoading
-          ? Padding(
-              padding: const EdgeInsets.all(12),
-              child: Row(children: [
-                Icon(_ciError != null ? Icons.error_outline : Icons.info_outline, size: 15, color: _ciError != null ? AppColors.warning : AppColors.textMuted),
-                const SizedBox(width: 8),
-                Expanded(child: Text(_ciError ?? 'No runs yet — push to a tracked repo to trigger a build.', style: const TextStyle(fontSize: 11, color: AppColors.textMuted))),
-              ]),
+      child: _ciLoading && all.isEmpty
+          ? StateView(
+              state: PanelState.loading,
+              loadingLabel: 'Syncing pipelines…',
+              compact: compact,
             )
-          : Column(children: display.map((d) {
+          : all.isEmpty
+              ? StateView(
+                  state: _ciError != null ? PanelState.error : PanelState.empty,
+                  icon: _ciError != null ? Icons.error_outline : Icons.rocket_launch_outlined,
+                  headline: _ciError != null ? 'DEPLOY HISTORY UNAVAILABLE' : 'NO RUNS YET',
+                  body: _ciError ?? 'Push to a tracked repo or check the Actions tab on GitHub.',
+                  actionLabel: _ciError != null ? 'RETRY' : null,
+                  onAction: _ciError != null ? _retryDeploys : null,
+                  semanticLabel: _ciError != null ? 'Deploy history unavailable' : 'No deploy runs yet',
+                  compact: compact,
+                )
+              : Column(children: display.map((d) {
               final isGl = d.vcs == 'gitlab';
               final vcsColor = isGl ? AppColors.accentPurple : AppColors.textPrimary;
-              return Container(
+              return InkWell(
+              borderRadius: BorderRadius.circular(8),
+              onTap: () => _openRun(d),
+              child: Container(
               margin: EdgeInsets.only(bottom: compact ? 6 : 8), padding: EdgeInsets.all(compact ? 8 : 10),
               decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(8), border: Border.all(color: d.status == 'failed' ? AppColors.critical.withValues(alpha: 0.25) : AppColors.borderLight)),
               child: Row(children: [
@@ -2864,9 +3041,60 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
                 ])),
                 const Icon(Icons.chevron_right, size: 14, color: AppColors.textDim),
               ]),
-            );
+            ));
             }).toList()),
     );
+  }
+
+  /// Shared empty/error frame for the log tail (spec 04-state-patterns §2).
+  /// Returns null when there are lines to show (caller renders the viewer).
+  Widget? _logsState({required bool compact, required List<LogLine> display, required ServerConnection? logServer}) {
+    if (display.isNotEmpty) return null;
+    if (_useRealServers && _savedServers.isEmpty) {
+      return StateView(
+        state: PanelState.empty,
+        icon: Icons.dns_outlined,
+        headline: 'NO SERVERS',
+        body: 'Add servers in Settings for real SSH logs.',
+        actionLabel: 'OPEN SETTINGS',
+        onAction: () => _goTo(11),
+        semanticLabel: 'No servers configured',
+        compact: compact,
+      );
+    }
+    if (_logLoading) {
+      return StateView(
+        state: PanelState.loading,
+        loadingLabel: 'Fetching $_logSource…',
+        compact: compact,
+      );
+    }
+    if (_logError != null) {
+      return StateView(
+        state: PanelState.error,
+        icon: Icons.error_outline,
+        headline: 'LOG TAIL FAILED',
+        body: _logError!,
+        actionLabel: 'RETRY',
+        onAction: _pollRealLogs,
+        semanticLabel: 'Log tail failed',
+        compact: compact,
+      );
+    }
+    if (_liveLogs.isNotEmpty) {
+      // Lines exist but the level filter matched nothing.
+      return StateView(
+        state: PanelState.empty,
+        icon: Icons.filter_list_off_outlined,
+        headline: 'NO LINES MATCH',
+        body: 'No $_logFilter lines in the last ${_liveLogs.length} fetched. Try ALL.',
+        actionLabel: 'SHOW ALL',
+        onAction: () => setState(() => _logFilter = 'ALL'),
+        semanticLabel: 'No log lines match filter',
+        compact: compact,
+      );
+    }
+    return null; // demo mode with zero mock lines — keep today's (empty) viewer.
   }
 
   Widget _logsSegment({bool compact = false}) {
@@ -2918,18 +3146,25 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
                 _pollRealLogs();
               },
             ),
-          InkWell(
-            onTap: _logLoading ? null : _pollRealLogs,
-            child: _logLoading
+          TextButton.icon(
+            onPressed: _logLoading ? null : _pollRealLogs,
+            icon: _logLoading
                 ? const SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.accentCyan))
-                : const Text('REFRESH →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan)),
+                : const Icon(Icons.refresh, size: 11, color: AppColors.accentCyan),
+            label: const Text('REFRESH', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan)),
+            style: TextButton.styleFrom(
+              minimumSize: const Size(48, 32),
+              tapTargetSize: MaterialTapTargetSize.padded,
+              padding: const EdgeInsets.symmetric(horizontal: 6),
+            ),
           ),
           const SizedBox(width: 8),
         ],
         if (compact) InkWell(onTap: () => _goTo(8), child: const Text('EXPAND →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan))),
       ]),
-      child: Container(
-        height: compact ? 160 : 280,
+      child: _logsState(compact: compact, display: display, logServer: logServer) ??
+          Container(
+            height: compact ? 160 : 280,
         decoration: BoxDecoration(color: const Color(0xFF050505), borderRadius: BorderRadius.circular(10), border: Border.all(color: AppColors.border)),
         child: Column(children: [
           Container(padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5), decoration: const BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.vertical(top: Radius.circular(10))), child: const Row(children: [Icon(Icons.circle, size: 7, color: AppColors.success), SizedBox(width: 6), Text('● LIVE', style: TextStyle(fontSize: 9, fontWeight: FontWeight.w800, color: AppColors.success))])),
@@ -3020,6 +3255,18 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     );
   }
 
+  /// Re-send the most recent user message (chat error-bubble RETRY affordance).
+  void _retryChat() {
+    if (_aiTyping) return;
+    for (var i = _chatMessages.length - 1; i >= 0; i--) {
+      if (_chatMessages[i]['role'] == 'user') {
+        _chatController.text = _chatMessages[i]['text'] ?? '';
+        _sendChat();
+        return;
+      }
+    }
+  }
+
   Widget _buildChatDrawer() {
     return Drawer(
       backgroundColor: const Color(0xFF0A0A0A), width: 380,
@@ -3027,27 +3274,23 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
         Container(padding: const EdgeInsets.all(14), decoration: const BoxDecoration(color: AppColors.surface1, border: Border(bottom: BorderSide(color: AppColors.border))), child: Row(children: [Container(width: 36, height: 36, decoration: BoxDecoration(color: AppColors.accentCyan, borderRadius: BorderRadius.circular(8)), child: const Icon(Icons.smart_toy, size: 18, color: Colors.black)), const SizedBox(width: 10), Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [const Text('AI Assistant', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.textPrimary)), Text(_aiConfigured ? '$_aiModelName • control center aware' : 'No provider configured', style: const TextStyle(fontSize: 10, color: AppColors.textMuted), maxLines: 1, overflow: TextOverflow.ellipsis)])), Builder(builder: (drawerCtx) => IconButton(tooltip: 'Audit trail', onPressed: () { Navigator.pop(drawerCtx); Navigator.push(context, MaterialPageRoute(builder: (_) => const AuditScreen())); }, icon: Container(padding: const EdgeInsets.all(6), decoration: BoxDecoration(color: AppColors.surface2, borderRadius: BorderRadius.circular(8), border: Border.all(color: AppColors.border)), child: const Icon(Icons.history, size: 15, color: AppColors.textSecondary))))])),
         if (!_aiConfigured)
           Expanded(
-            child: Padding(
-              padding: const EdgeInsets.all(20),
-              child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-                Container(width: 56, height: 56, decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(14), border: Border.all(color: AppColors.border)), child: const Icon(Icons.smart_toy_outlined, size: 26, color: AppColors.textMuted)),
-                const SizedBox(height: 14),
-                const Text('AI Assistant is offline', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
-                const SizedBox(height: 6),
-                const Text('Connect an AI provider (OpenAI, Anthropic, Gemini, Ollama…) and pick a model to start chatting with your control center.', style: TextStyle(fontSize: 12, height: 1.4, color: AppColors.textSecondary), textAlign: TextAlign.center),
-                const SizedBox(height: 16),
-                Builder(builder: (drawerCtx) => FilledButton.icon(
-                      onPressed: () {
-                        Navigator.pop(drawerCtx); // close drawer first
-                        _goTo(11); // Settings tab (reloads AI config on return)
-                      },
-                      icon: const Icon(Icons.settings_outlined, size: 15),
-                      label: const Text('CONFIGURE AI PROVIDER', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800)),
-                      style: FilledButton.styleFrom(backgroundColor: AppColors.accentCyan, foregroundColor: Colors.black, padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 13)),
-                    )),
-                const SizedBox(height: 8),
-                const Text('Settings → Integrations → AI Provider', style: TextStyle(fontSize: 10, color: AppColors.textDim, fontFamily: AppFonts.mono)),
-              ]),
+            child: Builder(
+              builder: (drawerCtx) => Center(
+                child: SingleChildScrollView(
+                  child: StateView(
+                    state: PanelState.empty,
+                    icon: Icons.smart_toy_outlined,
+                    headline: 'NO AI PROVIDER',
+                    body: 'Configure a provider to make the assistant control-center aware.',
+                    actionLabel: 'CONFIGURE',
+                    onAction: () {
+                      Navigator.pop(drawerCtx); // close drawer first
+                      _goTo(11); // Settings tab (reloads AI config on return)
+                    },
+                    semanticLabel: 'No AI provider configured',
+                  ),
+                ),
+              ),
             ),
           )
         else ...[
@@ -3086,29 +3329,54 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
           }
           final m = _chatMessages[i]; final isUser = m['role']=='user';
           final isStatus = !isUser && m['text']!.startsWith('_') && m['text']!.endsWith('_');
-          return Align(
-            alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
-            child: Container(
-              margin: const EdgeInsets.only(bottom: 8),
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
-              constraints: const BoxConstraints(maxWidth: 300),
-              decoration: BoxDecoration(
-                color: isUser ? AppColors.accentCyan : AppColors.surface1,
-                borderRadius: BorderRadius.circular(14),
-                border: Border.all(color: isUser ? AppColors.accentCyan : AppColors.border),
+          // Spec 04-state-patterns §2: request failures surface inline + RETRY chip.
+          final isError = !isUser && !isStatus && (m['text'] ?? '').startsWith('AI error:');
+          return Column(
+            crossAxisAlignment: isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Align(
+                alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
+                child: Container(
+                  margin: EdgeInsets.only(bottom: isError ? 2 : 8),
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+                  constraints: const BoxConstraints(maxWidth: 300),
+                  decoration: BoxDecoration(
+                    color: isUser ? AppColors.accentCyan : AppColors.surface1,
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: isUser ? AppColors.accentCyan : AppColors.border),
+                  ),
+                  child: isUser || isStatus
+                      ? SelectableText(m['text']!,
+                          style: TextStyle(fontSize: 12, height: 1.35, fontStyle: isStatus ? FontStyle.italic : FontStyle.normal, color: isUser ? Colors.black : AppColors.textMuted))
+                      : MarkdownBody(
+                          data: m['text']!,
+                          selectable: true,
+                          shrinkWrap: true,
+                          fitContent: false,
+                          styleSheet: _chatMarkdownStyle(),
+                          onTapLink: (text, href, title) {},
+                        ),
+                ),
               ),
-              child: isUser || isStatus
-                  ? SelectableText(m['text']!,
-                      style: TextStyle(fontSize: 12, height: 1.35, fontStyle: isStatus ? FontStyle.italic : FontStyle.normal, color: isUser ? Colors.black : AppColors.textMuted))
-                  : MarkdownBody(
-                      data: m['text']!,
-                      selectable: true,
-                      shrinkWrap: true,
-                      fitContent: false,
-                      styleSheet: _chatMarkdownStyle(),
-                      onTapLink: (text, href, title) {},
+              if (isError)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: Semantics(
+                    label: 'AI request failed, retry',
+                    child: TextButton.icon(
+                      onPressed: _retryChat,
+                      icon: const Icon(Icons.refresh, size: 12, color: AppColors.accentCyan),
+                      label: const Text('RETRY', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan)),
+                      style: TextButton.styleFrom(
+                        minimumSize: const Size(48, 32),
+                        tapTargetSize: MaterialTapTargetSize.padded,
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                      ),
                     ),
-            ),
+                  ),
+                ),
+            ],
           );
         })),
         Container(padding: const EdgeInsets.all(10), decoration: const BoxDecoration(color: AppColors.surface1, border: Border(top: BorderSide(color: AppColors.border))), child: Row(children: [

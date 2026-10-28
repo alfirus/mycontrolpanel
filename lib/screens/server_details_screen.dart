@@ -72,7 +72,7 @@ class _ServerDetailsScreenState extends State<ServerDetailsScreen> {
     final c = _conn;
     if (c == null) return;
     setState(() { _metricsBusy = true; _metricsError = null; });
-    final m = await _agent.fetch(c.host);
+    final m = await _agent.fetch(c.host, serverId: c.id);
     if (!mounted) return;
     setState(() {
       _metricsBusy = false;
@@ -167,7 +167,7 @@ class _ServerDetailsScreenState extends State<ServerDetailsScreen> {
     if (c == null) return;
     setState(() => _procsBusy = true);
     try {
-      final ps = await _agent.fetchAppStats(c.host);
+      final ps = await _agent.fetchAppStats(c.host, serverId: c.id);
       if (!mounted) return;
       setState(() {
         _procStats = ps;
