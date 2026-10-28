@@ -186,6 +186,16 @@ lib/
 
 Feedback and PRs welcome — especially homelab/self-hosted setups.
 
+## Positioning
+
+MyControlPanel is **free and open-source (MIT)** for homelab and self-hosted
+use, sustained by voluntary donations
+([Buy Me a Coffee](https://www.buymeacoffee.com/alfirus)). No paywall, no
+telemetry, no account. Commercial packaging (internal-only vs paid tiers) is
+an open decision tracked in
+[`docs/decisions/002-commercial-packaging.md`](docs/decisions/002-commercial-packaging.md) —
+currently proposed as OSS-through-v1, pending owner sign-off.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
