@@ -8,6 +8,11 @@ Wants=network-online.target
 Type=simple
 ExecStart=/usr/bin/python3 /opt/mcp-agent/agent.py
 WorkingDirectory=/opt/mcp-agent
+# Optional shared secret for the v4 agent (X-MCP-Agent-Token).
+# Absent file = open agent (v2/v3-compatible). To enforce auth:
+#   echo 'MCP_AGENT_TOKEN=<secret>' | sudo tee /etc/mcp-agent.env
+#   sudo chmod 600 /etc/mcp-agent.env && sudo systemctl restart mcp-agent
+EnvironmentFile=-/etc/mcp-agent.env
 Restart=always
 RestartSec=5
 # Least privilege: the agent only reads /proc + listens on :9108.

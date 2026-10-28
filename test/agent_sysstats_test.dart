@@ -2,16 +2,16 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:my_control_panel/services/agent_service.dart';
 
 void main() {
-  group('agent v3 sysstats contract', () {
-    test('agentVersion is 3', () {
-      expect(AgentService.agentVersion, 3);
+  group('agent v4 health+auth contract', () {
+    test('agentVersion is 4', () {
+      expect(AgentService.agentVersion, 4);
     });
 
-    test('script declares AGENT_VERSION = 3', () {
-      expect(AgentService.agentScript.contains('AGENT_VERSION = 3'), isTrue);
+    test('script declares AGENT_VERSION = 4', () {
+      expect(AgentService.agentScript.contains('AGENT_VERSION = 4'), isTrue);
     });
 
-    test('v2 endpoints preserved (backward compatible)', () {
+    test('v2/v3 endpoints preserved (backward compatible)', () {
       expect(AgentService.agentScript.contains('/metrics'), isTrue);
       expect(AgentService.agentScript.contains('/procstats'), isTrue);
       expect(AgentService.agentScript.contains('read_top_processes'), isTrue);
@@ -39,6 +39,48 @@ void main() {
       for (final needle in ['read_cpu', 'read_ram', 'read_disk', 'uptime_days', 'load1']) {
         expect(script.contains(needle), isTrue, reason: 'missing $needle');
       }
+    });
+
+    test('/health liveness probe (no /proc scan)', () {
+      final script = AgentService.agentScript;
+      for (final needle in ['/health', "'status': 'ok'", 'agent_uptime_s']) {
+        expect(script.contains(needle), isTrue, reason: 'missing $needle');
+      }
+    });
+
+    test('optional token auth via MCP_AGENT_TOKEN env', () {
+      final script = AgentService.agentScript;
+      for (final needle in [
+        'MCP_AGENT_TOKEN',
+        'X-MCP-Agent-Token',
+        '401',
+        'compare_digest',
+      ]) {
+        expect(script.contains(needle), isTrue, reason: 'missing $needle');
+      }
+    });
+
+    test('sysstats carries nproc + boot_epoch_s for load/reboot checks', () {
+      final script = AgentService.agentScript;
+      for (final needle in ['nproc', 'boot_epoch_s', 'read_nproc', 'read_boot_epoch_s']) {
+        expect(script.contains(needle), isTrue, reason: 'missing $needle');
+      }
+    });
+
+    test('hardened routing: query strings, JSON errors, 405 on non-GET', () {
+      final script = AgentService.agentScript;
+      for (final needle in [
+        "split('?', 1)",
+        'not_found',
+        'method_not_allowed',
+        'do_POST',
+      ]) {
+        expect(script.contains(needle), isTrue, reason: 'missing $needle');
+      }
+    });
+
+    test('systemd unit supports the token env file', () {
+      expect(AgentService.serviceUnit.contains('EnvironmentFile=-/etc/mcp-agent.env'), isTrue);
     });
   });
 }

@@ -7,6 +7,7 @@ import '../models/app_entry.dart';
 import '../models/app_proc.dart';
 import '../models/cron_entry.dart';
 import '../models/server_connection.dart';
+import 'agent_protocol.dart';
 import 'ssh_key_loader.dart';
 
 class AgentInstallResult {
@@ -20,24 +21,35 @@ class AgentInstallResult {
 class AgentService {
   static const int agentPort = 9108;
 
-  /// Agent v3: stdlib-only Python.
-  /// /metrics -> {"cpu","ram","disk","uptime_days","version":3,"load1":...}
-  /// /procstats -> {"version":3,"top":[{"pid","name","cpu","mem_mb"}], "ports":{"3000":{"listening":true,"established":2}}}
-  /// /sysstats (v3+) -> {"version":3,"load1","load5","load15",
+  /// Agent v4: stdlib-only Python.
+  /// /metrics -> {"cpu","ram","disk","uptime_days","version":4,"load1":...}
+  /// /procstats -> {"version":4,"top":[{"pid","name","cpu","mem_mb"}], "ports":{"3000":{"listening":true,"established":2}}}
+  /// /sysstats (v3+) -> {"version":4,"load1","load5","load15",
   ///   "mem":{"total_mb","avail_mb","swap_total_mb","swap_free_mb"},
-  ///   "gpu":{"present","count"},"agent_uptime_s":...}
+  ///   "gpu":{"present","count"},"agent_uptime_s":...,
+  ///   "nproc":...,"boot_epoch_s":...}
+  /// /health (v4+) -> {"status":"ok","version":4,"agent_uptime_s":...}
+  /// Token auth (v4+): when MCP_AGENT_TOKEN is set (via /etc/mcp-agent.env),
+  /// every endpoint requires `X-MCP-Agent-Token`; mismatch -> 401 JSON.
+  /// Unset = open (backwards compatible with v2/v3 clients).
   /// APM-lite: top processes by CPU + per-port established connections.
-  /// Sysstats adds load average, memory detail, GPU presence and agent
-  /// uptime for capacity planning (e.g. sizing on-host model serving).
+  /// Sysstats adds load average, memory detail, GPU presence, agent uptime,
+  /// CPU count and boot epoch for capacity planning (e.g. sizing on-host
+  /// model serving) and reboot detection without an SSH round-trip.
   /// Inference stats themselves live app-side in LlmReliability and are
   /// correlated by host — the agent never fabricates inference counters.
-  static const int agentVersion = 3;
+  static const int agentVersion = 4;
   static const String agentScript = r'''
 import json, os, time
+import hmac
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-AGENT_VERSION = 3
+AGENT_VERSION = 4
 START_TIME = time.time()
+# Optional shared secret. Set via EnvironmentFile /etc/mcp-agent.env
+# (MCP_AGENT_TOKEN=...). Empty = open (v2/v3-compatible).
+AGENT_TOKEN = os.environ.get('MCP_AGENT_TOKEN', '')
+TOKEN_HEADER = 'X-MCP-Agent-Token'
 
 def read_cpu():
     try:
@@ -112,6 +124,21 @@ def read_gpu():
     except Exception:
         return {'present': False, 'count': 0}
 
+def read_nproc():
+    try:
+        n = os.cpu_count()
+        return n if n and n > 0 else 1
+    except Exception:
+        return 1
+
+def read_boot_epoch_s():
+    try:
+        with open('/proc/uptime') as f:
+            up = float(f.read().split()[0])
+        return int(time.time() - up)
+    except Exception:
+        return 0
+
 def _proc_snapshot():
     procs = {}
     try:
@@ -180,28 +207,66 @@ def read_ports():
     return ports
 
 class H(BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path == '/metrics':
-            body = json.dumps({'cpu': round(read_cpu(), 3), 'ram': round(read_ram(), 3),
-                               'disk': round(read_disk(), 3), 'uptime_days': read_uptime_days(),
-                               'load1': round(read_loadavg()[0], 2),
-                               'version': AGENT_VERSION}).encode()
-        elif self.path == '/procstats':
-            body = json.dumps({'version': AGENT_VERSION, 'top': read_top_processes(),
-                               'ports': read_ports()}).encode()
-        elif self.path == '/sysstats':
-            la = read_loadavg()
-            body = json.dumps({'version': AGENT_VERSION,
-                               'load1': round(la[0], 2), 'load5': round(la[1], 2),
-                               'load15': round(la[2], 2), 'mem': read_mem_detail(),
-                               'gpu': read_gpu(),
-                               'agent_uptime_s': int(time.time() - START_TIME)}).encode()
-        else:
-            self.send_response(404); self.end_headers(); return
-        self.send_response(200)
+    def _send(self, code, obj):
+        try:
+            body = json.dumps(obj).encode()
+        except Exception:
+            code, body = 500, b'{"error":"encode_failed"}'
+        self.send_response(code)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Content-Length', str(len(body)))
-        self.end_headers(); self.wfile.write(body)
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except Exception:
+            pass
+
+    def _authorized(self):
+        if not AGENT_TOKEN:
+            return True
+        got = self.headers.get(TOKEN_HEADER, '')
+        return hmac.compare_digest(got, AGENT_TOKEN)
+
+    def do_GET(self):
+        if not self._authorized():
+            self._send(401, {'error': 'unauthorized',
+                             'hint': 'send ' + TOKEN_HEADER})
+            return
+        path = self.path.split('?', 1)[0].rstrip('/') or '/'
+        if path == '/metrics':
+            body = {'cpu': round(read_cpu(), 3), 'ram': round(read_ram(), 3),
+                    'disk': round(read_disk(), 3), 'uptime_days': read_uptime_days(),
+                    'load1': round(read_loadavg()[0], 2),
+                    'version': AGENT_VERSION}
+        elif path == '/procstats':
+            body = {'version': AGENT_VERSION, 'top': read_top_processes(),
+                    'ports': read_ports()}
+        elif path == '/sysstats':
+            la = read_loadavg()
+            body = {'version': AGENT_VERSION,
+                    'load1': round(la[0], 2), 'load5': round(la[1], 2),
+                    'load15': round(la[2], 2), 'mem': read_mem_detail(),
+                    'gpu': read_gpu(),
+                    'agent_uptime_s': int(time.time() - START_TIME),
+                    'nproc': read_nproc(), 'boot_epoch_s': read_boot_epoch_s()}
+        elif path == '/health':
+            body = {'status': 'ok', 'version': AGENT_VERSION,
+                    'agent_uptime_s': int(time.time() - START_TIME)}
+        else:
+            self._send(404, {'error': 'not_found', 'path': path})
+            return
+        self._send(200, body)
+
+    def _method_not_allowed(self):
+        self._send(405, {'error': 'method_not_allowed',
+                         'hint': 'use GET'})
+
+    do_POST = _method_not_allowed
+    do_PUT = _method_not_allowed
+    do_DELETE = _method_not_allowed
+    do_PATCH = _method_not_allowed
+    do_HEAD = _method_not_allowed
+    do_OPTIONS = _method_not_allowed
     def log_message(self, *a): pass
 
 HTTPServer(('0.0.0.0', 9108), H).serve_forever()
@@ -213,6 +278,11 @@ Description=MyControlPanel metrics agent
 After=network.target
 [Service]
 ExecStart=/usr/bin/python3 /opt/mcp-agent/agent.py
+# Optional shared secret for the v4 agent (X-MCP-Agent-Token).
+# Absent file = open agent (v2/v3-compatible). To enforce auth:
+#   echo 'MCP_AGENT_TOKEN=<secret>' | sudo tee /etc/mcp-agent.env
+#   sudo chmod 600 /etc/mcp-agent.env && sudo systemctl restart mcp-agent
+EnvironmentFile=-/etc/mcp-agent.env
 Restart=always
 RestartSec=5
 [Install]
@@ -750,11 +820,14 @@ WantedBy=multi-user.target
     }
   }
 
-  /// GET http://host:9108/procstats -> AppStats or null (agent v2+ only)
-  Future<AppStats?> fetchAppStats(String host) async {
+  /// GET http://host:9108/procstats -> AppStats or null (agent v2+ only).
+  /// [agentToken] is sent as X-MCP-Agent-Token when the host enforces
+  /// v4 token auth; v2/v3 agents ignore the header.
+  Future<AppStats?> fetchAppStats(String host, {String? agentToken}) async {
     try {
       final hc = HttpClient()..connectionTimeout = const Duration(seconds: 5);
       final req = await hc.get(host, agentPort, '/procstats');
+      _applyAgentToken(req, agentToken);
       final resp = await req.close().timeout(const Duration(seconds: 8));
       if (resp.statusCode != 200) return null;
       final body = await resp.transform(utf8.decoder).join();
@@ -765,11 +838,15 @@ WantedBy=multi-user.target
     }
   }
 
-  /// GET http://host:9108/metrics -> {cpu,ram,disk,uptime_days} or null
-  Future<Map<String, dynamic>?> fetch(String host) async {
+  /// GET http://host:9108/metrics -> {cpu,ram,disk,uptime_days} or null.
+  /// [agentToken] is sent as X-MCP-Agent-Token when the host enforces
+  /// v4 token auth; v2/v3 agents ignore the header.
+  Future<Map<String, dynamic>?> fetch(String host,
+      {String? agentToken}) async {
     try {
       final hc = HttpClient()..connectionTimeout = const Duration(seconds: 5);
       final req = await hc.get(host, agentPort, '/metrics');
+      _applyAgentToken(req, agentToken);
       final resp = await req.close().timeout(const Duration(seconds: 6));
       if (resp.statusCode != 200) return null;
       final body = await resp.transform(utf8.decoder).join();
@@ -778,5 +855,32 @@ WantedBy=multi-user.target
     } catch (_) {
       return null;
     }
+  }
+
+  /// GET http://host:9108/health -> AgentHealth or null (agent v4+ only).
+  /// Null covers unreachable/timeout/non-200/stale-agent — use the typed
+  /// pollers in service_locator for failures you must distinguish.
+  Future<AgentHealth?> fetchHealth(String host,
+      {String? agentToken}) async {
+    try {
+      final hc = HttpClient()..connectionTimeout = const Duration(seconds: 5);
+      final req = await hc.get(host, agentPort, kHealthPath);
+      _applyAgentToken(req, agentToken);
+      final resp = await req.close().timeout(const Duration(seconds: 5));
+      if (resp.statusCode != 200) return null;
+      final body = await resp.transform(utf8.decoder).join();
+      hc.close();
+      return parseAgentHealth(
+          decodeAgentBody(body, kHealthPath));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Attaches the reserved agent token header when configured.
+  /// v2/v3 agents ignore unknown headers, so this is safe to always send.
+  static void _applyAgentToken(HttpClientRequest req, String? agentToken) {
+    final t = agentToken?.trim() ?? '';
+    if (t.isNotEmpty) req.headers.set(kAgentAuthHeader, t);
   }
 }
