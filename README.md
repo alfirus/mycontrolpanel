@@ -34,24 +34,12 @@ flutter run -d macos   # or windows / linux
 
 ## What works today vs what's next
 
-| Capability | Status | Notes |
-|---|---|---|
-| Server metrics (CPU/RAM/disk, latency, uptime) | ✅ Live over SSH | Via one-click metrics agent (`:9108`) |
-| Cronjob discovery (`crontab`, `/etc/crontab`, `/etc/cron.d/*`) + last-run tracking | ✅ Live over SSH | Per-job log viewer, edit in place, LAST/DUR + OK/FAILED status from the agent run log |
-| Running apps (systemd, Docker, listening ports) + top processes | ✅ Live over SSH | Agent v2 `/procstats` |
-| Alert harvesting (failed units, disk ≥80/90%, brute-force, load, kernel errors, reboots) | ✅ Live over SSH | Foreground watcher: badge + snack on new signals |
-| Live log tail (journal/syslog/docker) | ✅ Live over SSH | Demo heartbeat only when no servers saved |
-| Metrics history + live p95 | ✅ Live | Per-host ring buffer, real p95 KPI |
-| Built-in SSH + local terminal | ✅ Live | Per-server sessions (`dartssh2`) |
-| AI chat (streaming, tool calling, audit trail) | ✅ Live | Bring your own provider key; Ollama local supported |
-| GitLab issues / MRs / tasks | ✅ Live | API-backed, mock fallback |
-| GitHub issues / PRs / tasks | ✅ Live | API-backed (PAT in Settings), Projects v2 board with assigned-issue fallback |
-| CI/CD deployment timeline | ✅ Live | GitHub Actions runs + GitLab pipelines, merged newest-first; SYNC forces a live retry, backoff + last-good cache when rate-limited |
 | Security findings | ◻️ UI-ready | Screens + models exist; API wiring on roadmap |
 
 Legend: ✅ works today · ◻️ UI-ready, API still to wire.
 Roadmap items (background polling, biometric lock, Sentry/Datadog) are tracked
 in [Roadmap](#roadmap) below — nothing above is presented as live unless it is.
+Full per-screen matrix + phased plan: [docs/roadmap.md](docs/roadmap.md).
 
 ## Features
 
