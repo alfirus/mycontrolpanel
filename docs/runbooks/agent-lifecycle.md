@@ -5,7 +5,7 @@ and `manualInstallScript()` produce):
 
 - Agent: `/opt/mcp-agent/agent.py` (stdlib-only Python, mode 644)
 - Unit: `/etc/systemd/system/mcp-agent.service` (see `agent/mcp-agent.service`)
-- Port: TCP `9108` (`/metrics`, `/procstats`), agent v2 contract
+- Port: TCP `9108` (`/health`, `/metrics`, `/procstats`), agent v4 contract
 
 ## Option A — scripted (idempotent)
 
@@ -52,14 +52,40 @@ sudo ufw allow 9108/tcp
 ```sh
 systemctl status mcp-agent
 journalctl -u mcp-agent -n 100 --no-pager
-curl -s http://127.0.0.1:9108/metrics   # {"cpu":..,"ram":..,"disk":..,"uptime_days":..,"version":2}
+curl -s http://127.0.0.1:9108/health    # {"status":"ok","version":4,...}
+curl -s http://127.0.0.1:9108/metrics   # {"cpu":..,"ram":..,"disk":..,"uptime_days":..,"version":4}
 curl -s http://127.0.0.1:9108/procstats # top processes + port table
 ```
+
+## Token auth (v4+, opt-in)
+
+```sh
+# server side — the app sends this value as X-MCP-Agent-Token
+echo 'MCP_AGENT_TOKEN=<long-random>' | sudo tee /etc/mcp-agent.env
+sudo chmod 600 /etc/mcp-agent.env && sudo systemctl restart mcp-agent
+
+# verify: 401 without the header, 200 with it
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:9108/health
+curl -s -H 'X-MCP-Agent-Token: <long-random>' http://127.0.0.1:9108/health
+```
+
+Unset/absent `/etc/mcp-agent.env` = open agent (v2/v3-compatible).
+
+One-click install (app) now provisions the token automatically: it mints a
+256-bit secret, deploys it as `/etc/mcp-agent.env` (mode 600) via the same
+SSH session, and stores the identical value in the OS keychain
+(`SecureStore`, key `agent_tok:<serverId>`) — polling sends it as
+`X-MCP-Agent-Token` on every metrics/procstats/health/logs call, and the
+install-verify step authenticates with it. Re-running install rotates the
+token on BOTH sides together. Manual/script installs: set the host side per
+the block above, then paste the same value into the app via Settings →
+server row → key icon (value hidden after save; CLEAR reverts that host to
+open polling). Deleting a server wipes its keychain token too.
 
 - Upgrade: re-run the script (or app install) — old binary is kept as
   `agent.py.bak.<UTC timestamp>`; rollback restores the newest backup.
 - Downgrade across agent versions: check `version` in `/metrics` matches
-  what the app expects (`AgentService.agentVersion`, currently 2).
+  what the app expects (`AgentService.agentVersion`, currently 4).
 - Log tail + alerting on top of the agent: `docs/runbooks/observability.md`.
 
 ## Note on `agent/mcp-agent.service` vs the app-embedded unit

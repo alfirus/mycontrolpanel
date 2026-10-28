@@ -12,6 +12,7 @@ import '../services/ai_service.dart';
 import '../services/github_service.dart';
 import '../services/gitlab_service.dart';
 import '../services/secure_store.dart';
+import '../services/ssh_host_keys.dart';
 import '../services/ssh_key_loader.dart';
 import '../services/update_service.dart';
 import '../widgets/pitch_card.dart';
@@ -174,6 +175,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _testConnection(ServerConnection s) async {
     showDialog(context: context, barrierDismissible: false, builder: (_) => const Center(child: CircularProgressIndicator(color: AppColors.accentCyan)));
     String? error;
+    String? hostKeyNote;
     try {
       List<SSHKeyPair>? keys;
       String? Function()? passwordCb;
@@ -191,16 +193,28 @@ class _SettingsScreenState extends State<SettingsScreen> {
       }
       if (error == null) {
         final socket = await SSHSocket.connect(s.host, s.port, timeout: const Duration(seconds: 10));
-        final client = SSHClient(socket, username: s.username, onPasswordRequest: passwordCb, identities: keys ?? const []);
+        HostKeyEvent? hostKeyEvent;
+        final client = SSHClient(socket, username: s.username, onPasswordRequest: passwordCb, onVerifyHostKey: SshHostKeys.verifierFor(s.host, s.port, onEvent: (e) => hostKeyEvent = e), identities: keys ?? const []);
         await client.authenticated.timeout(const Duration(seconds: 15));
         final session = await client.execute('echo OK');
         final out = await session.stdout.cast<List<int>>().transform(const Utf8Decoder()).join().timeout(const Duration(seconds: 10));
         final ok = session.exitCode == 0 && out.trim() == 'OK';
         client.close();
-        if (!ok) error = 'SSH ok but remote command failed (exit ${session.exitCode}).';
+        if (!ok) {
+          error = 'SSH ok but remote command failed (exit ${session.exitCode}).';
+        } else if (hostKeyEvent != null) {
+          // Surface the TOFU outcome: first connects pin, later ones verify.
+          final fp = hostKeyEvent!.fingerprint.isEmpty ? 'unreadable fingerprint' : hostKeyEvent!.fingerprint;
+          hostKeyNote = hostKeyEvent!.verdict == HostKeyVerdict.firstSeen
+              ? 'New host key pinned — verify out-of-band on first connect ($fp).'
+              : 'Host key verified ($fp).';
+        }
       }
     } catch (e) {
       error = e.toString().replaceFirst('Exception: ', '').split('\n').first;
+      if (error!.contains('Hostkey verification failed') || error!.contains('SSHHostkeyError')) {
+        error = 'Host key changed for ${s.host}:${s.port} — connection refused (possible MITM). If the host was reinstalled, open the server → FORGET the pinned key, verify the new fingerprint out-of-band, then retry.';
+      }
       if (error!.length > 160) error = '${error!.substring(0, 160)}…';
     }
     if (!mounted) return;
@@ -211,10 +225,59 @@ class _SettingsScreenState extends State<SettingsScreen> {
       content: Row(children: [
         Icon(success ? Icons.check_circle : Icons.error_outline, size: 14, color: success ? AppColors.success : AppColors.critical),
         const SizedBox(width: 8),
-        Expanded(child: Text(success ? 'SSH to ${s.host}:${s.port} ✓ (${s.authMethod.name})' : 'SSH failed: $error', style: TextStyle(color: success ? AppColors.success : AppColors.critical, fontSize: 12, fontWeight: FontWeight.w600))),
+        Expanded(child: Text(success ? 'SSH to ${s.host}:${s.port} ✓ (${s.authMethod.name})${hostKeyNote == null ? '' : '\n$hostKeyNote'}' : 'SSH failed: $error', style: TextStyle(color: success ? AppColors.success : AppColors.critical, fontSize: 12, fontWeight: FontWeight.w600))),
       ]),
       duration: Duration(seconds: success ? 3 : 6),
     ));
+  }
+
+  /// Per-host metrics-agent token (v4 gate): set/rotate/clear.
+  /// Stored ONLY in the OS keychain via SecureStore — never displayed back,
+  /// never in prefs JSON, never logged. One-click install provisions it
+  /// automatically; this dialog covers manual/scripted installs and rotation.
+  Future<void> _manageAgentToken(ServerConnection s) async {
+    final current = await SecureStore.readAgentToken(s.id);
+    if (!mounted) return;
+    final isSet = (current ?? '').isNotEmpty;
+    final ctrl = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.surface0,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: const BorderSide(color: AppColors.border)),
+        title: Text('AGENT TOKEN • ${s.name}', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w800, letterSpacing: 0.5, color: AppColors.textPrimary)),
+        content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(isSet ? 'Status: SET (value hidden) — enter a new value to rotate.' : 'Status: UNSET — polling is unauthenticated (open agent).', style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)),
+          const SizedBox(height: 8),
+          TextField(controller: ctrl, obscureText: true, style: const TextStyle(fontSize: 12, color: AppColors.textPrimary, fontFamily: AppFonts.mono), decoration: const InputDecoration(hintText: 'Paste token…', hintStyle: TextStyle(fontSize: 11, color: AppColors.textMuted), filled: true, fillColor: AppColors.surface1, border: OutlineInputBorder(borderRadius: BorderRadius.all(Radius.circular(8)), borderSide: BorderSide(color: AppColors.border)))),
+          const SizedBox(height: 6),
+          const Text('Must match MCP_AGENT_TOKEN on the host. Polling sends it as X-MCP-Agent-Token.', style: TextStyle(fontSize: 10, color: AppColors.textMuted)),
+        ]),
+        actions: [
+          if (isSet)
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('CLEAR', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: AppColors.critical))),
+          TextButton(onPressed: () => Navigator.pop(ctx, null), child: const Text('CANCEL', style: TextStyle(fontSize: 11, color: AppColors.textSecondary))),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), style: FilledButton.styleFrom(backgroundColor: AppColors.accentCyan, foregroundColor: Colors.black), child: const Text('SAVE', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800))),
+        ],
+      ),
+    );
+    final pastedValue = ctrl.text.trim();
+    ctrl.dispose();
+    if (!mounted) return;
+    if (ok == null) return; // cancelled
+    if (ok) {
+      final v = pastedValue;
+      if (v.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(backgroundColor: AppColors.surface1, content: Text('Empty value — token unchanged', style: TextStyle(fontSize: 12, color: AppColors.warning))));
+        return;
+      }
+      await SecureStore.writeAgentToken(s.id, v);
+    } else {
+      await SecureStore.writeAgentToken(s.id, '');
+    }
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(backgroundColor: AppColors.surface1, content: Text(ok ? 'Agent token saved (keychain) ✓' : 'Agent token cleared — polling unauthenticated', style: const TextStyle(fontSize: 12, color: AppColors.success))));
+    }
   }
 
   @override
@@ -369,6 +432,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
             Column(children: [
               Row(mainAxisSize: MainAxisSize.min, children: [
                 IconButton(icon: const Icon(Icons.bolt, size: 14, color: AppColors.accentCyan), tooltip: 'Test', onPressed: ()=> _testConnection(s), style: IconButton.styleFrom(backgroundColor: AppColors.accentCyan.withValues(alpha: 0.12), padding: const EdgeInsets.all(6), minimumSize: const Size(28,28))),
+                const SizedBox(width: 4),
+                IconButton(icon: const Icon(Icons.key_outlined, size: 14, color: AppColors.textSecondary), tooltip: 'Agent token', onPressed: ()=> _manageAgentToken(s), style: IconButton.styleFrom(backgroundColor: AppColors.surface2, padding: const EdgeInsets.all(6), minimumSize: const Size(28,28))),
                 const SizedBox(width: 4),
                 IconButton(icon: Icon(s.enabled ? Icons.visibility : Icons.visibility_off, size: 14, color: AppColors.textSecondary), tooltip: s.enabled ? 'Disable' : 'Enable', onPressed: () async { setState(()=> _servers[_servers.indexWhere((e)=>e.id==s.id)] = s.copyWith(enabled: !s.enabled)); await _saveServers(); }, style: IconButton.styleFrom(backgroundColor: AppColors.surface2, padding: const EdgeInsets.all(6), minimumSize: const Size(28,28))),
                 const SizedBox(width: 4),
@@ -1126,6 +1191,32 @@ class _ServerDialogState extends State<_ServerDialog> {
     _region = e?.region ?? 'us-east-1';
     _os = e?.os ?? 'Ubuntu 24.04';
     _cred.addListener(() => setState(() {})); // refresh key fingerprint line
+    if (e != null) {
+      _pinnedFor = '${e.host}:${e.port}';
+      _loadPinned(e.host, e.port);
+    }
+  }
+
+  String? _pinned;
+  String _pinnedFor = '';
+
+  /// Pinned SSH host key(s) for this server (TOFU pins, non-secret).
+  Future<void> _loadPinned(String host, int port) async {
+    final s = await SshHostKeys.summary(host, port);
+    if (!mounted) return;
+    setState(() => _pinned = s.isEmpty ? null : s);
+  }
+
+  /// Clear pins after a legitimate host reinstall / key rotation.
+  /// Next connect re-pins — verify the new fingerprint out-of-band first.
+  Future<void> _forgetPinned() async {
+    final e = widget.existing;
+    if (e == null) return;
+    await SshHostKeys.forget(e.host, e.port);
+    await _loadPinned(e.host, e.port);
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(backgroundColor: AppColors.surface1, content: Text('Pinned host key forgotten — next connect re-pins (verify it out-of-band)', style: TextStyle(fontSize: 12, color: AppColors.warning))));
+    }
   }
 
   /// Non-secret summary of what's in the credential field (never key material).
@@ -1233,6 +1324,19 @@ class _ServerDialogState extends State<_ServerDialog> {
                     const Icon(Icons.fingerprint, size: 13, color: AppColors.accentCyan),
                     const SizedBox(width: 6),
                     Expanded(child: Text(_keyFingerprint(), style: const TextStyle(fontSize: 10, color: AppColors.textSecondary, fontFamily: AppFonts.mono))),
+                  ]),
+                ),
+              if (isEdit)
+                Container(
+                  margin: const EdgeInsets.only(top: 6),
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                  decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(6), border: Border.all(color: AppColors.border)),
+                  child: Row(children: [
+                    const Icon(Icons.verified_user_outlined, size: 13, color: AppColors.accentCyan),
+                    const SizedBox(width: 6),
+                    Expanded(child: Text(_pinned == null ? 'No host key pinned for $_pinnedFor yet — first connect pins it (verify out-of-band).' : 'Pinned host key ($_pinnedFor): $_pinned', style: const TextStyle(fontSize: 10, color: AppColors.textSecondary, fontFamily: AppFonts.mono))),
+                    if (_pinned != null)
+                      TextButton(onPressed: _forgetPinned, child: const Text('FORGET', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800))),
                   ]),
                 ),
               const SizedBox(height: 10),
