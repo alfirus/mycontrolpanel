@@ -43,12 +43,15 @@ Mock secrets are deliberately strict: the default mock secret store
 | `AgentService().fetchAlerts` | `Services.current.alerts.fetchAlerts` | Alya |
 | `SshKeyLoader.load` | `Services.current.keys.load` | Alya |
 | `SecureStore.*` statics | `Services.current.secrets.*` | Lina (done: adapter) |
+| `GithubService(token)` direct construction | `Services.current.github` | Lisa (done: `GithubRepo`) |
 
 Notes:
 
-- `GithubService` / `GitlabService` stay concrete until the GitHub API +
-  Actions timeline work lands; they get `GithubRepo`-style contracts then
-  (tracked in `docs/quality-gates.md`, squad split).
+- `GithubService` implements `GithubRepo` (issues/PRs/Actions proxy,
+  live via `LiveGithubRepo`, fakes via `MockGithubRepository`); call
+  sites migrate to `Services.current.github`. `GitlabService` stays
+  concrete until its MR/pipeline contract work lands (tracked in
+  `docs/quality-gates.md`, squad split).
 - Legacy `AgentService.fetch`/`fetchAppStats` keep their null-on-error
   shape; only the new `pollMetrics`/`pollProcStats` paths throw typed
   errors. Call sites migrate one screen at a time.
