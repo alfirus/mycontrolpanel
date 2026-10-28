@@ -40,6 +40,11 @@ changes required. Sources are allowlisted and read-only:
 | `syslog` | `tail` of syslog/messages, else journal | `sudo -n` first, plain second |
 | `docker` | `docker logs --tail=<n> <name>` | container name sanitized |
 
+No SSH session? The v4 agent serves the same tail over HTTP
+(`GET :9108/logs?source=journal&lines=100`, token-gated when the host
+enforces auth): `AgentService.fetchAgentLogs` + `LogTailService.parse`
+for one-shots, `LogTailService.watchAgent` for a change-only stream.
+
 Parsing (`LogTailService.parse`) never throws: level is guessed
 (ERROR/WARN/DEBUG/INFO) and over-long lines truncate at 300 chars.
 
@@ -51,6 +56,23 @@ Parsing (`LogTailService.parse`) never throws: level is guessed
   `MetricsHistory.formatMs`. p95 > 1000 ms sustained across 3 polls =
   investigate (host overloaded or link degraded), not page.
 - Targets are starting points, not SLAs: tune per host after a week of data.
+
+## Agent-output alert evaluation (for the polling job)
+
+`lib/services/alert_rules.dart` maps one `HostSignals` snapshot to
+`AlertEntry` hooks — same threshold table as the SSH collectors in
+`AgentService.fetchAlerts` (disk 80/90%, failed units, brute-force
+5/20, load vs nproc, kernel/OOM, reboot < 1h), but evaluated over data
+already harvested from the agent's HTTP endpoints. Pure Dart, no SSH,
+no plugins — feed it once per poll tick per host:
+
+- `/metrics` → disk ratio (per-mount detail still needs the SSH `df`
+  collector until the agent exposes mounts; pass what you have).
+- `/sysstats` (v4+) → `load1` + `nproc`, `boot_epoch_s` → uptime.
+- SSH collectors → `failedUnits`, `failedLogins24h`, `kernelLines`.
+
+Unknown signals stay at their defaults and skip their rule — a partial
+snapshot never fires spuriously.
 
 ## When paged (any critical)
 
