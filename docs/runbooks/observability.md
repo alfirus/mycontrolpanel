@@ -52,6 +52,23 @@ Parsing (`LogTailService.parse`) never throws: level is guessed
   investigate (host overloaded or link degraded), not page.
 - Targets are starting points, not SLAs: tune per host after a week of data.
 
+## Agent-output alert evaluation (for the polling job)
+
+`lib/services/alert_rules.dart` maps one `HostSignals` snapshot to
+`AlertEntry` hooks — same threshold table as the SSH collectors in
+`AgentService.fetchAlerts` (disk 80/90%, failed units, brute-force
+5/20, load vs nproc, kernel/OOM, reboot < 1h), but evaluated over data
+already harvested from the agent's HTTP endpoints. Pure Dart, no SSH,
+no plugins — feed it once per poll tick per host:
+
+- `/metrics` → disk ratio (per-mount detail still needs the SSH `df`
+  collector until the agent exposes mounts; pass what you have).
+- `/sysstats` (v4+) → `load1` + `nproc`, `boot_epoch_s` → uptime.
+- SSH collectors → `failedUnits`, `failedLogins24h`, `kernelLines`.
+
+Unknown signals stay at their defaults and skip their rule — a partial
+snapshot never fires spuriously.
+
 ## When paged (any critical)
 
 1. `curl -s http://<host>:9108/metrics` — agent alive?
