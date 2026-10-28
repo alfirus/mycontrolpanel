@@ -34,6 +34,7 @@ import '../services/metrics_history.dart';
 import '../services/alert_watch.dart';
 import '../services/alert_notifications.dart';
 import '../services/deployments_service.dart';
+import '../services/cron_run_tracker.dart';
 import '../services/alert_notifications.dart';
 import 'server_details_screen.dart';
 import '../widgets/pitch_card.dart';
@@ -86,6 +87,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
   Set<String> _installing = {};
   Set<String> _checking = {};
   Map<String, List<CronEntry>> _serverCrons = {}; // server id -> discovered crons
+  Map<String, List<CronRunRecord>> _cronRuns = {}; // server id -> last runs (agent :9108 + cache)
   Set<String> _cronLoading = {};
   String? _cronError;
   Map<String, List<AppEntry>> _serverApps = {}; // server id -> discovered apps
@@ -464,6 +466,14 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     for (final c in _savedServers) {
       if (_cronLoading.contains(c.id) || _serverCrons.containsKey(c.id)) continue;
       setState(() => _cronLoading.add(c.id));
+      // Show the last-good cached runs immediately (offline-friendly),
+      // then refresh from the agent when reachable.
+      try {
+        final cached = await CronRunStore.read(c.host);
+        if (mounted && cached.isNotEmpty && !_cronRuns.containsKey(c.id)) {
+          setState(() => _cronRuns[c.id] = cached);
+        }
+      } catch (_) {}
       try {
         final entries = await _agent.fetchCrons(c);
         if (!mounted) return;
@@ -471,6 +481,14 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
           _serverCrons[c.id] = entries;
           _cronLoading.remove(c.id);
         });
+        // Best-effort: agent-side run log (v5+). Older agents answer 404 —
+        // the cache above stands and the next rescan retries.
+        try {
+          final runs = await _agent.fetchCronRuns(c.host, serverId: c.id);
+          await CronRunStore.save(c.host, runs);
+          if (!mounted) return;
+          setState(() => _cronRuns[c.id] = runs);
+        } catch (_) {}
       } catch (e) {
         if (!mounted) return;
         setState(() {
@@ -2363,7 +2381,32 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
                             const SizedBox(width: 6),
                             Text(e.source, style: const TextStyle(fontSize: 9, color: AppColors.textMuted, fontFamily: AppFonts.mono)),
                             const SizedBox(width: 6),
-                            const Pill(text: 'SCHEDULED', color: AppColors.success),
+                            Builder(builder: (_) {
+                              final run = CronRunTracker.matchRecord(
+                                  _cronRuns[e.serverId] ?? const [], e);
+                              final st = run?.status ?? CronRunStatus.unknown;
+                              final pill = st == CronRunStatus.ok
+                                  ? 'OK'
+                                  : st == CronRunStatus.error
+                                      ? 'FAILED'
+                                      : 'SCHEDULED';
+                              final color = st == CronRunStatus.ok
+                                  ? AppColors.success
+                                  : st == CronRunStatus.error
+                                      ? AppColors.critical
+                                      : AppColors.textMuted;
+                              final last = run?.ranAt == null
+                                  ? ''
+                                  : ' • last ${timeAgo(run!.ranAt!)} • ${CronRunRecord.formatDur(run.durSecs)}';
+                              return Row(mainAxisSize: MainAxisSize.min, children: [
+                                Pill(text: pill, color: color),
+                                if (last.isNotEmpty)
+                                  Padding(
+                                    padding: const EdgeInsets.only(left: 6),
+                                    child: Text(last, style: const TextStyle(fontSize: 9, color: AppColors.textMuted, fontFamily: AppFonts.mono)),
+                                  ),
+                              ]);
+                            }),
                           ]),
                         ),
                       ]),

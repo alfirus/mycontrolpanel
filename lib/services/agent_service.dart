@@ -9,6 +9,7 @@ import '../models/app_proc.dart';
 import '../models/cron_entry.dart';
 import '../models/server_connection.dart';
 import 'agent_protocol.dart';
+import 'cron_run_tracker.dart';
 import 'secure_store.dart';
 import 'ssh_host_keys.dart';
 import 'ssh_key_loader.dart';
@@ -24,14 +25,16 @@ class AgentInstallResult {
 class AgentService {
   static const int agentPort = 9108;
 
-  /// Agent v4: stdlib-only Python.
-  /// /metrics -> {"cpu","ram","disk","uptime_days","version":4,"load1":...}
-  /// /procstats -> {"version":4,"top":[{"pid","name","cpu","mem_mb"}], "ports":{"3000":{"listening":true,"established":2}}}
-  /// /sysstats (v3+) -> {"version":4,"load1","load5","load15",
+  /// Agent v5: stdlib-only Python.
+  /// /metrics -> {"cpu","ram","disk","uptime_days","version":5,"load1":...}
+  /// /procstats -> {"version":5,"top":[{"pid","name","cpu","mem_mb"}], "ports":{"3000":{"listening":true,"established":2}}}
+  /// /sysstats (v3+) -> {"version":5,"load1","load5","load15",
   ///   "mem":{"total_mb","avail_mb","swap_total_mb","swap_free_mb"},
   ///   "gpu":{"present","count"},"agent_uptime_s":...,
   ///   "nproc":...,"boot_epoch_s":...}
-  /// /health (v4+) -> {"status":"ok","version":4,"agent_uptime_s":...}
+  /// /health (v4+) -> {"status":"ok","version":5,"agent_uptime_s":...}
+  /// /cronruns (v5+) -> {"version":5,"runs":[{"at","name","exit","dur_s"}]}
+  ///   (agent-side run log; missing log file = empty list)
   /// Token auth (v4+): when MCP_AGENT_TOKEN is set (via /etc/mcp-agent.env),
   /// every endpoint requires `X-MCP-Agent-Token`; mismatch -> 401 JSON.
   /// Unset = open (backwards compatible with v2/v3 clients).
@@ -39,9 +42,12 @@ class AgentService {
   /// Sysstats adds load average, memory detail, GPU presence, agent uptime,
   /// CPU count and boot epoch for capacity planning (e.g. sizing on-host
   /// model serving) and reboot detection without an SSH round-trip.
+  /// Cronruns (v5+) surfaces the agent-side cron run log for Zara's
+  /// last-run tracker; older agents answer 404 and the app falls back to
+  /// its local cache.
   /// Inference stats themselves live app-side in LlmReliability and are
   /// correlated by host — the agent never fabricates inference counters.
-  static const int agentVersion = 4;
+  static const int agentVersion = 5;
   static const String agentScript = r'''
 import json, os, time
 import hmac
@@ -49,7 +55,7 @@ import subprocess
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlsplit, parse_qs
 
-AGENT_VERSION = 4
+AGENT_VERSION = 5
 START_TIME = time.time()
 # Optional shared secret. Set via EnvironmentFile /etc/mcp-agent.env
 # (MCP_AGENT_TOKEN=...). Empty = open (v2/v3-compatible).
@@ -58,6 +64,10 @@ TOKEN_HEADER = 'X-MCP-Agent-Token'
 # /logs sources. journald first, plain syslog files as fallback —
 # never arbitrary paths, never shell.
 ALLOWED_LOG_SOURCES = ('journal', 'syslog')
+# Cron run log (v5+): jobs append one line per run, e.g.
+#   echo "$(date +%s) backup 0 12" >> /var/log/mcp-cronruns.log
+# fields: <epoch_s> <name> <exit> [dur_s]. Missing file = no data (200 []).
+CRONRUNS_LOG = '/var/log/mcp-cronruns.log'
 
 def read_cpu():
     try:
@@ -178,6 +188,36 @@ def read_logs(source='journal', lines=100):
                 continue
     rows = [r for r in rows if r.strip() != '']
     return rows[-n:]
+
+def read_cronruns(limit=50):
+    try:
+        n = max(1, min(200, int(limit)))
+    except Exception:
+        n = 50
+    try:
+        with open(CRONRUNS_LOG, errors='replace') as f:
+            content = f.read()
+    except Exception:
+        return []
+    if not content.strip():
+        return []
+    lines = content.strip().split('\n')[-n:]
+    out = []
+    for line in lines:
+        p = line.split()
+        if len(p) < 3:
+            continue
+        try:
+            at, code = int(p[0]), int(p[2])
+        except ValueError:
+            continue
+        dur = None
+        if len(p) > 3 and p[3].isdigit():
+            dur = int(p[3])
+        out.append({'at': at, 'name': p[1][:80], 'exit': code,
+                    'dur_s': dur})
+    out.reverse()
+    return out
 
 def _proc_snapshot():
     procs = {}
@@ -306,6 +346,12 @@ class H(BaseHTTPRequestHandler):
                 n = 100
             body = {'version': AGENT_VERSION, 'source': src,
                     'lines': read_logs(src, n)}
+        elif path == '/cronruns':
+            try:
+                n = int(qs.get('lines', ['50'])[0])
+            except Exception:
+                n = 50
+            body = {'version': AGENT_VERSION, 'runs': read_cronruns(n)}
         else:
             self._send(404, {'error': 'not_found', 'path': path})
             return
@@ -997,6 +1043,52 @@ WantedBy=multi-user.target
     } on TimeoutException {
       throw const AgentProtocolException(
           AgentErrorCode.timeout, '/logs read timed out');
+    }
+  }
+
+  /// GET http://host:9108/cronruns?lines= -> newest-first run rows (agent
+  /// v5+ only). Missing log file = empty list. Throws typed
+  /// [AgentProtocolException] (never null): `unauthorized` on token
+  /// mismatch, `badPayload` on a schema violation, `staleAgent` below the
+  /// version floor. Pre-v5 agents answer 404 -> `badPayload`; callers that
+  /// tolerate old agents should catch and fall back to [CronRunStore].
+  Future<List<CronRunRecord>> fetchCronRuns(String host,
+      {int lines = 50,
+      String? agentToken,
+      String? serverId}) async {
+    final n = lines.clamp(1, 200);
+    agentToken = await _resolveAgentToken(agentToken, serverId);
+    try {
+      final hc = HttpClient()..connectionTimeout = const Duration(seconds: 5);
+      final req =
+          await hc.get(host, agentPort, '$kCronRunsPath?lines=$n');
+      _applyAgentToken(req, agentToken);
+      final resp = await req.close().timeout(const Duration(seconds: 8));
+      final body = await resp.transform(utf8.decoder).join();
+      hc.close();
+      if (resp.statusCode != 200) {
+        throw agentHttpError(resp.statusCode, kCronRunsPath);
+      }
+      final map = decodeAgentBody(body, kCronRunsPath);
+      final version = map['version'];
+      if (version is! num || version.toInt() < kMinAgentVersion) {
+        throw const AgentProtocolException(AgentErrorCode.staleAgent,
+            '"/cronruns" version missing or stale');
+      }
+      final raw = map['runs'];
+      if (raw is! List) {
+        throw const AgentProtocolException(AgentErrorCode.badPayload,
+            '"/cronruns.runs" missing or not a list');
+      }
+      return CronRunTracker.parseAgentRuns(raw);
+    } on AgentProtocolException {
+      rethrow;
+    } on SocketException catch (e) {
+      throw AgentProtocolException(
+          AgentErrorCode.unreachable, '$kCronRunsPath unreachable: $e');
+    } on TimeoutException {
+      throw const AgentProtocolException(
+          AgentErrorCode.timeout, '"$kCronRunsPath" read timed out');
     }
   }
 
