@@ -1,0 +1,154 @@
+name: build-matrix
+
+# PR-time multi-platform smoke builds for main.
+#
+# Complements the existing gates without duplicating them:
+#   ci.yml       owns `flutter test`            (required check)
+#   security.yml owns analyze / osv-scan / gitleaks (required checks)
+#   release.yml  owns tag-gated desktop builds + GitHub Release publish
+#
+# This workflow proves every PR still COMPILES on each shipping platform.
+# It publishes no releases and performs no code signing: signing needs
+# owner-held certificates (see docs/release-process.md) and stays a manual,
+# tag-gated step. No step in this workflow uses sudo.
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Least privilege: builds upload artifacts, nothing is published.
+permissions:
+  contents: read
+
+concurrency:
+  group: build-matrix-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: analyze + test (ubuntu)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Setup Flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+      - name: Install dependencies
+        run: flutter pub get
+      - name: Static analysis
+        run: flutter analyze --no-fatal-infos --no-fatal-warnings
+      - name: Tests
+        run: flutter test
+      - name: Record pubspec version
+        shell: bash
+        run: grep '^version:' pubspec.yaml
+
+  windows:
+    name: build windows
+    needs: gate
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Setup Flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+      - name: Install dependencies
+        run: flutter pub get
+      - name: Build Windows release (unsigned smoke build)
+        run: flutter build windows --release
+      - name: Upload Windows bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-windows-bundle
+          path: build/windows/x64/runner/Release/
+          retention-days: 7
+
+  macos:
+    name: build macos
+    needs: gate
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Setup Flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+      - name: Install dependencies
+        run: flutter pub get
+      - name: Build macOS release (unsigned, no notarization)
+        run: flutter build macos --release
+      - name: Upload macOS bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-macos-bundle
+          path: build/macos/Build/Products/Release/
+          retention-days: 7
+
+  android:
+    name: build android apk
+    needs: gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Setup Java (runner-provided, no sudo)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Setup Flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+      - name: Install dependencies
+        run: flutter pub get
+      - name: Build Android APK (debug-signed smoke build)
+        run: flutter build apk --release
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-android-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
+          retention-days: 7
+
+  ios:
+    name: build ios (no codesign)
+    needs: gate
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Setup Flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+      - name: Install dependencies
+        run: flutter pub get
+      - name: Build iOS release without codesigning
+        run: flutter build ios --release --no-codesign
