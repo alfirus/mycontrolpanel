@@ -102,8 +102,9 @@ Cronjobs (each capped at 10 with a **View All** full-list screen), and Actions
 3. **Everything populates** — metrics, crons, apps, alerts stream in over SSH;
    rescan manually or by switching tabs.
 
-> Credentials are stored locally via `SharedPreferences`.
-> Private keys imported via picker are stored as content, never as paths.
+> Server credentials, API tokens, and AI keys live in the OS keychain/keystore
+> (`flutter_secure_storage`, migrated automatically from older installs).
+> SSH private keys imported via picker are stored as content, never as paths.
 
 ## Getting started
 
@@ -205,12 +206,18 @@ lib/
 
 Feedback and PRs welcome — especially homelab/self-hosted setups.
 
+## Positioning
+
+MyControlPanel is **free and open source (MIT)** for homelab and self-hosted
+use — public repo, unlimited servers, no paywall, no telemetry, no account.
+It is sustained by voluntary donations
+([Buy Me a Coffee](https://www.buymeacoffee.com/alfirus)).
+
 ## Pricing
 
 **Community (MIT) is the only edition today** — free, unlimited servers,
 public repo. Pro and MSP bundles are *proposed* post-traction concepts with
-no prices and no sale dates; quoting them is off-limits until Sofia + Finance
-sign the license call (PR #28). Full tier framing: [docs/packaging.md](docs/packaging.md).
+no prices and no sale dates yet. Full tier framing: [docs/packaging.md](docs/packaging.md).
 
 ## License
 
