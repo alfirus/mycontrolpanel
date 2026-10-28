@@ -12,6 +12,7 @@ import '../services/ai_service.dart';
 import '../services/github_service.dart';
 import '../services/gitlab_service.dart';
 import '../services/secure_store.dart';
+import '../services/ssh_host_keys.dart';
 import '../services/ssh_key_loader.dart';
 import '../services/update_service.dart';
 import '../widgets/pitch_card.dart';
@@ -174,6 +175,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _testConnection(ServerConnection s) async {
     showDialog(context: context, barrierDismissible: false, builder: (_) => const Center(child: CircularProgressIndicator(color: AppColors.accentCyan)));
     String? error;
+    String? hostKeyNote;
     try {
       List<SSHKeyPair>? keys;
       String? Function()? passwordCb;
@@ -191,16 +193,28 @@ class _SettingsScreenState extends State<SettingsScreen> {
       }
       if (error == null) {
         final socket = await SSHSocket.connect(s.host, s.port, timeout: const Duration(seconds: 10));
-        final client = SSHClient(socket, username: s.username, onPasswordRequest: passwordCb, identities: keys ?? const []);
+        HostKeyEvent? hostKeyEvent;
+        final client = SSHClient(socket, username: s.username, onPasswordRequest: passwordCb, onVerifyHostKey: SshHostKeys.verifierFor(s.host, s.port, onEvent: (e) => hostKeyEvent = e), identities: keys ?? const []);
         await client.authenticated.timeout(const Duration(seconds: 15));
         final session = await client.execute('echo OK');
         final out = await session.stdout.cast<List<int>>().transform(const Utf8Decoder()).join().timeout(const Duration(seconds: 10));
         final ok = session.exitCode == 0 && out.trim() == 'OK';
         client.close();
-        if (!ok) error = 'SSH ok but remote command failed (exit ${session.exitCode}).';
+        if (!ok) {
+          error = 'SSH ok but remote command failed (exit ${session.exitCode}).';
+        } else if (hostKeyEvent != null) {
+          // Surface the TOFU outcome: first connects pin, later ones verify.
+          final fp = hostKeyEvent!.fingerprint.isEmpty ? 'unreadable fingerprint' : hostKeyEvent!.fingerprint;
+          hostKeyNote = hostKeyEvent!.verdict == HostKeyVerdict.firstSeen
+              ? 'New host key pinned — verify out-of-band on first connect ($fp).'
+              : 'Host key verified ($fp).';
+        }
       }
     } catch (e) {
       error = e.toString().replaceFirst('Exception: ', '').split('\n').first;
+      if (error!.contains('Hostkey verification failed') || error!.contains('SSHHostkeyError')) {
+        error = 'Host key changed for ${s.host}:${s.port} — connection refused (possible MITM). If the host was reinstalled, open the server → FORGET the pinned key, verify the new fingerprint out-of-band, then retry.';
+      }
       if (error!.length > 160) error = '${error!.substring(0, 160)}…';
     }
     if (!mounted) return;
@@ -211,7 +225,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       content: Row(children: [
         Icon(success ? Icons.check_circle : Icons.error_outline, size: 14, color: success ? AppColors.success : AppColors.critical),
         const SizedBox(width: 8),
-        Expanded(child: Text(success ? 'SSH to ${s.host}:${s.port} ✓ (${s.authMethod.name})' : 'SSH failed: $error', style: TextStyle(color: success ? AppColors.success : AppColors.critical, fontSize: 12, fontWeight: FontWeight.w600))),
+        Expanded(child: Text(success ? 'SSH to ${s.host}:${s.port} ✓ (${s.authMethod.name})${hostKeyNote == null ? '' : '\n$hostKeyNote'}' : 'SSH failed: $error', style: TextStyle(color: success ? AppColors.success : AppColors.critical, fontSize: 12, fontWeight: FontWeight.w600))),
       ]),
       duration: Duration(seconds: success ? 3 : 6),
     ));
@@ -1126,6 +1140,32 @@ class _ServerDialogState extends State<_ServerDialog> {
     _region = e?.region ?? 'us-east-1';
     _os = e?.os ?? 'Ubuntu 24.04';
     _cred.addListener(() => setState(() {})); // refresh key fingerprint line
+    if (e != null) {
+      _pinnedFor = '${e.host}:${e.port}';
+      _loadPinned(e.host, e.port);
+    }
+  }
+
+  String? _pinned;
+  String _pinnedFor = '';
+
+  /// Pinned SSH host key(s) for this server (TOFU pins, non-secret).
+  Future<void> _loadPinned(String host, int port) async {
+    final s = await SshHostKeys.summary(host, port);
+    if (!mounted) return;
+    setState(() => _pinned = s.isEmpty ? null : s);
+  }
+
+  /// Clear pins after a legitimate host reinstall / key rotation.
+  /// Next connect re-pins — verify the new fingerprint out-of-band first.
+  Future<void> _forgetPinned() async {
+    final e = widget.existing;
+    if (e == null) return;
+    await SshHostKeys.forget(e.host, e.port);
+    await _loadPinned(e.host, e.port);
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(backgroundColor: AppColors.surface1, content: Text('Pinned host key forgotten — next connect re-pins (verify it out-of-band)', style: TextStyle(fontSize: 12, color: AppColors.warning))));
+    }
   }
 
   /// Non-secret summary of what's in the credential field (never key material).
@@ -1233,6 +1273,19 @@ class _ServerDialogState extends State<_ServerDialog> {
                     const Icon(Icons.fingerprint, size: 13, color: AppColors.accentCyan),
                     const SizedBox(width: 6),
                     Expanded(child: Text(_keyFingerprint(), style: const TextStyle(fontSize: 10, color: AppColors.textSecondary, fontFamily: AppFonts.mono))),
+                  ]),
+                ),
+              if (isEdit)
+                Container(
+                  margin: const EdgeInsets.only(top: 6),
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                  decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(6), border: Border.all(color: AppColors.border)),
+                  child: Row(children: [
+                    const Icon(Icons.verified_user_outlined, size: 13, color: AppColors.accentCyan),
+                    const SizedBox(width: 6),
+                    Expanded(child: Text(_pinned == null ? 'No host key pinned for $_pinnedFor yet — first connect pins it (verify out-of-band).' : 'Pinned host key ($_pinnedFor): $_pinned', style: const TextStyle(fontSize: 10, color: AppColors.textSecondary, fontFamily: AppFonts.mono))),
+                    if (_pinned != null)
+                      TextButton(onPressed: _forgetPinned, child: const Text('FORGET', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800))),
                   ]),
                 ),
               const SizedBox(height: 10),
