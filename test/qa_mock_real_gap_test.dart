@@ -75,9 +75,9 @@ void main() {
     });
 
     test('small series: ceil behavior', () {
-      // n=20 → ceil(19.0)-1 = 18 → max value
+      // n=20 → ceil(20*0.95)=ceil(19.0)=19 → idx 18 → value 19.0
       final values = List.generate(20, (i) => (i + 1).toDouble());
-      expect(MetricsHistory.p95(values), 20.0);
+      expect(MetricsHistory.p95(values), 19.0);
     });
   });
 
