@@ -71,6 +71,17 @@ curl -s -H 'X-MCP-Agent-Token: <long-random>' http://127.0.0.1:9108/health
 
 Unset/absent `/etc/mcp-agent.env` = open agent (v2/v3-compatible).
 
+One-click install (app) now provisions the token automatically: it mints a
+256-bit secret, deploys it as `/etc/mcp-agent.env` (mode 600) via the same
+SSH session, and stores the identical value in the OS keychain
+(`SecureStore`, key `agent_tok:<serverId>`) — polling sends it as
+`X-MCP-Agent-Token` on every metrics/procstats/health/logs call, and the
+install-verify step authenticates with it. Re-running install rotates the
+token on BOTH sides together. Manual/script installs: set the host side per
+the block above, then paste the same value into the app via Settings →
+server row → key icon (value hidden after save; CLEAR reverts that host to
+open polling). Deleting a server wipes its keychain token too.
+
 - Upgrade: re-run the script (or app install) — old binary is kept as
   `agent.py.bak.<UTC timestamp>`; rollback restores the newest backup.
 - Downgrade across agent versions: check `version` in `/metrics` matches
