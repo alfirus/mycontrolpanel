@@ -47,11 +47,14 @@ class SecretHygiene {
   }
 
   /// Copy of [entry] with sensitive values replaced by `••••••`.
+  /// A key is sensitive when its lowercase form contains any [sensitiveKeys]
+  /// fragment (so `github_token`, `access_token`, … are masked too).
   /// Non-string values pass through; unknown keys pass through.
   static Map<String, dynamic> redactForLog(Map<String, dynamic> entry) {
     final out = Map<String, dynamic>.of(entry);
     for (final key in out.keys.toList()) {
-      if (sensitiveKeys.contains(key.toLowerCase())) {
+      final lower = key.toLowerCase();
+      if (sensitiveKeys.any(lower.contains)) {
         out[key] = '••••••';
       }
     }
