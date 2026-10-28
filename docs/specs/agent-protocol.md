@@ -86,6 +86,34 @@ checks without SSH) and `boot_epoch_s` (unix epoch of last boot, for
 reboot detection from Zara's polling job). Older validators ignore
 unknown keys.
 
+### GET /cronruns → 200 application/json (agent v5+)
+
+Agent-side cron run log for the last-run tracker. Jobs opt in by
+appending one line per run:
+
+```sh
+echo "$(date +%s) backup 0 12" >> /var/log/mcp-cronruns.log
+# fields: <epoch_s> <name> <exit> [dur_s]
+```
+
+```json
+{"version": 5, "runs": [{"at": 1793085600, "name": "backup", "exit": 0, "dur_s": 12}]}
+```
+
+| field | type | rule |
+|---|---|---|
+| `runs` | array ≤ 200 | newest first; garbage lines skipped server-side |
+| `runs[].at` | int | unix epoch **seconds** of the run |
+| `runs[].name` | string ≤ 80 | program name (matched client-side to the cron's program) |
+| `runs[].exit` | int | process exit code (`0` = ok) |
+| `runs[].dur_s` | int? | duration in seconds; absent when the job does not report it |
+| query | `?lines=` | rows returned, clamped 1..200, defaults 50 |
+
+Missing/empty log file → `200` with `"runs": []` (never an error, so
+older setups without the logging convention simply show no history).
+Pre-v5 agents answer **404** → the app falls back to its last-good cache.
+Token-gated like every other endpoint when `MCP_AGENT_TOKEN` is set.
+
 ## 3. Version negotiation
 
 - App implements protocol v1 (`kAgentProtocolVersion = 1`).
