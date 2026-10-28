@@ -952,6 +952,27 @@ WantedBy=multi-user.target
     }
   }
 
+  /// GET http://host:9108/sysstats -> decoded map or null (agent v3+ only).
+  /// Null covers unreachable/timeout/non-200 — pair with [fetchHealth]
+  /// when the caller must distinguish "agent down" from "stale agent".
+  /// Token resolution matches [fetch]: explicit value or keychain [serverId].
+  Future<Map<String, dynamic>?> fetchSysstats(String host,
+      {String? agentToken, String? serverId}) async {
+    try {
+      agentToken = await _resolveAgentToken(agentToken, serverId);
+      final hc = HttpClient()..connectionTimeout = const Duration(seconds: 5);
+      final req = await hc.get(host, agentPort, kSysstatsPath);
+      _applyAgentToken(req, agentToken);
+      final resp = await req.close().timeout(const Duration(seconds: 8));
+      if (resp.statusCode != 200) return null;
+      final body = await resp.transform(utf8.decoder).join();
+      hc.close();
+      return jsonDecode(body) as Map<String, dynamic>;
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// GET http://host:9108/logs?source=&lines= -> raw log lines (agent v4+).
   ///
   /// Throws typed [AgentProtocolException] (never null): `unauthorized`
