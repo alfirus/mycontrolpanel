@@ -101,9 +101,58 @@ void main() {
           agentHttpError(404, '/nope').code, AgentErrorCode.badPayload);
     });
 
+    test('405 maps to badPayload with GET hint', () {
+      final e = agentHttpError(405, '/metrics');
+      expect(e.code, AgentErrorCode.badPayload);
+      expect(e.detail.contains('GET'), isTrue);
+    });
+
     test('500 maps to badPayload', () {
       expect(agentHttpError(500, '/metrics').code,
           AgentErrorCode.badPayload);
+    });
+  });
+
+  group('parseAgentHealth', () {
+    test('accepts a valid v4 payload', () {
+      final h = parseAgentHealth(
+          {'status': 'ok', 'version': 4, 'agent_uptime_s': 3600});
+      expect(h.agentVersion, 4);
+      expect(h.agentUptimeS, 3600);
+    });
+
+    test('missing status is badPayload', () {
+      expect(
+        () => parseAgentHealth({'version': 4, 'agent_uptime_s': 1}),
+        throwsA(isA<AgentProtocolException>().having(
+            (e) => e.code, 'code', AgentErrorCode.badPayload)),
+      );
+    });
+
+    test('non-ok status is badPayload', () {
+      expect(
+        () => parseAgentHealth(
+            {'status': 'degraded', 'version': 4, 'agent_uptime_s': 1}),
+        throwsA(isA<AgentProtocolException>().having(
+            (e) => e.code, 'code', AgentErrorCode.badPayload)),
+      );
+    });
+
+    test('missing version is staleAgent', () {
+      expect(
+        () => parseAgentHealth({'status': 'ok', 'agent_uptime_s': 1}),
+        throwsA(isA<AgentProtocolException>().having(
+            (e) => e.code, 'code', AgentErrorCode.staleAgent)),
+      );
+    });
+
+    test('negative uptime is badPayload', () {
+      expect(
+        () => parseAgentHealth(
+            {'status': 'ok', 'version': 4, 'agent_uptime_s': -1}),
+        throwsA(isA<AgentProtocolException>().having(
+            (e) => e.code, 'code', AgentErrorCode.badPayload)),
+      );
     });
   });
 
