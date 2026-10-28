@@ -283,9 +283,9 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
         if (!mounted) return;
         if (m != null) {
           setState(() => _metrics[c.id] = m);
-          final cpu = ((m['cpu'] as num?) ?? 0).toDouble().clamp(0, 1);
-          final ram = ((m['ram'] as num?) ?? 0).toDouble().clamp(0, 1);
-          final disk = ((m['disk'] as num?) ?? 0).toDouble().clamp(0, 1);
+          final cpu = (((m['cpu'] as num?) ?? 0).toDouble()).clamp(0.0, 1.0).toDouble();
+          final ram = (((m['ram'] as num?) ?? 0).toDouble()).clamp(0.0, 1.0).toDouble();
+          final disk = (((m['disk'] as num?) ?? 0).toDouble()).clamp(0.0, 1.0).toDouble();
           unawaited(MetricsHistory.record(c.host, cpu, ram, disk, sw.elapsedMilliseconds.toDouble()));
           if (mounted) {
             setState(() {
