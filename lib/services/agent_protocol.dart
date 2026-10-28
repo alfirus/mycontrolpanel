@@ -37,6 +37,10 @@ const String kHealthPath = '/health';
 /// client-side convenience for fail-fast validation + docs.
 const List<String> kAgentLogSources = ['journal', 'syslog'];
 
+/// v5+ cron run log (`GET /cronruns?lines=`). The agent tails
+/// `/var/log/mcp-cronruns.log`; feeds Zara's last-run tracker.
+const String kCronRunsPath = '/cronruns';
+
 /// Client timeouts: connect 5s, /metrics read 6s, /procstats read 8s.
 /// Install-verify polls reuse the /metrics budget per attempt.
 const Duration kAgentConnectTimeout = Duration(seconds: 5);

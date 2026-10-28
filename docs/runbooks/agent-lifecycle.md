@@ -52,9 +52,10 @@ sudo ufw allow 9108/tcp
 ```sh
 systemctl status mcp-agent
 journalctl -u mcp-agent -n 100 --no-pager
-curl -s http://127.0.0.1:9108/health    # {"status":"ok","version":4,...}
-curl -s http://127.0.0.1:9108/metrics   # {"cpu":..,"ram":..,"disk":..,"uptime_days":..,"version":4}
+curl -s http://127.0.0.1:9108/health    # {"status":"ok","version":5,...}
+curl -s http://127.0.0.1:9108/metrics   # {"cpu":..,"ram":..,"disk":..,"uptime_days":..,"version":5}
 curl -s http://127.0.0.1:9108/procstats # top processes + port table
+curl -s 'http://127.0.0.1:9108/cronruns?lines=5'  # agent-side cron run log (v5+)
 ```
 
 ## Token auth (v4+, opt-in)
