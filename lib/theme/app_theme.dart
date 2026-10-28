@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'design_tokens.dart';
 
 class AppColors {
   // Pitch black system
@@ -56,7 +57,7 @@ class AppTheme {
         color: AppColors.surface0,
         elevation: 0,
         shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(16),
+          borderRadius: AppRadii.xlAll,
           side: const BorderSide(color: AppColors.border, width: 1),
         ),
       ),
