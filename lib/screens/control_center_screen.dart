@@ -733,6 +733,27 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
           Expanded(child: MetricBar(label: 'DISK', value: disk, color: disk > AppThresholds.diskCritical ? AppColors.critical : disk > AppThresholds.diskWarn ? AppColors.warning : AppColors.textSecondary)),
         ]),
         const SizedBox(height: 6),
+        // Spec 02 parity rule: the live card renders the same five bands in
+        // the same order as demo — this is band 4 (trend), fed by the
+        // in-memory poll history. Omitted until 2+ polls; never faked.
+        // Bands 1-2 (header + reachability) render above via the caller, so
+        // the no-agent box below likewise never replaces them.
+        Builder(builder: (_) {
+          final pts = trendPoints(_cpuHistory[c.host] ?? []);
+          if (pts.isEmpty) return const SizedBox.shrink();
+          final peak = sparklineP95(pts);
+          return Padding(
+            padding: const EdgeInsets.only(bottom: 6),
+            child: SizedBox(height: compact ? 18 : 24, child: Row(children: [
+              Expanded(child: _miniSparkline(pts, s.status == Status.degraded ? AppColors.warning : AppColors.success)),
+              const SizedBox(width: 8),
+              Semantics(
+                label: 'CPU trend, peak $peak percent over recent polls',
+                child: Text('cpu p95 $peak%', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: AppColors.textSecondary)),
+              ),
+            ])),
+          );
+        }),
         Row(children: [
           Container(width: 6, height: 6, decoration: const BoxDecoration(color: AppColors.success, shape: BoxShape.circle)),
           const SizedBox(width: 6),

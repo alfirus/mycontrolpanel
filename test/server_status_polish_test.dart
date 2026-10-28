@@ -26,6 +26,19 @@ void main() {
     });
   });
 
+  group('trendPoints (spec 02 parity rule)', () {
+    test('empty and single-point histories yield no band', () {
+      expect(trendPoints([]), isEmpty);
+      expect(trendPoints([0.42]), isEmpty);
+    });
+    test('maps 0..1 polls to the demo percent scale', () {
+      expect(trendPoints([0.2, 0.42, 0.78]), [20.0, 42.0, 78.0]);
+    });
+    test('round-trips through sparklineP95 for the label', () {
+      expect(sparklineP95(trendPoints([0.2, 0.35, 0.78])), 78);
+    });
+  });
+
   group('MetricBar (spec 02 §2.3)', () {
     testWidgets('label renders in textSecondary, value renders', (tester) async {
       await tester.pumpWidget(_wrap(const MetricBar(
