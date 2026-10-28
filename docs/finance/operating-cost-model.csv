@@ -1,0 +1,8 @@
+bucket,driver,volume_unit,volume_placeholder,unit_rate_placeholder,monthly_formula,notes
+server_hosting,provisioned vCPU-hours + GB-months per region,vCPU-hr;GB-mo,0,TBD,volume x unit_rate,"multi-region control plane + agents"
+agent_runtime,managed nodes x poll cadence,node-mo,0,TBD,nodes x rate,"poll/SSH/log-tail/metrics per node"
+notifications,alerts delivered per severity,deliveries/1k,0,TBD,volume_1k x rate,"alert_watch fan-out; severity split"
+api_usage,API calls per seat per day,calls/1k,0,TBD,volume_1k x rate,"GitHub/GitLab REST + Actions + AI assist"
+secure_storage_ops,rotations per quarter,rotations,0,TBD flat,rotations x flat_rate,"key rotation overhead"
+ci_tooling,CI minutes per PR,minutes,0,TBD,minutes x rate,"analyze+test + artifacts"
+fixed_overhead,licences/domains/standby,flat/mo,0,TBD,flat,"one line per month"
