@@ -16,6 +16,22 @@ Code counterpart: `lib/services/agent_protocol.dart`
 
 ## 2. Endpoints
 
+### GET /health → 200 application/json (agent v4+)
+
+```json
+{"status": "ok", "version": 4, "agent_uptime_s": 123}
+```
+
+| field | type | rule |
+|---|---|---|
+| `status` | string | always `"ok"` on a live agent |
+| `version` | int | agent software version; **required** |
+| `agent_uptime_s` | int | seconds since the agent process started; ≥ 0 |
+
+Cheap by design — no `/proc` scan. Hit this first from install-verify,
+Zara's polling job, and any load-balancer check; only fall through to
+`/metrics` when the host is confirmed alive.
+
 ### GET /metrics → 200 application/json
 
 ```json
@@ -43,7 +59,15 @@ Code counterpart: `lib/services/agent_protocol.dart`
 | `top` | array ≤ 12 | sorted by `cpu` desc; `cpu` 0..1, `mem_mb` ≥ 0 |
 | `ports.<port>` | object | `listening` bool, `established` int ≥ 0; keys are decimal port strings |
 
-Any other path → **404** with empty body.
+Any other path → **404** with a JSON body (`{"error":"not_found",...}`).
+Non-GET methods → **405** (`{"error":"method_not_allowed",...}`).
+
+### GET /sysstats (agent v3+) — see `docs/specs/agent-sysstats.md`
+
+v4 adds two additive keys: `nproc` (CPU count, for load-vs-capacity
+checks without SSH) and `boot_epoch_s` (unix epoch of last boot, for
+reboot detection from Zara's polling job). Older validators ignore
+unknown keys.
 
 ## 3. Version negotiation
 
@@ -57,8 +81,24 @@ Any other path → **404** with empty body.
 
 ## 4. Auth
 
-Agent v2 serves **unauthenticated** HTTP (stdlib-only constraint).
-Mitigations, in priority order:
+Agent v2/v3 serve **unauthenticated** HTTP (stdlib-only constraint).
+Agent **v4+ enforces an optional shared-secret token**:
+
+1. Operator sets `MCP_AGENT_TOKEN` via `/etc/mcp-agent.env`
+   (`EnvironmentFile=-/etc/mcp-agent.env` in the systemd unit; mode 600).
+2. When the variable is **set**, every endpoint (including `/health`)
+   requires the `X-MCP-Agent-Token` header with a constant-time compare;
+   mismatch or absence → **401** with a JSON body
+   (`{"error":"unauthorized",...}`).
+3. When the variable is **unset**, the agent stays open — fully backwards
+   compatible with v2/v3 clients and with existing hosts that never opt in.
+4. Clients MUST send the header whenever a per-host agent token is
+   configured (Settings → server entry); v2/v3 agents ignore unknown
+   headers, so rollout needs no app update on either side.
+5. Future 401 → typed `unauthorized` error (already in the taxonomy).
+
+Keep the mitigations below in force regardless: firewall the port,
+never assume it is unreachable from the internet on a public repo.
 
 1. Bind scope: installer opens 9108 only on host firewalls the operator
    controls; public-cloud hosts MUST add a security-group rule.
@@ -92,9 +132,10 @@ Rules:
 
 ## 6. Coverage map (this spec governs)
 
-- Agent install script: `AgentService.agentScript` (v2 Python) +
+- Agent install script: `AgentService.agentScript` (v4 Python) +
   `serviceUnit` (systemd) + `manualInstallScript()`.
 - Metrics reads: `AgentService.fetch` (:9108 `/metrics`),
-  `fetchAppStats` (:9108 `/procstats`), `MetricsHistory.record`/`p95`.
+  `fetchAppStats` (:9108 `/procstats`), `fetchHealth` (:9108 `/health`),
+  `MetricsHistory.record`/`p95`.
 - Out of scope: SSH discovery (cron/apps/alerts/log-tail) — transport is
   SSH, not HTTP; covered by the service-layer split instead.
