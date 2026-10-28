@@ -24,6 +24,10 @@ const int kAgentPort = 9108;
 const String kMetricsPath = '/metrics';
 const String kProcStatsPath = '/procstats';
 
+/// v3+ capacity signals (load, memory detail, GPU, CPU count, boot epoch).
+/// The alert polling job reads this for load-vs-nproc evaluation.
+const String kSysstatsPath = '/sysstats';
+
 /// v4+ liveness probe. Cheap by design (no /proc scan): load balancers,
 /// Zara's polling job, and the app install-verify all hit this first.
 const String kHealthPath = '/health';
@@ -32,6 +36,10 @@ const String kHealthPath = '/health';
 /// `ALLOWED_LOG_SOURCES`; the server allowlists again, so this is a
 /// client-side convenience for fail-fast validation + docs.
 const List<String> kAgentLogSources = ['journal', 'syslog'];
+
+/// v5+ cron run log (`GET /cronruns?lines=`). The agent tails
+/// `/var/log/mcp-cronruns.log`; feeds Zara's last-run tracker.
+const String kCronRunsPath = '/cronruns';
 
 /// Client timeouts: connect 5s, /metrics read 6s, /procstats read 8s.
 /// Install-verify polls reuse the /metrics budget per attempt.

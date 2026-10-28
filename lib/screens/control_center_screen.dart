@@ -35,6 +35,7 @@ import '../services/alert_watch.dart';
 import '../services/alert_notifications.dart';
 import '../services/deployments_service.dart';
 import '../services/ci_sync.dart';
+import '../services/cron_run_tracker.dart';
 import '../services/alert_notifications.dart';
 import 'server_details_screen.dart';
 import '../widgets/pitch_card.dart';
@@ -50,6 +51,31 @@ import 'terminal_screen.dart';
 /// IA itself is NOT decided here — that needs Lina's sign-off (spec 03 §3).
 const primaryNavIndices = {0, 1, 4, 7, 11};
 const overflowNavIndices = {2, 3, 5, 6, 8, 9, 10, 12};
+
+/// Bottom-nav slots in order (spec 03 F3). Tested against
+/// [primaryNavIndices] — the consts alone can't catch a miswired
+/// `_bottomItem` index (e.g. Deploys once pointed at 6/Alerts).
+const bottomNavEntries = [
+  (0, 'Overview'),
+  (1, 'Servers'),
+  (4, 'GitHub'),
+  (7, 'Deploys'),
+  (11, 'Settings'),
+];
+
+/// MORE overflow sheet rows in order (spec 03 F3). Tested against
+/// [overflowNavIndices] so every non-primary destination stays exactly
+/// one tap away on phones.
+const moreNavEntries = [
+  (2, 'Cronjobs'),
+  (3, 'Apps'),
+  (5, 'GitLab'),
+  (6, 'Alerts'),
+  (8, 'Logs'),
+  (9, 'Metrics'),
+  (10, 'Security'),
+  (12, 'Terminal'),
+];
 
 class ControlCenterScreen extends StatefulWidget {
   const ControlCenterScreen({super.key});
@@ -87,6 +113,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
   Set<String> _installing = {};
   Set<String> _checking = {};
   Map<String, List<CronEntry>> _serverCrons = {}; // server id -> discovered crons
+  Map<String, List<CronRunRecord>> _cronRuns = {}; // server id -> last runs (agent :9108 + cache)
   Set<String> _cronLoading = {};
   String? _cronError;
   Map<String, List<AppEntry>> _serverApps = {}; // server id -> discovered apps
@@ -467,6 +494,14 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     for (final c in _savedServers) {
       if (_cronLoading.contains(c.id) || _serverCrons.containsKey(c.id)) continue;
       setState(() => _cronLoading.add(c.id));
+      // Show the last-good cached runs immediately (offline-friendly),
+      // then refresh from the agent when reachable.
+      try {
+        final cached = await CronRunStore.read(c.host);
+        if (mounted && cached.isNotEmpty && !_cronRuns.containsKey(c.id)) {
+          setState(() => _cronRuns[c.id] = cached);
+        }
+      } catch (_) {}
       try {
         final entries = await _agent.fetchCrons(c);
         if (!mounted) return;
@@ -474,6 +509,14 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
           _serverCrons[c.id] = entries;
           _cronLoading.remove(c.id);
         });
+        // Best-effort: agent-side run log (v5+). Older agents answer 404 —
+        // the cache above stands and the next rescan retries.
+        try {
+          final runs = await _agent.fetchCronRuns(c.host, serverId: c.id);
+          await CronRunStore.save(c.host, runs);
+          if (!mounted) return;
+          setState(() => _cronRuns[c.id] = runs);
+        } catch (_) {}
       } catch (e) {
         if (!mounted) return;
         setState(() {
@@ -1903,22 +1946,30 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     );
   }
 
+  /// Rail destinations (spec `docs/design/03-navigation-ia.md` F1): labels +
+  /// glyphs only. Per-item accent colors encoded nothing (Cronjobs/GitLab
+  /// shared purple, Apps/Metrics shared green, Logs/Settings shared grey,
+  /// Overview/Deploys/Terminal shared cyan), so color is reserved for the
+  /// selection state (single primary accent) until the grouped IA lands —
+  /// one accent per group needs Lina's sign-off (spec 03 §3).
+  static const _railItems = [
+    ('Overview', Icons.dashboard_outlined),
+    ('Servers', Icons.dns_outlined),
+    ('Cronjobs', Icons.schedule_outlined),
+    ('Apps', Icons.apps_outlined),
+    ('GitHub', Icons.code_outlined),
+    ('GitLab', Icons.layers_outlined),
+    ('Alerts', Icons.warning_amber_outlined),
+    ('Deploys', Icons.rocket_launch_outlined),
+    ('Logs', Icons.article_outlined),
+    ('Metrics', Icons.show_chart_outlined),
+    ('Security', Icons.shield_outlined),
+    ('Settings', Icons.settings_outlined),
+    ('Terminal', Icons.terminal_outlined),
+  ];
+
   Widget _buildSideRail() {
-    final items = [
-      ('Overview', Icons.dashboard_outlined, AppColors.accentCyan),
-      ('Servers', Icons.dns_outlined, AppColors.accentBlue),
-      ('Cronjobs', Icons.schedule_outlined, AppColors.accentPurple),
-      ('Apps', Icons.apps_outlined, AppColors.accentGreen),
-      ('GitHub', Icons.code_outlined, AppColors.textPrimary),
-      ('GitLab', Icons.layers_outlined, AppColors.accentPurple),
-      ('Alerts', Icons.warning_amber_outlined, AppColors.warning),
-      ('Deploys', Icons.rocket_launch_outlined, AppColors.accentCyan),
-      ('Logs', Icons.article_outlined, AppColors.textSecondary),
-      ('Metrics', Icons.show_chart_outlined, AppColors.success),
-      ('Security', Icons.shield_outlined, AppColors.critical),
-      ('Settings', Icons.settings_outlined, AppColors.textSecondary),
-      ('Terminal', Icons.terminal_outlined, AppColors.accentCyan),
-    ];
+    final items = _railItems;
     return Container(
       width: 220, color: AppColors.pitchBlack,
       child: Column(children: [
@@ -1932,9 +1983,9 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
                   decoration: BoxDecoration(color: _navIndex==i ? AppColors.surface1 : Colors.transparent, borderRadius: BorderRadius.circular(10), border: Border.all(color: _navIndex==i ? AppColors.borderLight : Colors.transparent)),
                   child: ListTile(
                     dense: true, onTap: () => _goTo(i),
-                    leading: Container(width: 28, height: 28, decoration: BoxDecoration(color: _navIndex==i ? items[i].$3.withValues(alpha: 0.14) : AppColors.surface2, borderRadius: BorderRadius.circular(7), border: Border.all(color: _navIndex==i ? items[i].$3.withValues(alpha: 0.25) : AppColors.border)), child: Icon(items[i].$2, size: 14, color: _navIndex==i ? items[i].$3 : AppColors.textMuted)),
+                    leading: Container(width: 28, height: 28, decoration: BoxDecoration(color: _navIndex==i ? AppColors.accentCyan.withValues(alpha: 0.14) : AppColors.surface2, borderRadius: BorderRadius.circular(7), border: Border.all(color: _navIndex==i ? AppColors.accentCyan.withValues(alpha: 0.25) : AppColors.border)), child: Icon(items[i].$2, size: 14, color: _navIndex==i ? AppColors.accentCyan : AppColors.textMuted)),
                     title: Text(items[i].$1, style: TextStyle(fontSize: 12, fontWeight: _navIndex==i ? FontWeight.w700 : FontWeight.w500, color: _navIndex==i ? AppColors.textPrimary : AppColors.textSecondary)),
-                    trailing: _navIndex==i ? Container(width: 6, height: 6, decoration: BoxDecoration(color: items[i].$3, shape: BoxShape.circle)) : null,
+                    trailing: _navIndex==i ? Container(width: 6, height: 6, decoration: const BoxDecoration(color: AppColors.accentCyan, shape: BoxShape.circle)) : null,
                     contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 0), minLeadingWidth: 28,
                   ),
                 ),
@@ -2002,16 +2053,23 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     ]),
   );
 
+  /// Bottom-nav glyph per destination index. Kept beside [bottomNavEntries]
+  /// so the widget is driven by the tested consts, not hardcoded calls.
+  static const _bottomIcons = {
+    0: Icons.dashboard,
+    1: Icons.dns,
+    4: Icons.code,
+    7: Icons.rocket_launch,
+    11: Icons.settings,
+  };
+
   Widget _buildBottomNav() {
     return Container(
       decoration: const BoxDecoration(color: AppColors.surface0, border: Border(top: BorderSide(color: AppColors.border))),
       child: SafeArea(
         child: SizedBox(height: 64, child: Row(children: [
-          _bottomItem(0, Icons.dashboard, 'Overview'),
-          _bottomItem(1, Icons.dns, 'Servers'),
-          _bottomItem(4, Icons.code, 'GitHub'),
-          _bottomItem(6, Icons.rocket_launch, 'Deploys'),
-          _bottomItem(11, Icons.settings, 'Settings'),
+          for (final e in bottomNavEntries)
+            _bottomItem(e.$1, _bottomIcons[e.$1]!, e.$2),
           _moreItem(),
           Builder(builder: (ctx) => GestureDetector(onTap: ()=> Scaffold.of(ctx).openEndDrawer(), child: Container(margin: const EdgeInsets.all(8), width: 44, height: 44, decoration: BoxDecoration(color: AppColors.accentCyan, borderRadius: BorderRadius.circular(12)), child: const Icon(Icons.smart_toy_outlined, size: 18, color: Colors.black)))),
         ])),
@@ -2032,16 +2090,17 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
   }
 
   void _openMoreNav() {
-    const entries = [
-      (2, 'Cronjobs', Icons.schedule_outlined),
-      (3, 'Apps', Icons.apps_outlined),
-      (5, 'GitLab', Icons.layers_outlined),
-      (6, 'Alerts', Icons.warning_amber_outlined),
-      (8, 'Logs', Icons.article_outlined),
-      (9, 'Metrics', Icons.show_chart_outlined),
-      (10, 'Security', Icons.shield_outlined),
-      (12, 'Terminal', Icons.terminal_outlined),
-    ];
+    const iconFor = {
+      2: Icons.schedule_outlined,
+      3: Icons.apps_outlined,
+      5: Icons.layers_outlined,
+      6: Icons.warning_amber_outlined,
+      8: Icons.article_outlined,
+      9: Icons.show_chart_outlined,
+      10: Icons.shield_outlined,
+      12: Icons.terminal_outlined,
+    };
+    final entries = [for (final e in moreNavEntries) (e.$1, e.$2, iconFor[e.$1]!)];
     assert(entries.every((e) => overflowNavIndices.contains(e.$1)),
         'MORE sheet must list exactly the overflow destinations');
     showModalBottomSheet(
@@ -2060,7 +2119,11 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
                     dense: true,
                     leading: Container(width: 28, height: 28, decoration: BoxDecoration(color: _navIndex == e.$1 ? AppColors.accentCyan.withValues(alpha: 0.14) : AppColors.surface2, borderRadius: BorderRadius.circular(7), border: Border.all(color: _navIndex == e.$1 ? AppColors.accentCyan.withValues(alpha: 0.25) : AppColors.border)), child: Icon(e.$3, size: 14, color: _navIndex == e.$1 ? AppColors.accentCyan : AppColors.textSecondary)),
                     title: Text(e.$2, style: TextStyle(fontSize: 12, fontWeight: _navIndex == e.$1 ? FontWeight.w700 : FontWeight.w500, color: _navIndex == e.$1 ? AppColors.textPrimary : AppColors.textSecondary)),
-                    trailing: _navIndex == e.$1 ? Container(width: 6, height: 6, decoration: const BoxDecoration(color: AppColors.accentCyan, shape: BoxShape.circle)) : null,
+                    // Spec 03 §4 step 2: firing count rides the Alerts row so
+                    // the MORE sheet mirrors the app-bar bell badge.
+                    trailing: e.$1 == 6 && _alertBadge > 0
+                        ? Container(padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2), decoration: BoxDecoration(color: AppColors.critical, borderRadius: BorderRadius.circular(8)), child: Text('$_alertBadge', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: Colors.white)))
+                        : _navIndex == e.$1 ? Container(width: 6, height: 6, decoration: const BoxDecoration(color: AppColors.accentCyan, shape: BoxShape.circle)) : null,
                     onTap: () {
                       Navigator.pop(ctx);
                       _goTo(e.$1);
@@ -2366,7 +2429,32 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
                             const SizedBox(width: 6),
                             Text(e.source, style: const TextStyle(fontSize: 9, color: AppColors.textMuted, fontFamily: AppFonts.mono)),
                             const SizedBox(width: 6),
-                            const Pill(text: 'SCHEDULED', color: AppColors.success),
+                            Builder(builder: (_) {
+                              final run = CronRunTracker.matchRecord(
+                                  _cronRuns[e.serverId] ?? const [], e);
+                              final st = run?.status ?? CronRunStatus.unknown;
+                              final pill = st == CronRunStatus.ok
+                                  ? 'OK'
+                                  : st == CronRunStatus.error
+                                      ? 'FAILED'
+                                      : 'SCHEDULED';
+                              final color = st == CronRunStatus.ok
+                                  ? AppColors.success
+                                  : st == CronRunStatus.error
+                                      ? AppColors.critical
+                                      : AppColors.textMuted;
+                              final last = run?.ranAt == null
+                                  ? ''
+                                  : ' • last ${timeAgo(run!.ranAt!)} • ${CronRunRecord.formatDur(run.durSecs)}';
+                              return Row(mainAxisSize: MainAxisSize.min, children: [
+                                Pill(text: pill, color: color),
+                                if (last.isNotEmpty)
+                                  Padding(
+                                    padding: const EdgeInsets.only(left: 6),
+                                    child: Text(last, style: const TextStyle(fontSize: 9, color: AppColors.textMuted, fontFamily: AppFonts.mono)),
+                                  ),
+                              ]);
+                            }),
                           ]),
                         ),
                       ]),
