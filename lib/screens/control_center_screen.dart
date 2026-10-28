@@ -32,8 +32,10 @@ import '../services/log_tail_service.dart';
 import '../services/metrics_history.dart';
 import '../services/alert_watch.dart';
 import '../services/alert_notifications.dart';
+import '../services/deployments_service.dart';
 import 'server_details_screen.dart';
 import '../widgets/pitch_card.dart';
+import '../widgets/run_detail_sheet.dart';
 import 'audit_screen.dart';
 import 'settings_screen.dart';
 import 'terminal_screen.dart';
@@ -211,7 +213,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
       }
       final runs = <DeployItem>[];
       for (final repo in _ghRepos) {
-        try { runs.addAll(await svc.repoRuns(repo)); } catch (_) {}
+        try { for (final d in await svc.repoRuns(repo)) { runs.add(d.withRepo(repo)); } } catch (_) {}
       }
       runs.sort((a, b) => b.time.compareTo(a.time));
       if (!mounted) return;
@@ -2764,12 +2766,9 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     );
   }
 
-  /// Merged CI/CD timeline: GitHub Actions runs + GitLab pipelines, newest first.
-  List<DeployItem> get _allRuns {
-    final all = [..._ghRuns, ..._glPipes];
-    all.sort((a, b) => b.time.compareTo(a.time));
-    return all;
-  }
+  /// Merged CI/CD timeline via [DeploymentsService] (newest first).
+  List<DeployItem> get _allRuns =>
+      DeploymentsService.merge(_ghRuns, _glPipes);
 
   bool get _ciConfigured => _ghConfigured || _glConfigured;
   bool get _ciLoading => _ghLoading || _glLoading;
@@ -2797,6 +2796,25 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
           ])),
         ]),
       )).toList()),
+    );
+  }
+
+  /// Open the run detail sheet (approve-first rerun/retry). No-op for
+  /// demo rows: they carry no ids so the sheet shows detail only.
+  void _openRun(DeployItem d) {
+    if (!mounted) return;
+    showRunDetailSheet(
+      context: context,
+      run: d,
+      githubToken: _ghToken,
+      githubRepos: _ghRepos,
+      gitlabBaseUrl: _glBase,
+      gitlabToken: _glToken,
+      onChanged: () {
+        setState(() { _ghRuns = []; _glPipes = []; _ghError = null; _glError = null; });
+        _pollGithub();
+        _pollGitlab();
+      },
     );
   }
 
@@ -2842,7 +2860,10 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
           : Column(children: display.map((d) {
               final isGl = d.vcs == 'gitlab';
               final vcsColor = isGl ? AppColors.accentPurple : AppColors.textPrimary;
-              return Container(
+              return InkWell(
+              borderRadius: BorderRadius.circular(8),
+              onTap: () => _openRun(d),
+              child: Container(
               margin: EdgeInsets.only(bottom: compact ? 6 : 8), padding: EdgeInsets.all(compact ? 8 : 10),
               decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(8), border: Border.all(color: d.status == 'failed' ? AppColors.critical.withValues(alpha: 0.25) : AppColors.borderLight)),
               child: Row(children: [
@@ -2867,7 +2888,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
                 ])),
                 const Icon(Icons.chevron_right, size: 14, color: AppColors.textDim),
               ]),
-            );
+            ));
             }).toList()),
     );
   }
