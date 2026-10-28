@@ -2,10 +2,10 @@
 
 ## 1. Gates (all must be green before merge to main)
 
-| gate | workflow | what |
+| gate | workflow → job | what |
 |---|---|---|
-| analyze + test | `ci.yml` | `flutter analyze --no-fatal-infos --no-fatal-warnings`, then `flutter test` |
-| static analysis (duplicate) | `security.yml` → `analyze` | same analyzer pass on PR + push (kept for the security job family) |
+| unit/widget tests | `ci.yml` → `test` | `flutter test` (required `test` check) |
+| static analysis | `security.yml` → `analyze` | `flutter analyze --no-fatal-infos --no-fatal-warnings` |
 | dependency scan | `security.yml` → `osv-scan` | OSV scan of `pubspec.lock` |
 | secret scan | `security.yml` → `gitleaks` | full-history leak scan — repo is PUBLIC, zero tolerance |
 | release build | `release.yml` | tag-triggered desktop artifacts (not a PR gate) |
