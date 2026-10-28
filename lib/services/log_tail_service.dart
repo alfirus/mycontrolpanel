@@ -1,5 +1,6 @@
 import '../models/mock_data.dart';
 import '../models/server_connection.dart';
+import 'agent_protocol.dart';
 import 'agent_service.dart';
 
 /// Real log tail over SSH (replaces the simulated heartbeat in
@@ -9,8 +10,16 @@ import 'agent_service.dart';
 /// - journal:  journalctl --no-pager -n <lines> (newest last)
 /// - syslog:   tail of /var/log/syslog|messages|*.log
 /// - docker:   docker logs --tail=<lines> <container>
+///
+/// [allowedSources] is the subset the v4 agent serves over HTTP `/logs`
+/// (see [kAgentLogSources]); `docker` has no agent equivalent and stays
+/// SSH-only via [sshOnlySources].
 class LogTailService {
-  static const allowedSources = ['journal', 'syslog', 'docker'];
+  static const allowedSources = kAgentLogSources;
+  static const sshOnlySources = ['docker'];
+
+  /// All sources the SSH path accepts (agent subset + SSH-only extras).
+  static const sshSources = [...kAgentLogSources, 'docker'];
 
   Future<List<LogLine>> fetch(
     AgentService agent,
@@ -20,6 +29,9 @@ class LogTailService {
     int lines = 100,
     String? keyPassphrase,
   }) async {
+    if (!sshSources.contains(source)) {
+      throw Exception('Unknown log source "$source" (try journal/syslog).');
+    }
     final n = lines.clamp(20, 500);
     late final String cmd;
     if (source == 'docker') {
@@ -34,6 +46,64 @@ class LogTailService {
     }
     final raw = await agent.runCommand(server, cmd, keyPassphrase: keyPassphrase);
     return parse(raw, fallbackSource: server.name);
+  }
+
+  /// Poll [poll] every [interval], yielding a fresh [LogLine] list only
+  /// when the content signature changes (dedupe by level+message).
+  /// Poll errors are swallowed — the previous snapshot stands and the
+  /// next tick retries. Pass [maxPolls] in tests to bound the stream.
+  static Stream<List<LogLine>> watch(
+    Future<List<LogLine>> Function() poll, {
+    Duration interval = const Duration(seconds: 5),
+    int? maxPolls,
+  }) async* {
+    List<String>? last;
+    var n = 0;
+    while (maxPolls == null || n < maxPolls) {
+      n++;
+      try {
+        final lines = await poll();
+        final sig = lines.map((l) => '${l.level}:${l.message}').toList();
+        if (!_sameSig(sig, last)) {
+          last = sig;
+          yield lines;
+        }
+      } catch (_) {
+        // Keep the previous snapshot; retry next tick.
+      }
+      if (maxPolls != null && n >= maxPolls) break;
+      await Future<void>.delayed(interval);
+    }
+  }
+
+  /// Stream the v4 agent's HTTP `/logs` endpoint (no SSH session needed).
+  /// Same contract as [watch]: yields only on content change.
+  static Stream<List<LogLine>> watchAgent(
+    AgentService agent,
+    String host, {
+    String source = 'journal',
+    int lines = 100,
+    String? agentToken,
+    Duration interval = const Duration(seconds: 5),
+    int? maxPolls,
+  }) {
+    return watch(
+      () async {
+        final raw = await agent.fetchAgentLogs(host,
+            source: source, lines: lines, agentToken: agentToken);
+        return parse(raw.join('\n'), fallbackSource: host);
+      },
+      interval: interval,
+      maxPolls: maxPolls,
+    );
+  }
+
+  static bool _sameSig(List<String> a, List<String>? b) {
+    if (b == null || a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
   }
 
   /// Parse raw `runCommand` output (`[exit N]\n<body>`) into LogLines.

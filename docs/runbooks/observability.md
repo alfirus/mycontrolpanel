@@ -40,6 +40,11 @@ changes required. Sources are allowlisted and read-only:
 | `syslog` | `tail` of syslog/messages, else journal | `sudo -n` first, plain second |
 | `docker` | `docker logs --tail=<n> <name>` | container name sanitized |
 
+No SSH session? The v4 agent serves the same tail over HTTP
+(`GET :9108/logs?source=journal&lines=100`, token-gated when the host
+enforces auth): `AgentService.fetchAgentLogs` + `LogTailService.parse`
+for one-shots, `LogTailService.watchAgent` for a change-only stream.
+
 Parsing (`LogTailService.parse`) never throws: level is guessed
 (ERROR/WARN/DEBUG/INFO) and over-long lines truncate at 300 chars.
 
