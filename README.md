@@ -164,6 +164,9 @@ lib/
 
 ## Roadmap
 
+Release history: [CHANGELOG.md](CHANGELOG.md) · cutting a release:
+[Release checklist](docs/releases.md).
+
 - [ ] Background alert polling + push notifications (alert on new firing signals / failed CI runs while the app is closed)
 - [ ] Biometric app lock enforcement (toggle persists; needs `local_auth` + lock screen)
 - [ ] Sentry / Datadog integration (placeholder row in Settings)
