@@ -292,7 +292,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               const SizedBox(height: 6),
               _integrationRow('Sentry / Datadog', 'Not connected', Icons.bug_report_outlined, AppColors.textMuted, 'Add'),
             ]),
-            footer: const Text('Server creds + tokens live in SharedPreferences on-device (no cloud). Move secrets to flutter_secure_storage for production.', style: TextStyle(fontSize: 10, color: AppColors.textDim)),
+            footer: const Text('Server creds + tokens live in the OS keychain/keystore (never in plain prefs, never in the cloud).', style: TextStyle(fontSize: 10, color: AppColors.textDim)),
           );
           if (isWide) {
             return Row(crossAxisAlignment: CrossAxisAlignment.start, children: [Expanded(child: prefsCard), const SizedBox(width: 12), Expanded(child: integrationsCard)]);
@@ -308,13 +308,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
               const Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text('Clear all server connections', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.textPrimary)), Text('Removes all stored hosts — cannot be undone', style: TextStyle(fontSize: 11, color: AppColors.textMuted))])),
               OutlinedButton(onPressed: _servers.isEmpty ? null : () async {
                 final ok = await showDialog<bool>(context: context, builder: (_)=> AlertDialog(backgroundColor: AppColors.surface1, title: const Text('Clear all?', style: TextStyle(color: AppColors.textPrimary)), content: const Text('This will delete all server connections.', style: TextStyle(color: AppColors.textSecondary)), actions: [TextButton(onPressed: ()=> Navigator.pop(context,false), child: const Text('Cancel')), FilledButton(onPressed: ()=> Navigator.pop(context,true), style: FilledButton.styleFrom(backgroundColor: AppColors.critical), child: const Text('Clear'))]));
-                if (ok==true) { setState(()=> _servers=[]); await _saveServers(); }
+                if (ok==true) { final ids = _servers.map((s)=> s.id).toList(); setState(()=> _servers=[]); for (final id in ids) { await SecureStore.deleteServerCredential(id); } await _saveServers(); }
               }, style: OutlinedButton.styleFrom(foregroundColor: AppColors.critical, side: const BorderSide(color: AppColors.critical)), child: const Text('CLEAR ALL', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700))),
             ]),
           ]),
         ),
         const SizedBox(height: 8),
-        const Center(child: Text('MY CONTROL PANEL • SETTINGS • stored locally via SharedPreferences', style: TextStyle(fontSize: 9, color: AppColors.textDim, letterSpacing: 0.6, fontWeight: FontWeight.w600))),
+        const Center(child: Text('MY CONTROL PANEL • SETTINGS • prefs for UI state, OS keychain for secrets', style: TextStyle(fontSize: 9, color: AppColors.textDim, letterSpacing: 0.6, fontWeight: FontWeight.w600))),
       ]),
     );
   }
