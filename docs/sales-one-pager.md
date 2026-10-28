@@ -39,6 +39,32 @@ phone, so the datacenter fits in your pocket."
 - Sentry/Datadog integrations (placeholder row only).
 - Specific prices or SLAs (owner decision pending).
 
+## ROI pitch (Syafiqah add-on, 2026-10-28)
+
+For the buyer who asks "what is this worth to me" — frame time, not money
+(no prices exist to discount; see `docs/packaging.md` + PR #28).
+
+**The math (illustrative, say "for example" out loud):** a freelancer babysitting
+10 VPS boxes burns ~30 min/day hopping SSH tabs to eyeball disks, crons, and
+failed units. One screen with live alerts + per-job cron logs + one-click agent
+install compresses that to a ~5-minute glance — roughly 2 hours/week back, or
+~100 hours/year. At any contractor rate, that dwarfs a $0 MIT download; the
+honest close is "try Community free, measure your own week back."
+
+**Screenshot strip for the pitch** (all real UI, never mockups):
+`docs/screenshots/overview.png` → `docs/screenshots/server-details.png` →
+hero lifestyle `assets/marketing/hero-laptop.png` / `hero-phone.png`.
+Demo order: Overview grid → drill one server → rescan a crontab live →
+show the alert badge. If the room asks for GitHub/CI-CD/Security, show the
+screens AND say "UI-ready, wiring on roadmap" in the same breath.
+
+**One-line closes per buyer** (reuse the use-case table above):
+1. Freelancer: "Twelve tabs become one glance — and missed cron failures page you first."
+2. Homelab: "Grafana insight with none of the stack — one click installs the agent."
+3. Small team: "Deploys and infra health in the same window your GitLab already lives in."
+4. On-call: "The 3 a.m. disk-full finds you at 11 p.m. instead."
+5. Security-conscious SME: "Every credential leaves your notes for the OS keychain."
+
 ## Handoff
 
 Questions on messaging → Naura (CMO). Anything needing a demo build or
