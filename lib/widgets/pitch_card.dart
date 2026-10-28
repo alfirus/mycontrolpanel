@@ -104,8 +104,10 @@ class StatusDot extends StatelessWidget {
   const StatusDot({super.key, required this.color, this.pulse = true});
   @override
   Widget build(BuildContext context) {
+    // Spec 04-state-patterns §3.5: honor reduced motion — pulse halo off.
+    final reduceMotion = MediaQuery.disableAnimationsOf(context);
     return Stack(alignment: Alignment.center, children: [
-      if (pulse) Container(width: 16, height: 16, decoration: BoxDecoration(color: color.withValues(alpha: 0.18), shape: BoxShape.circle)),
+      if (pulse && !reduceMotion) Container(width: 16, height: 16, decoration: BoxDecoration(color: color.withValues(alpha: 0.18), shape: BoxShape.circle)),
       Container(width: 8, height: 8, decoration: BoxDecoration(color: color, shape: BoxShape.circle, boxShadow: [BoxShadow(color: color.withValues(alpha: 0.5), blurRadius: 6)])),
     ]);
   }
