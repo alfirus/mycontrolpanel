@@ -270,6 +270,55 @@ class _SettingsScreenState extends State<SettingsScreen> {
     ));
   }
 
+  /// Per-host metrics-agent token (v4 gate): set/rotate/clear.
+  /// Stored ONLY in the OS keychain via SecureStore — never displayed back,
+  /// never in prefs JSON, never logged. One-click install provisions it
+  /// automatically; this dialog covers manual/scripted installs and rotation.
+  Future<void> _manageAgentToken(ServerConnection s) async {
+    final current = await SecureStore.readAgentToken(s.id);
+    if (!mounted) return;
+    final isSet = (current ?? '').isNotEmpty;
+    final ctrl = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.surface0,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: const BorderSide(color: AppColors.border)),
+        title: Text('AGENT TOKEN • ${s.name}', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w800, letterSpacing: 0.5, color: AppColors.textPrimary)),
+        content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(isSet ? 'Status: SET (value hidden) — enter a new value to rotate.' : 'Status: UNSET — polling is unauthenticated (open agent).', style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)),
+          const SizedBox(height: 8),
+          TextField(controller: ctrl, obscureText: true, style: const TextStyle(fontSize: 12, color: AppColors.textPrimary, fontFamily: AppFonts.mono), decoration: const InputDecoration(hintText: 'Paste token…', hintStyle: TextStyle(fontSize: 11, color: AppColors.textMuted), filled: true, fillColor: AppColors.surface1, border: OutlineInputBorder(borderRadius: BorderRadius.all(Radius.circular(8)), borderSide: BorderSide(color: AppColors.border)))),
+          const SizedBox(height: 6),
+          const Text('Must match MCP_AGENT_TOKEN on the host. Polling sends it as X-MCP-Agent-Token.', style: TextStyle(fontSize: 10, color: AppColors.textMuted)),
+        ]),
+        actions: [
+          if (isSet)
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('CLEAR', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: AppColors.critical))),
+          TextButton(onPressed: () => Navigator.pop(ctx, null), child: const Text('CANCEL', style: TextStyle(fontSize: 11, color: AppColors.textSecondary))),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), style: FilledButton.styleFrom(backgroundColor: AppColors.accentCyan, foregroundColor: Colors.black), child: const Text('SAVE', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800))),
+        ],
+      ),
+    );
+    final pastedValue = ctrl.text.trim();
+    ctrl.dispose();
+    if (!mounted) return;
+    if (ok == null) return; // cancelled
+    if (ok) {
+      final v = pastedValue;
+      if (v.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(backgroundColor: AppColors.surface1, content: Text('Empty value — token unchanged', style: TextStyle(fontSize: 12, color: AppColors.warning))));
+        return;
+      }
+      await SecureStore.writeAgentToken(s.id, v);
+    } else {
+      await SecureStore.writeAgentToken(s.id, '');
+    }
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(backgroundColor: AppColors.surface1, content: Text(ok ? 'Agent token saved (keychain) ✓' : 'Agent token cleared — polling unauthenticated', style: const TextStyle(fontSize: 12, color: AppColors.success))));
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_loading) return const Center(child: CircularProgressIndicator(color: AppColors.accentCyan));
@@ -491,6 +540,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
             Column(children: [
               Row(mainAxisSize: MainAxisSize.min, children: [
                 IconButton(icon: const Icon(Icons.bolt, size: 14, color: AppColors.accentCyan), tooltip: 'Test', onPressed: ()=> _testConnection(s), style: IconButton.styleFrom(backgroundColor: AppColors.accentCyan.withValues(alpha: 0.12), padding: const EdgeInsets.all(6), minimumSize: const Size(28,28))),
+                const SizedBox(width: 4),
+                IconButton(icon: const Icon(Icons.key_outlined, size: 14, color: AppColors.textSecondary), tooltip: 'Agent token', onPressed: ()=> _manageAgentToken(s), style: IconButton.styleFrom(backgroundColor: AppColors.surface2, padding: const EdgeInsets.all(6), minimumSize: const Size(28,28))),
                 const SizedBox(width: 4),
                 IconButton(icon: Icon(s.enabled ? Icons.visibility : Icons.visibility_off, size: 14, color: AppColors.textSecondary), tooltip: s.enabled ? 'Disable' : 'Enable', onPressed: () async { setState(()=> _servers[_servers.indexWhere((e)=>e.id==s.id)] = s.copyWith(enabled: !s.enabled)); await _saveServers(); }, style: IconButton.styleFrom(backgroundColor: AppColors.surface2, padding: const EdgeInsets.all(6), minimumSize: const Size(28,28))),
                 const SizedBox(width: 4),

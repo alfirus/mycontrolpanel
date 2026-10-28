@@ -106,7 +106,7 @@ class _AgentMetricsAdapter implements MetricsPoller {
 
   @override
   Future<AgentMetrics> pollMetrics(ServerConnection server) async {
-    final raw = await _agent.fetch(server.host);
+    final raw = await _agent.fetch(server.host, serverId: server.id);
     if (raw == null) {
       throw const AgentProtocolException(
           AgentErrorCode.unreachable, '/metrics unreachable');
@@ -120,7 +120,7 @@ class _AgentProcStatsAdapter implements ProcStatsPoller {
 
   @override
   Future<AppStats> pollProcStats(ServerConnection server) async {
-    final stats = await _agent.fetchAppStats(server.host);
+    final stats = await _agent.fetchAppStats(server.host, serverId: server.id);
     if (stats == null) {
       throw const AgentProtocolException(
           AgentErrorCode.unreachable, '/procstats unreachable');

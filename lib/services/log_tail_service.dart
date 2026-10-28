@@ -84,13 +84,14 @@ class LogTailService {
     String source = 'journal',
     int lines = 100,
     String? agentToken,
+    String? serverId,
     Duration interval = const Duration(seconds: 5),
     int? maxPolls,
   }) {
     return watch(
       () async {
         final raw = await agent.fetchAgentLogs(host,
-            source: source, lines: lines, agentToken: agentToken);
+            source: source, lines: lines, agentToken: agentToken, serverId: serverId);
         return parse(raw.join('\n'), fallbackSource: host);
       },
       interval: interval,
