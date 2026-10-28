@@ -70,10 +70,22 @@ void main() {
     test('hardened routing: query strings, JSON errors, 405 on non-GET', () {
       final script = AgentService.agentScript;
       for (final needle in [
-        "split('?', 1)",
+        'urlsplit',
         'not_found',
         'method_not_allowed',
         'do_POST',
+      ]) {
+        expect(script.contains(needle), isTrue, reason: 'missing $needle');
+      }
+    });
+
+    test('log endpoint with allowlisted sources', () {
+      final script = AgentService.agentScript;
+      for (final needle in [
+        '/logs',
+        'read_logs',
+        'ALLOWED_LOG_SOURCES',
+        'bad_source',
       ]) {
         expect(script.contains(needle), isTrue, reason: 'missing $needle');
       }

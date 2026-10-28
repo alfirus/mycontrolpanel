@@ -107,6 +107,12 @@ void main() {
       expect(e.detail.contains('GET'), isTrue);
     });
 
+    test('400 maps to badPayload with query hint', () {
+      final e = agentHttpError(400, '/logs');
+      expect(e.code, AgentErrorCode.badPayload);
+      expect(e.detail.contains('query'), isTrue);
+    });
+
     test('500 maps to badPayload', () {
       expect(agentHttpError(500, '/metrics').code,
           AgentErrorCode.badPayload);
