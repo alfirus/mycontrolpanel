@@ -34,6 +34,7 @@ import '../services/metrics_history.dart';
 import '../services/alert_watch.dart';
 import '../services/alert_notifications.dart';
 import '../services/deployments_service.dart';
+import '../services/ci_sync.dart';
 import '../services/cron_run_tracker.dart';
 import '../services/alert_notifications.dart';
 import 'server_details_screen.dart';
@@ -151,6 +152,8 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
   String? _ghError;
   bool get _ghConfigured => _ghToken.isNotEmpty && _ghRepos.isNotEmpty;
   List<DeployItem> _ghRuns = [];
+  String _ghCacheNote = ''; // non-empty when the timeline serves sync cache
+  final CiSyncService _ciSync = CiSyncService(); // keeps backoff streaks
   // GitLab live state (PAT + base URL + projects from Settings)
   int _gitlabTab = 0; // 0 issues, 1 MRs, 2 tasks
   String _glToken = '';
@@ -217,8 +220,10 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
 
   /// Fetch live GitHub Issues/PRs/Tasks/Runs for tracked repos.
   /// Validates the token first so auth failures surface instead of
-  /// silently falling back to demo data.
-  Future<void> _pollGithub() async {
+  /// silently falling back to demo data. [force] bypasses the CI sync
+  /// backoff (manual SYNC / retry buttons); the timed refresh reuses the
+  /// cadence and serves last-good cache inside backoff windows.
+  Future<void> _pollGithub({bool force = false}) async {
     if (!_ghConfigured || _ghLoading) return;
     setState(() { _ghLoading = true; _ghError = null; });
     try {
@@ -248,11 +253,8 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
           if (tasks.isNotEmpty) tasksSource = 'assigned';
         } catch (_) {}
       }
-      final runs = <DeployItem>[];
-      for (final repo in _ghRepos) {
-        try { for (final d in await svc.repoRuns(repo)) { runs.add(d.withRepo(repo)); } } catch (_) {}
-      }
-      runs.sort((a, b) => b.time.compareTo(a.time));
+      final sync = await _ciSync.syncRepos(svc, _ghRepos, force: force);
+      final runs = sync.runs;
       if (!mounted) return;
       setState(() {
         _ghIssues = issues;
@@ -261,6 +263,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
         _ghTasksSource = tasksSource;
         _ghProjects = projects;
         _ghRuns = runs.take(12).toList();
+        _ghCacheNote = sync.cacheNote;
         _ghLoading = false;
       });
     } catch (e) {
@@ -3029,8 +3032,8 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
 
   /// Retry helper shared by the SYNC button and the StateView RETRY action.
   void _retryDeploys() {
-    setState(() { _ghRuns = []; _ghError = null; _glPipes = []; _glError = null; });
-    _pollGithub();
+    setState(() { _ghRuns = []; _ghCacheNote = ''; _ghError = null; _glPipes = []; _glError = null; });
+    _pollGithub(force: true);
     _pollGitlab();
   }
 
@@ -3046,8 +3049,8 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
       gitlabBaseUrl: _glBase,
       gitlabToken: _glToken,
       onChanged: () {
-        setState(() { _ghRuns = []; _glPipes = []; _ghError = null; _glError = null; });
-        _pollGithub();
+        setState(() { _ghRuns = []; _ghCacheNote = ''; _glPipes = []; _ghError = null; _glError = null; });
+        _pollGithub(force: true);
         _pollGitlab();
       },
     );
@@ -3069,7 +3072,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
           ? 'syncing…'
           : _ciError != null
               ? _ciError!
-              : '${all.length} runs ($sources)',
+              : '${all.length} runs ($sources)${_ghCacheNote.isNotEmpty ? ' • ${_ghCacheNote}' : ''}',
       trailing: Row(mainAxisSize: MainAxisSize.min, children: [
         if (_ciLoading) const SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.accentCyan)),
         if (_ciLoading) const SizedBox(width: 6),
