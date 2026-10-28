@@ -85,6 +85,8 @@ Cronjobs (each capped at 10 with a **View All** full-list screen), and Actions
 
 > Credentials are stored locally via `SharedPreferences`.
 > Private keys imported via picker are stored as content, never as paths.
+>
+> Full contract: [Metrics Agent API reference](docs/agent-api.md).
 
 ## Getting started
 
