@@ -42,7 +42,9 @@ class AgentService {
   static const String agentScript = r'''
 import json, os, time
 import hmac
+import subprocess
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import urlsplit, parse_qs
 
 AGENT_VERSION = 4
 START_TIME = time.time()
@@ -50,6 +52,9 @@ START_TIME = time.time()
 # (MCP_AGENT_TOKEN=...). Empty = open (v2/v3-compatible).
 AGENT_TOKEN = os.environ.get('MCP_AGENT_TOKEN', '')
 TOKEN_HEADER = 'X-MCP-Agent-Token'
+# /logs sources. journald first, plain syslog files as fallback —
+# never arbitrary paths, never shell.
+ALLOWED_LOG_SOURCES = ('journal', 'syslog')
 
 def read_cpu():
     try:
@@ -138,6 +143,38 @@ def read_boot_epoch_s():
         return int(time.time() - up)
     except Exception:
         return 0
+
+def _run_tail(argv, timeout=5):
+    try:
+        p = subprocess.run(argv, capture_output=True, text=True,
+                           timeout=timeout)
+        if p.returncode == 0:
+            return p.stdout.split('\n')
+    except Exception:
+        pass
+    return []
+
+def read_logs(source='journal', lines=100):
+    try:
+        n = max(20, min(500, int(lines)))
+    except Exception:
+        n = 100
+    if source not in ALLOWED_LOG_SOURCES:
+        source = 'journal'
+    rows = []
+    if source == 'journal':
+        rows = _run_tail(['journalctl', '--no-pager', '-n', str(n)])
+    if not rows:
+        for path in ('/var/log/syslog', '/var/log/messages'):
+            try:
+                with open(path, errors='replace') as f:
+                    rows = f.read().split('\n')[-n:]
+                if any(r.strip() for r in rows):
+                    break
+            except Exception:
+                continue
+    rows = [r for r in rows if r.strip() != '']
+    return rows[-n:]
 
 def _proc_snapshot():
     procs = {}
@@ -232,7 +269,9 @@ class H(BaseHTTPRequestHandler):
             self._send(401, {'error': 'unauthorized',
                              'hint': 'send ' + TOKEN_HEADER})
             return
-        path = self.path.split('?', 1)[0].rstrip('/') or '/'
+        parts = urlsplit(self.path)
+        path = parts.path.rstrip('/') or '/'
+        qs = parse_qs(parts.query)
         if path == '/metrics':
             body = {'cpu': round(read_cpu(), 3), 'ram': round(read_ram(), 3),
                     'disk': round(read_disk(), 3), 'uptime_days': read_uptime_days(),
@@ -252,6 +291,18 @@ class H(BaseHTTPRequestHandler):
         elif path == '/health':
             body = {'status': 'ok', 'version': AGENT_VERSION,
                     'agent_uptime_s': int(time.time() - START_TIME)}
+        elif path == '/logs':
+            src = (qs.get('source', ['journal'])[0] or 'journal').strip()
+            if src not in ALLOWED_LOG_SOURCES:
+                self._send(400, {'error': 'bad_source',
+                                 'allowed': list(ALLOWED_LOG_SOURCES)})
+                return
+            try:
+                n = int(qs.get('lines', ['100'])[0])
+            except Exception:
+                n = 100
+            body = {'version': AGENT_VERSION, 'source': src,
+                    'lines': read_logs(src, n)}
         else:
             self._send(404, {'error': 'not_found', 'path': path})
             return
@@ -874,6 +925,50 @@ WantedBy=multi-user.target
           decodeAgentBody(body, kHealthPath));
     } catch (_) {
       return null;
+    }
+  }
+
+  /// GET http://host:9108/logs?source=&lines= -> raw log lines (agent v4+).
+  ///
+  /// Throws typed [AgentProtocolException] (never null): `unauthorized`
+  /// when the host enforces token auth, `badPayload` on a bad source
+  /// (HTTP 400) or schema violation, `staleAgent` below the version
+  /// floor. Pair with `LogTailService.parse` / `LogTailService.watch`
+  /// to render or stream the lines.
+  Future<List<String>> fetchAgentLogs(String host,
+      {String source = 'journal', int lines = 100, String? agentToken}) async {
+    final src = kAgentLogSources.contains(source) ? source : 'journal';
+    final n = lines.clamp(20, 500);
+    try {
+      final hc = HttpClient()..connectionTimeout = const Duration(seconds: 5);
+      final req = await hc.get(host, agentPort, '/logs?source=$src&lines=$n');
+      _applyAgentToken(req, agentToken);
+      final resp = await req.close().timeout(const Duration(seconds: 8));
+      final body = await resp.transform(utf8.decoder).join();
+      hc.close();
+      if (resp.statusCode != 200) {
+        throw agentHttpError(resp.statusCode, '/logs');
+      }
+      final map = decodeAgentBody(body, '/logs');
+      final version = map['version'];
+      if (version is! num || version.toInt() < kMinAgentVersion) {
+        throw const AgentProtocolException(
+            AgentErrorCode.staleAgent, '/logs version missing or stale');
+      }
+      final raw = map['lines'];
+      if (raw is! List) {
+        throw const AgentProtocolException(
+            AgentErrorCode.badPayload, '"/logs.lines" missing or not a list');
+      }
+      return raw.map((e) => e.toString()).toList();
+    } on AgentProtocolException {
+      rethrow;
+    } on SocketException catch (e) {
+      throw AgentProtocolException(
+          AgentErrorCode.unreachable, '/logs unreachable: $e');
+    } on TimeoutException {
+      throw const AgentProtocolException(
+          AgentErrorCode.timeout, '/logs read timed out');
     }
   }
 
