@@ -13,6 +13,19 @@ Verified live via `gh` on 2026-10-28 — no action needed unless noted.
 - Labels: `mock-gap`, `github-api`, `actions-timeline`, `alert-polling`,
   `secure-storage`, `ci`, `release` (+ defaults). Milestones: `GitHub-API wiring`, `v1.0-beta`.
 
+## Owner ruling 2026-10-28 (via Mirza) — PUBLIC repo
+- Repo is **PUBLIC, MIT-licensed** (`LICENSE`, from PR #7; README badge + License
+  section agree). No "Private — all rights reserved" line exists on `main` or any
+  open branch (searched 2026-10-28) — if one is spotted, it is stale: delete it and
+  keep MIT. Tracked for Naura's README rework (see issue: public-MIT posture check).
+- Sofia's PR #28 (commercial packaging, OSS-through-v1) is consistent with MIT;
+  this PR takes no license stance beyond the existing file — owner to confirm.
+- Description/topics verified public-appropriate; no change needed.
+- Credential migration is Option A per owner mandate (flutter_secure_storage,
+  decision PR #17): nothing in this PR's templates suggests prefs-storage is
+  acceptable — the PR template requires "no secrets in code/logs/screenshots"
+  and the secure-storage gap is tracked as issue #25.
+
 ## Owner calls (your decision)
 - [ ] `delete_branch_on_merge`: currently **off**. Recommend ON (keeps the
   branch list clean; merged feature branches pile up otherwise).
@@ -22,6 +35,6 @@ Verified live via `gh` on 2026-10-28 — no action needed unless noted.
 - [ ] Squash vs merge-commit: all three methods allowed. Pick one convention
   (suggest squash for feature PRs) and enforce by unchecking the others in
   Settings → General → Pull Requests.
-- [ ] Open review: PR #13 (`feat/real-logs-metrics-alerts`) is red on `analyze`
-  (`num` vs `double` at `control_center_screen.dart:289-293`). Fix suggestion
-  is posted on the PR — merge only after CI goes green.
+- [ ] Open review: PR #13 (`feat/real-logs-metrics-alerts`) was merged 2026-10-28
+  after its `analyze` failure (`num` vs `double`) was fixed pre-merge — no action.
+  Keep requiring green CI before merging feature PRs.
