@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/server_connection.dart';
+import 'secret_hygiene.dart';
 
 /// Secrets live in the OS keychain/keystore; everything else stays in
 /// SharedPreferences. Server list JSON in prefs holds `secure:<key>`
@@ -74,6 +75,40 @@ class SecureStore {
       }
       await prefs.setBool(_migratedFlag, true);
     } catch (_) {}
+  }
+
+  /// Vault status for the Settings UI: whether the one-time migration ran
+  /// plus how many plaintext secrets are still prefs-resident (missed or
+  /// keychain-unavailable). Read-only, never throws — the UI decides.
+  static Future<({bool migrated, int plaintext})> vaultStatus() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final migrated = prefs.getBool(_migratedFlag) == true;
+      var plaintext = 0;
+      final raw = prefs.getString('server_connections');
+      if (raw != null) {
+        try {
+          plaintext += SecretHygiene.findRawCredentials(jsonDecode(raw) as List).length;
+        } catch (_) {}
+      }
+      for (final k in ['github_token', 'gitlab_token', 'ai_key']) {
+        final v = prefs.getString(k);
+        if (v != null && v.isNotEmpty) plaintext++;
+      }
+      return (migrated: migrated, plaintext: plaintext);
+    } catch (_) {
+      return (migrated: false, plaintext: 0);
+    }
+  }
+
+  /// Clear the migration flag and re-run (Settings RETRY path for when the
+  /// keychain was unavailable at first launch). Best-effort, never throws.
+  static Future<void> retryMigration() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove(_migratedFlag);
+    } catch (_) {}
+    await migrateIfNeeded();
   }
 
   /// Load servers, resolving `secure:` credential markers from the keychain.
