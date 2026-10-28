@@ -122,7 +122,19 @@ class MetricBar extends StatelessWidget {
   const MetricBar({super.key, required this.label, required this.value, required this.color});
   @override
   Widget build(BuildContext context) {
-    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+    final pct = (value * 100).toInt();
+    // Spec 02 §4: the state word is derived from the bar's own color, so the
+    // announcement can never disagree with the displayed hue — bar state is
+    // never carried by color alone.
+    final state = color == AppColors.critical
+        ? 'critical'
+        : color == AppColors.warning
+            ? 'warning'
+            : 'normal';
+    return Semantics(
+      label: '$label $pct percent, $state',
+      excludeSemantics: true,
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
         // Spec 02-server-status-card §2.3: bar labels are scanned copy —
         // textSecondary, never decorative-only textMuted.
@@ -134,7 +146,8 @@ class MetricBar extends StatelessWidget {
         borderRadius: BorderRadius.circular(4),
         child: LinearProgressIndicator(value: value, minHeight: 4, backgroundColor: AppColors.surface2, valueColor: AlwaysStoppedAnimation(color)),
       ),
-    ]);
+      ]),
+    );
   }
 }
 

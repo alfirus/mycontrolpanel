@@ -51,6 +51,44 @@ void main() {
       final label = tester.widget<Text>(find.text('CPU'));
       expect(label.style?.color, AppColors.textSecondary);
     });
+
+    testWidgets('announces "CPU 71 percent, normal" — never color alone (spec 02 §4)', (tester) async {
+      await tester.pumpWidget(_wrap(const MetricBar(
+        label: 'CPU',
+        value: 0.71,
+        color: AppColors.textSecondary,
+      )));
+      final semantics = tester.getSemantics(find.byWidgetPredicate(
+        (w) => w is Semantics && (w.properties.label ?? '').startsWith('CPU'),
+      ));
+      expect(semantics.label, 'CPU 71 percent, normal');
+    });
+
+    testWidgets('state word follows the bar hue: warning/critical', (tester) async {
+      await tester.pumpWidget(_wrap(const MetricBar(
+        label: 'DISK',
+        value: 0.82,
+        color: AppColors.warning,
+      )));
+      expect(
+        tester.getSemantics(find.byWidgetPredicate(
+          (w) => w is Semantics && (w.properties.label ?? '').startsWith('DISK'),
+        )).label,
+        'DISK 82 percent, warning',
+      );
+
+      await tester.pumpWidget(_wrap(const MetricBar(
+        label: 'CPU',
+        value: 0.91,
+        color: AppColors.critical,
+      )));
+      expect(
+        tester.getSemantics(find.byWidgetPredicate(
+          (w) => w is Semantics && (w.properties.label ?? '').startsWith('CPU'),
+        )).label,
+        'CPU 91 percent, critical',
+      );
+    });
   });
 
   group('PitchCard (spec 01 rule)', () {
