@@ -1,12 +1,16 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 import 'package:dartssh2/dartssh2.dart';
 import '../models/alert_entry.dart';
 import '../models/app_entry.dart';
 import '../models/app_proc.dart';
 import '../models/cron_entry.dart';
 import '../models/server_connection.dart';
+import 'agent_protocol.dart';
+import 'secure_store.dart';
+import 'ssh_host_keys.dart';
 import 'ssh_key_loader.dart';
 
 class AgentInstallResult {
@@ -20,16 +24,40 @@ class AgentInstallResult {
 class AgentService {
   static const int agentPort = 9108;
 
-  /// Agent v2: stdlib-only Python.
-  /// /metrics -> {"cpu","ram","disk","uptime_days","version":2}
-  /// /procstats -> {"version":2,"top":[{"pid","name","cpu","mem_mb"}], "ports":{"3000":{"listening":true,"established":2}}}
+  /// Agent v4: stdlib-only Python.
+  /// /metrics -> {"cpu","ram","disk","uptime_days","version":4,"load1":...}
+  /// /procstats -> {"version":4,"top":[{"pid","name","cpu","mem_mb"}], "ports":{"3000":{"listening":true,"established":2}}}
+  /// /sysstats (v3+) -> {"version":4,"load1","load5","load15",
+  ///   "mem":{"total_mb","avail_mb","swap_total_mb","swap_free_mb"},
+  ///   "gpu":{"present","count"},"agent_uptime_s":...,
+  ///   "nproc":...,"boot_epoch_s":...}
+  /// /health (v4+) -> {"status":"ok","version":4,"agent_uptime_s":...}
+  /// Token auth (v4+): when MCP_AGENT_TOKEN is set (via /etc/mcp-agent.env),
+  /// every endpoint requires `X-MCP-Agent-Token`; mismatch -> 401 JSON.
+  /// Unset = open (backwards compatible with v2/v3 clients).
   /// APM-lite: top processes by CPU + per-port established connections.
-  static const int agentVersion = 2;
+  /// Sysstats adds load average, memory detail, GPU presence, agent uptime,
+  /// CPU count and boot epoch for capacity planning (e.g. sizing on-host
+  /// model serving) and reboot detection without an SSH round-trip.
+  /// Inference stats themselves live app-side in LlmReliability and are
+  /// correlated by host — the agent never fabricates inference counters.
+  static const int agentVersion = 4;
   static const String agentScript = r'''
 import json, os, time
+import hmac
+import subprocess
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import urlsplit, parse_qs
 
-AGENT_VERSION = 2
+AGENT_VERSION = 4
+START_TIME = time.time()
+# Optional shared secret. Set via EnvironmentFile /etc/mcp-agent.env
+# (MCP_AGENT_TOKEN=...). Empty = open (v2/v3-compatible).
+AGENT_TOKEN = os.environ.get('MCP_AGENT_TOKEN', '')
+TOKEN_HEADER = 'X-MCP-Agent-Token'
+# /logs sources. journald first, plain syslog files as fallback —
+# never arbitrary paths, never shell.
+ALLOWED_LOG_SOURCES = ('journal', 'syslog')
 
 def read_cpu():
     try:
@@ -73,6 +101,83 @@ def read_uptime_days():
         with open('/proc/uptime') as f:
             return int(float(f.read().split()[0]) // 86400)
     except Exception: return 0
+
+def read_loadavg():
+    try:
+        with open('/proc/loadavg') as f:
+            p = f.read().split()
+        return [float(p[0]), float(p[1]), float(p[2])]
+    except Exception:
+        return [0.0, 0.0, 0.0]
+
+def read_mem_detail():
+    try:
+        info = {}
+        with open('/proc/meminfo') as f:
+            for line in f:
+                k, v = line.split(':')
+                info[k.strip()] = int(v.strip().split()[0])
+        return {'total_mb': info.get('MemTotal', 0) // 1024,
+                'avail_mb': info.get('MemAvailable', info.get('MemFree', 0)) // 1024,
+                'swap_total_mb': info.get('SwapTotal', 0) // 1024,
+                'swap_free_mb': info.get('SwapFree', 0) // 1024}
+    except Exception:
+        return {'total_mb': 0, 'avail_mb': 0, 'swap_total_mb': 0, 'swap_free_mb': 0}
+
+def read_gpu():
+    try:
+        import glob
+        devs = glob.glob('/dev/nvidia[0-9]*')
+        return {'present': len(devs) > 0, 'count': len(devs)}
+    except Exception:
+        return {'present': False, 'count': 0}
+
+def read_nproc():
+    try:
+        n = os.cpu_count()
+        return n if n and n > 0 else 1
+    except Exception:
+        return 1
+
+def read_boot_epoch_s():
+    try:
+        with open('/proc/uptime') as f:
+            up = float(f.read().split()[0])
+        return int(time.time() - up)
+    except Exception:
+        return 0
+
+def _run_tail(argv, timeout=5):
+    try:
+        p = subprocess.run(argv, capture_output=True, text=True,
+                           timeout=timeout)
+        if p.returncode == 0:
+            return p.stdout.split('\n')
+    except Exception:
+        pass
+    return []
+
+def read_logs(source='journal', lines=100):
+    try:
+        n = max(20, min(500, int(lines)))
+    except Exception:
+        n = 100
+    if source not in ALLOWED_LOG_SOURCES:
+        source = 'journal'
+    rows = []
+    if source == 'journal':
+        rows = _run_tail(['journalctl', '--no-pager', '-n', str(n)])
+    if not rows:
+        for path in ('/var/log/syslog', '/var/log/messages'):
+            try:
+                with open(path, errors='replace') as f:
+                    rows = f.read().split('\n')[-n:]
+                if any(r.strip() for r in rows):
+                    break
+            except Exception:
+                continue
+    rows = [r for r in rows if r.strip() != '']
+    return rows[-n:]
 
 def _proc_snapshot():
     procs = {}
@@ -142,20 +247,80 @@ def read_ports():
     return ports
 
 class H(BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path == '/metrics':
-            body = json.dumps({'cpu': round(read_cpu(), 3), 'ram': round(read_ram(), 3),
-                               'disk': round(read_disk(), 3), 'uptime_days': read_uptime_days(),
-                               'version': AGENT_VERSION}).encode()
-        elif self.path == '/procstats':
-            body = json.dumps({'version': AGENT_VERSION, 'top': read_top_processes(),
-                               'ports': read_ports()}).encode()
-        else:
-            self.send_response(404); self.end_headers(); return
-        self.send_response(200)
+    def _send(self, code, obj):
+        try:
+            body = json.dumps(obj).encode()
+        except Exception:
+            code, body = 500, b'{"error":"encode_failed"}'
+        self.send_response(code)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Content-Length', str(len(body)))
-        self.end_headers(); self.wfile.write(body)
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except Exception:
+            pass
+
+    def _authorized(self):
+        if not AGENT_TOKEN:
+            return True
+        got = self.headers.get(TOKEN_HEADER, '')
+        return hmac.compare_digest(got, AGENT_TOKEN)
+
+    def do_GET(self):
+        if not self._authorized():
+            self._send(401, {'error': 'unauthorized',
+                             'hint': 'send ' + TOKEN_HEADER})
+            return
+        parts = urlsplit(self.path)
+        path = parts.path.rstrip('/') or '/'
+        qs = parse_qs(parts.query)
+        if path == '/metrics':
+            body = {'cpu': round(read_cpu(), 3), 'ram': round(read_ram(), 3),
+                    'disk': round(read_disk(), 3), 'uptime_days': read_uptime_days(),
+                    'load1': round(read_loadavg()[0], 2),
+                    'version': AGENT_VERSION}
+        elif path == '/procstats':
+            body = {'version': AGENT_VERSION, 'top': read_top_processes(),
+                    'ports': read_ports()}
+        elif path == '/sysstats':
+            la = read_loadavg()
+            body = {'version': AGENT_VERSION,
+                    'load1': round(la[0], 2), 'load5': round(la[1], 2),
+                    'load15': round(la[2], 2), 'mem': read_mem_detail(),
+                    'gpu': read_gpu(),
+                    'agent_uptime_s': int(time.time() - START_TIME),
+                    'nproc': read_nproc(), 'boot_epoch_s': read_boot_epoch_s()}
+        elif path == '/health':
+            body = {'status': 'ok', 'version': AGENT_VERSION,
+                    'agent_uptime_s': int(time.time() - START_TIME)}
+        elif path == '/logs':
+            src = (qs.get('source', ['journal'])[0] or 'journal').strip()
+            if src not in ALLOWED_LOG_SOURCES:
+                self._send(400, {'error': 'bad_source',
+                                 'allowed': list(ALLOWED_LOG_SOURCES)})
+                return
+            try:
+                n = int(qs.get('lines', ['100'])[0])
+            except Exception:
+                n = 100
+            body = {'version': AGENT_VERSION, 'source': src,
+                    'lines': read_logs(src, n)}
+        else:
+            self._send(404, {'error': 'not_found', 'path': path})
+            return
+        self._send(200, body)
+
+    def _method_not_allowed(self):
+        self._send(405, {'error': 'method_not_allowed',
+                         'hint': 'use GET'})
+
+    do_POST = _method_not_allowed
+    do_PUT = _method_not_allowed
+    do_DELETE = _method_not_allowed
+    do_PATCH = _method_not_allowed
+    do_HEAD = _method_not_allowed
+    do_OPTIONS = _method_not_allowed
     def log_message(self, *a): pass
 
 HTTPServer(('0.0.0.0', 9108), H).serve_forever()
@@ -167,6 +332,11 @@ Description=MyControlPanel metrics agent
 After=network.target
 [Service]
 ExecStart=/usr/bin/python3 /opt/mcp-agent/agent.py
+# Optional shared secret for the v4 agent (X-MCP-Agent-Token).
+# Absent file = open agent (v2/v3-compatible). To enforce auth:
+#   echo 'MCP_AGENT_TOKEN=<secret>' | sudo tee /etc/mcp-agent.env
+#   sudo chmod 600 /etc/mcp-agent.env && sudo systemctl restart mcp-agent
+EnvironmentFile=-/etc/mcp-agent.env
 Restart=always
 RestartSec=5
 [Install]
@@ -215,6 +385,7 @@ WantedBy=multi-user.target
       client = SSHClient(socket,
           username: s.username,
           onPasswordRequest: passwordCb,
+          onVerifyHostKey: SshHostKeys.verifierFor(s.host, s.port),
           identities: keyPairs ?? const []);
       await client.authenticated.timeout(const Duration(seconds: 20));
       log('SSH authenticated.');
@@ -258,6 +429,19 @@ WantedBy=multi-user.target
       await unit.stdin.close().timeout(const Duration(seconds: 30));
       await unit.done.timeout(const Duration(seconds: 30));
       log('systemd unit written.');
+      // v4 token gate (secure default): mint a per-host secret, deploy it as
+      // the unit's EnvironmentFile, and keep the same value in the keychain
+      // so polling authenticates. Reinstall = rotation (both sides together).
+      final agentToken = newAgentToken();
+      final envUp = await client.execute(
+          'sudo -n tee /etc/mcp-agent.env > /dev/null && sudo -n chmod 600 /etc/mcp-agent.env && echo TOKEN_OK');
+      envUp.stdin.add(utf8.encode('MCP_AGENT_TOKEN=$agentToken\n'));
+      await envUp.stdin.close().timeout(const Duration(seconds: 30));
+      final envOut = await envUp.stdout.cast<List<int>>().transform(utf8.decoder).join().timeout(const Duration(seconds: 30));
+      await envUp.done.timeout(const Duration(seconds: 30));
+      if (!envOut.contains('TOKEN_OK')) throw Exception('agent token deploy failed');
+      await SecureStore.writeAgentToken(s.id, agentToken);
+      log('Agent token provisioned (keychain + host env, mode 600).');
       await run('sudo -n systemctl daemon-reload && sudo -n systemctl enable --now mcp-agent && sleep 2 && sudo -n systemctl is-active mcp-agent');
       log('Service active.');
       await run('ss -ltn 2>/dev/null | grep 9108 || netstat -ltn 2>/dev/null | grep 9108 || echo PORT_CHECK_SKIP');
@@ -272,7 +456,7 @@ WantedBy=multi-user.target
 
       // verify from this machine
       log('Verifying http://${s.host}:$agentPort/metrics ...');
-      final m = await fetch(s.host);
+      final m = await fetch(s.host, serverId: s.id);
       if (m == null) throw Exception('agent installed but /metrics unreachable from here (firewall? open TCP $agentPort)');
       log('Verified: cpu=${m['cpu']} ram=${m['ram']} disk=${m['disk']} uptime=${m['uptime_days']}d');
       return AgentInstallResult(true, logs.join('\n'));
@@ -314,7 +498,7 @@ WantedBy=multi-user.target
     SSHClient? client;
     try {
       final socket = await SSHSocket.connect(s.host, s.port, timeout: const Duration(seconds: 10));
-      client = SSHClient(socket, username: s.username, onPasswordRequest: passwordCb, identities: keys ?? const []);
+      client = SSHClient(socket, username: s.username, onPasswordRequest: passwordCb, onVerifyHostKey: SshHostKeys.verifierFor(s.host, s.port), identities: keys ?? const []);
       await client.authenticated.timeout(const Duration(seconds: 15));
 
       Future<String> run(String cmd) async {
@@ -383,7 +567,7 @@ WantedBy=multi-user.target
     SSHClient? client;
     try {
       final socket = await SSHSocket.connect(s.host, s.port, timeout: const Duration(seconds: 10));
-      client = SSHClient(socket, username: s.username, onPasswordRequest: passwordCb, identities: keys ?? const []);
+      client = SSHClient(socket, username: s.username, onPasswordRequest: passwordCb, onVerifyHostKey: SshHostKeys.verifierFor(s.host, s.port), identities: keys ?? const []);
       await client.authenticated.timeout(const Duration(seconds: 15));
 
       Future<String> run(String cmd) async {
@@ -457,7 +641,7 @@ WantedBy=multi-user.target
     SSHClient? client;
     try {
       final socket = await SSHSocket.connect(s.host, s.port, timeout: const Duration(seconds: 10));
-      client = SSHClient(socket, username: s.username, onPasswordRequest: passwordCb, identities: keys ?? const []);
+      client = SSHClient(socket, username: s.username, onPasswordRequest: passwordCb, onVerifyHostKey: SshHostKeys.verifierFor(s.host, s.port), identities: keys ?? const []);
       await client.authenticated.timeout(const Duration(seconds: 15));
 
       Future<String> run(String cmd) async {
@@ -562,7 +746,7 @@ WantedBy=multi-user.target
     SSHClient? client;
     try {
       final socket = await SSHSocket.connect(s.host, s.port, timeout: const Duration(seconds: 10));
-      client = SSHClient(socket, username: s.username, onPasswordRequest: passwordCb, identities: keys ?? const []);
+      client = SSHClient(socket, username: s.username, onPasswordRequest: passwordCb, onVerifyHostKey: SshHostKeys.verifierFor(s.host, s.port), identities: keys ?? const []);
       await client.authenticated.timeout(const Duration(seconds: 15));
       final session = await client.execute(cmd);
       final out = await session.stdout.cast<List<int>>().transform(utf8.decoder).join().timeout(const Duration(seconds: 30));
@@ -595,7 +779,7 @@ WantedBy=multi-user.target
     SSHClient? client;
     try {
       final socket = await SSHSocket.connect(s.host, s.port, timeout: const Duration(seconds: 10));
-      client = SSHClient(socket, username: s.username, onPasswordRequest: passwordCb, identities: keys ?? const []);
+      client = SSHClient(socket, username: s.username, onPasswordRequest: passwordCb, onVerifyHostKey: SshHostKeys.verifierFor(s.host, s.port), identities: keys ?? const []);
       await client.authenticated.timeout(const Duration(seconds: 15));
 
       Future<String> run(String cmd) async {
@@ -643,7 +827,7 @@ WantedBy=multi-user.target
     SSHClient? client;
     try {
       final socket = await SSHSocket.connect(s.host, s.port, timeout: const Duration(seconds: 10));
-      client = SSHClient(socket, username: s.username, onPasswordRequest: passwordCb, identities: keys ?? const []);
+      client = SSHClient(socket, username: s.username, onPasswordRequest: passwordCb, onVerifyHostKey: SshHostKeys.verifierFor(s.host, s.port), identities: keys ?? const []);
       await client.authenticated.timeout(const Duration(seconds: 15));
 
       Future<String> run(String cmd) async {
@@ -704,11 +888,17 @@ WantedBy=multi-user.target
     }
   }
 
-  /// GET http://host:9108/procstats -> AppStats or null (agent v2+ only)
-  Future<AppStats?> fetchAppStats(String host) async {
+  /// GET http://host:9108/procstats -> AppStats or null (agent v2+ only).
+  /// [agentToken] is sent as X-MCP-Agent-Token when the host enforces
+  /// v4 token auth; v2/v3 agents ignore the header. When omitted, the
+  /// per-host token is read from the keychain via [serverId].
+  Future<AppStats?> fetchAppStats(String host,
+      {String? agentToken, String? serverId}) async {
     try {
+      agentToken = await _resolveAgentToken(agentToken, serverId);
       final hc = HttpClient()..connectionTimeout = const Duration(seconds: 5);
       final req = await hc.get(host, agentPort, '/procstats');
+      _applyAgentToken(req, agentToken);
       final resp = await req.close().timeout(const Duration(seconds: 8));
       if (resp.statusCode != 200) return null;
       final body = await resp.transform(utf8.decoder).join();
@@ -719,11 +909,17 @@ WantedBy=multi-user.target
     }
   }
 
-  /// GET http://host:9108/metrics -> {cpu,ram,disk,uptime_days} or null
-  Future<Map<String, dynamic>?> fetch(String host) async {
+  /// GET http://host:9108/metrics -> {cpu,ram,disk,uptime_days} or null.
+  /// [agentToken] is sent as X-MCP-Agent-Token when the host enforces
+  /// v4 token auth; v2/v3 agents ignore the header. When omitted, the
+  /// per-host token is read from the keychain via [serverId].
+  Future<Map<String, dynamic>?> fetch(String host,
+      {String? agentToken, String? serverId}) async {
     try {
+      agentToken = await _resolveAgentToken(agentToken, serverId);
       final hc = HttpClient()..connectionTimeout = const Duration(seconds: 5);
       final req = await hc.get(host, agentPort, '/metrics');
+      _applyAgentToken(req, agentToken);
       final resp = await req.close().timeout(const Duration(seconds: 6));
       if (resp.statusCode != 200) return null;
       final body = await resp.transform(utf8.decoder).join();
@@ -733,4 +929,101 @@ WantedBy=multi-user.target
       return null;
     }
   }
+
+  /// GET http://host:9108/health -> AgentHealth or null (agent v4+ only).
+  /// Null covers unreachable/timeout/non-200/stale-agent — use the typed
+  /// pollers in service_locator for failures you must distinguish.
+  /// Token resolution matches [fetch]: explicit value or keychain [serverId].
+  Future<AgentHealth?> fetchHealth(String host,
+      {String? agentToken, String? serverId}) async {
+    try {
+      agentToken = await _resolveAgentToken(agentToken, serverId);
+      final hc = HttpClient()..connectionTimeout = const Duration(seconds: 5);
+      final req = await hc.get(host, agentPort, kHealthPath);
+      _applyAgentToken(req, agentToken);
+      final resp = await req.close().timeout(const Duration(seconds: 5));
+      if (resp.statusCode != 200) return null;
+      final body = await resp.transform(utf8.decoder).join();
+      hc.close();
+      return parseAgentHealth(
+          decodeAgentBody(body, kHealthPath));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// GET http://host:9108/logs?source=&lines= -> raw log lines (agent v4+).
+  ///
+  /// Throws typed [AgentProtocolException] (never null): `unauthorized`
+  /// when the host enforces token auth, `badPayload` on a bad source
+  /// (HTTP 400) or schema violation, `staleAgent` below the version
+  /// floor. Pair with `LogTailService.parse` / `LogTailService.watch`
+  /// to render or stream the lines.
+  Future<List<String>> fetchAgentLogs(String host,
+      {String source = 'journal',
+      int lines = 100,
+      String? agentToken,
+      String? serverId}) async {
+    final src = kAgentLogSources.contains(source) ? source : 'journal';
+    final n = lines.clamp(20, 500);
+    agentToken = await _resolveAgentToken(agentToken, serverId);
+    try {
+      final hc = HttpClient()..connectionTimeout = const Duration(seconds: 5);
+      final req = await hc.get(host, agentPort, '/logs?source=$src&lines=$n');
+      _applyAgentToken(req, agentToken);
+      final resp = await req.close().timeout(const Duration(seconds: 8));
+      final body = await resp.transform(utf8.decoder).join();
+      hc.close();
+      if (resp.statusCode != 200) {
+        throw agentHttpError(resp.statusCode, '/logs');
+      }
+      final map = decodeAgentBody(body, '/logs');
+      final version = map['version'];
+      if (version is! num || version.toInt() < kMinAgentVersion) {
+        throw const AgentProtocolException(
+            AgentErrorCode.staleAgent, '/logs version missing or stale');
+      }
+      final raw = map['lines'];
+      if (raw is! List) {
+        throw const AgentProtocolException(
+            AgentErrorCode.badPayload, '"/logs.lines" missing or not a list');
+      }
+      return raw.map((e) => e.toString()).toList();
+    } on AgentProtocolException {
+      rethrow;
+    } on SocketException catch (e) {
+      throw AgentProtocolException(
+          AgentErrorCode.unreachable, '/logs unreachable: $e');
+    } on TimeoutException {
+      throw const AgentProtocolException(
+          AgentErrorCode.timeout, '/logs read timed out');
+    }
+  }
+
+  /// Attaches the reserved agent token header when configured.
+  /// v2/v3 agents ignore unknown headers, so this is safe to always send.
+  static void _applyAgentToken(HttpClientRequest req, String? agentToken) {
+    for (final e in agentAuthHeaders(agentToken).entries) {
+      req.headers.set(e.key, e.value);
+    }
+  }
+
+  /// Explicit [agentToken] wins; otherwise the per-host token from the
+  /// keychain ([serverId]). Null = open agent, header omitted.
+  static Future<String?> _resolveAgentToken(
+      String? agentToken, String? serverId) async {
+    if ((agentToken ?? '').trim().isNotEmpty) return agentToken!.trim();
+    if (serverId == null || serverId.isEmpty) return null;
+    final stored = await SecureStore.readAgentToken(serverId);
+    return (stored ?? '').trim().isEmpty ? null : stored!.trim();
+  }
+
+  /// Fresh per-host agent token (256-bit, base64url). The value is written
+  /// to the host env file AND the keychain together — never logged.
+  static String newAgentToken() {
+    final bytes = List<int>.generate(32, (_) => _random.nextInt(256));
+    return base64Url.encode(bytes).replaceAll('=', '');
+  }
+
+  static final _random = Random.secure();
 }

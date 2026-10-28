@@ -12,6 +12,7 @@ import '../services/ai_service.dart';
 import '../services/github_service.dart';
 import '../services/gitlab_service.dart';
 import '../services/secure_store.dart';
+import '../services/ssh_host_keys.dart';
 import '../services/ssh_key_loader.dart';
 import '../services/update_service.dart';
 import '../widgets/pitch_card.dart';
@@ -20,6 +21,36 @@ class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
   @override
   State<SettingsScreen> createState() => _SettingsScreenState();
+}
+
+/// Host/IP validation for the server dialog (pure, unit-tested).
+/// Accepts IPv4 + DNS names (incl. single-label like `localhost`);
+/// rejects URLs, embedded ports, blanks and malformed names.
+String? validateServerHost(String? v) {
+  final s = (v ?? '').trim();
+  if (s.isEmpty) return 'Required';
+  if (s.contains('://') || s.contains('/')) return 'Host or IP — not a URL';
+  if (s.contains(':')) return 'No port here — use the Port field';
+  if (s.length > 253) return 'Too long';
+  final ipv4 = RegExp(r'^\d{1,3}(\.\d{1,3}){3}$');
+  if (ipv4.hasMatch(s)) {
+    for (final o in s.split('.')) {
+      final n = int.tryParse(o);
+      if (n == null || n > 255) return 'Invalid IPv4 address';
+    }
+    return null;
+  }
+  if (s.contains(' ') || s.contains('_')) return 'Invalid hostname';
+  final labels = s.split('.');
+  final labelOk = RegExp(r'^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$');
+  for (final l in labels) {
+    if (!labelOk.hasMatch(l)) return 'Invalid hostname';
+  }
+  // All-numeric dotted quads that failed IPv4 are mistyped IPs, not names.
+  if (labels.length > 1 && labels.every((l) => RegExp(r'^\d+$').hasMatch(l))) {
+    return 'Invalid IPv4 address';
+  }
+  return null;
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
@@ -59,6 +90,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
   final _aiBaseCtrl = TextEditingController();
   final _aiKeyCtrl = TextEditingController();
   final _aiModelCtrl = TextEditingController();
+  // Credential-vault migration status (SecureStore.vaultStatus, loaded async)
+  bool _vaultLoaded = false;
+  bool _vaultMigrated = true;
+  int _vaultPlaintext = 0;
+  bool _vaultBusy = false;
 
   @override
   void initState() {
@@ -85,8 +121,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final ghTok = await SecureStore.readSecret('github_token') ?? '';
     final glTok = await SecureStore.readSecret('gitlab_token') ?? '';
     final aiK = await SecureStore.readSecret('ai_key') ?? '';
+    final vs = await SecureStore.vaultStatus();
     if (!mounted) return;
     setState(() {
+      _vaultLoaded = true;
+      _vaultMigrated = vs.migrated;
+      _vaultPlaintext = vs.plaintext;
       _githubToken = ghTok;
       _githubUser = prefs.getString('github_user') ?? '';
       _githubTokenCtrl.text = _githubToken;
@@ -174,6 +214,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _testConnection(ServerConnection s) async {
     showDialog(context: context, barrierDismissible: false, builder: (_) => const Center(child: CircularProgressIndicator(color: AppColors.accentCyan)));
     String? error;
+    String? hostKeyNote;
     try {
       List<SSHKeyPair>? keys;
       String? Function()? passwordCb;
@@ -191,16 +232,28 @@ class _SettingsScreenState extends State<SettingsScreen> {
       }
       if (error == null) {
         final socket = await SSHSocket.connect(s.host, s.port, timeout: const Duration(seconds: 10));
-        final client = SSHClient(socket, username: s.username, onPasswordRequest: passwordCb, identities: keys ?? const []);
+        HostKeyEvent? hostKeyEvent;
+        final client = SSHClient(socket, username: s.username, onPasswordRequest: passwordCb, onVerifyHostKey: SshHostKeys.verifierFor(s.host, s.port, onEvent: (e) => hostKeyEvent = e), identities: keys ?? const []);
         await client.authenticated.timeout(const Duration(seconds: 15));
         final session = await client.execute('echo OK');
         final out = await session.stdout.cast<List<int>>().transform(const Utf8Decoder()).join().timeout(const Duration(seconds: 10));
         final ok = session.exitCode == 0 && out.trim() == 'OK';
         client.close();
-        if (!ok) error = 'SSH ok but remote command failed (exit ${session.exitCode}).';
+        if (!ok) {
+          error = 'SSH ok but remote command failed (exit ${session.exitCode}).';
+        } else if (hostKeyEvent != null) {
+          // Surface the TOFU outcome: first connects pin, later ones verify.
+          final fp = hostKeyEvent!.fingerprint.isEmpty ? 'unreadable fingerprint' : hostKeyEvent!.fingerprint;
+          hostKeyNote = hostKeyEvent!.verdict == HostKeyVerdict.firstSeen
+              ? 'New host key pinned — verify out-of-band on first connect ($fp).'
+              : 'Host key verified ($fp).';
+        }
       }
     } catch (e) {
       error = e.toString().replaceFirst('Exception: ', '').split('\n').first;
+      if (error!.contains('Hostkey verification failed') || error!.contains('SSHHostkeyError')) {
+        error = 'Host key changed for ${s.host}:${s.port} — connection refused (possible MITM). If the host was reinstalled, open the server → FORGET the pinned key, verify the new fingerprint out-of-band, then retry.';
+      }
       if (error!.length > 160) error = '${error!.substring(0, 160)}…';
     }
     if (!mounted) return;
@@ -211,10 +264,59 @@ class _SettingsScreenState extends State<SettingsScreen> {
       content: Row(children: [
         Icon(success ? Icons.check_circle : Icons.error_outline, size: 14, color: success ? AppColors.success : AppColors.critical),
         const SizedBox(width: 8),
-        Expanded(child: Text(success ? 'SSH to ${s.host}:${s.port} ✓ (${s.authMethod.name})' : 'SSH failed: $error', style: TextStyle(color: success ? AppColors.success : AppColors.critical, fontSize: 12, fontWeight: FontWeight.w600))),
+        Expanded(child: Text(success ? 'SSH to ${s.host}:${s.port} ✓ (${s.authMethod.name})${hostKeyNote == null ? '' : '\n$hostKeyNote'}' : 'SSH failed: $error', style: TextStyle(color: success ? AppColors.success : AppColors.critical, fontSize: 12, fontWeight: FontWeight.w600))),
       ]),
       duration: Duration(seconds: success ? 3 : 6),
     ));
+  }
+
+  /// Per-host metrics-agent token (v4 gate): set/rotate/clear.
+  /// Stored ONLY in the OS keychain via SecureStore — never displayed back,
+  /// never in prefs JSON, never logged. One-click install provisions it
+  /// automatically; this dialog covers manual/scripted installs and rotation.
+  Future<void> _manageAgentToken(ServerConnection s) async {
+    final current = await SecureStore.readAgentToken(s.id);
+    if (!mounted) return;
+    final isSet = (current ?? '').isNotEmpty;
+    final ctrl = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.surface0,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: const BorderSide(color: AppColors.border)),
+        title: Text('AGENT TOKEN • ${s.name}', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w800, letterSpacing: 0.5, color: AppColors.textPrimary)),
+        content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(isSet ? 'Status: SET (value hidden) — enter a new value to rotate.' : 'Status: UNSET — polling is unauthenticated (open agent).', style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)),
+          const SizedBox(height: 8),
+          TextField(controller: ctrl, obscureText: true, style: const TextStyle(fontSize: 12, color: AppColors.textPrimary, fontFamily: AppFonts.mono), decoration: const InputDecoration(hintText: 'Paste token…', hintStyle: TextStyle(fontSize: 11, color: AppColors.textMuted), filled: true, fillColor: AppColors.surface1, border: OutlineInputBorder(borderRadius: BorderRadius.all(Radius.circular(8)), borderSide: BorderSide(color: AppColors.border)))),
+          const SizedBox(height: 6),
+          const Text('Must match MCP_AGENT_TOKEN on the host. Polling sends it as X-MCP-Agent-Token.', style: TextStyle(fontSize: 10, color: AppColors.textMuted)),
+        ]),
+        actions: [
+          if (isSet)
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('CLEAR', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: AppColors.critical))),
+          TextButton(onPressed: () => Navigator.pop(ctx, null), child: const Text('CANCEL', style: TextStyle(fontSize: 11, color: AppColors.textSecondary))),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), style: FilledButton.styleFrom(backgroundColor: AppColors.accentCyan, foregroundColor: Colors.black), child: const Text('SAVE', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800))),
+        ],
+      ),
+    );
+    final pastedValue = ctrl.text.trim();
+    ctrl.dispose();
+    if (!mounted) return;
+    if (ok == null) return; // cancelled
+    if (ok) {
+      final v = pastedValue;
+      if (v.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(backgroundColor: AppColors.surface1, content: Text('Empty value — token unchanged', style: TextStyle(fontSize: 12, color: AppColors.warning))));
+        return;
+      }
+      await SecureStore.writeAgentToken(s.id, v);
+    } else {
+      await SecureStore.writeAgentToken(s.id, '');
+    }
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(backgroundColor: AppColors.surface1, content: Text(ok ? 'Agent token saved (keychain) ✓' : 'Agent token cleared — polling unauthenticated', style: const TextStyle(fontSize: 12, color: AppColors.success))));
+    }
   }
 
   @override
@@ -256,6 +358,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
             Text('${filtered.length} shown', style: const TextStyle(fontSize: 10, color: AppColors.textMuted, fontFamily: AppFonts.mono)),
           ]),
         ),
+        // Credential vault — migration outcome + action
+        _vaultCard(),
         // Two-col for app prefs + integrations
         LayoutBuilder(builder: (_, c) {
           final isWide = c.maxWidth > 700;
@@ -264,13 +368,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
             child: Column(children: [
               _switchTile('Auto-refresh', 'Poll servers every interval', _autoRefresh, (v){ setState(()=> _autoRefresh=v); _savePrefs(); }),
               _sliderTile('Refresh interval', '${_refreshInterval.toInt()}s', _refreshInterval, 5, 60, (v){ setState(()=> _refreshInterval=v); _savePrefs(); }),
-              _switchTile('Notifications', 'Alert on critical incidents', _notifications, (v){ setState(()=> _notifications=v); _savePrefs(); }),
+              _switchTile('Notifications', 'OS alert on critical incidents', _notifications, (v){ setState(()=> _notifications=v); _savePrefs(); }),
               _switchTile('Biometrics', 'Face ID / Touch ID on launch (soon)', _biometrics, (v){ setState(()=> _biometrics=v); _savePrefs(); }),
               const SizedBox(height: 4),
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
                 decoration: BoxDecoration(color: AppColors.surface2, borderRadius: BorderRadius.circular(6), border: Border.all(color: AppColors.border)),
-                child: const Text('Auto-refresh polls live now. Push notifications + biometric lock screen are on the roadmap — toggles are saved and ready for them.', style: TextStyle(fontSize: 10, color: AppColors.textMuted)),
+                child: const Text('Auto-refresh polls live now, with OS notifications for fresh critical alerts. Biometric lock screen is on the roadmap — its toggle is saved and ready.', style: TextStyle(fontSize: 10, color: AppColors.textMuted)),
               ),
               const SizedBox(height: 4),
               Row(children: [
@@ -317,6 +421,73 @@ class _SettingsScreenState extends State<SettingsScreen> {
         const Center(child: Text('MY CONTROL PANEL • SETTINGS • prefs for UI state, OS keychain for secrets', style: TextStyle(fontSize: 9, color: AppColors.textDim, letterSpacing: 0.6, fontWeight: FontWeight.w600))),
       ]),
     );
+  }
+
+  /// Credential-vault migration UI: silent auto-migration already ran in
+  /// _load — this card makes its outcome visible (success vs N plaintext
+  /// secrets left behind) with a MIGRATE/RETRY action. Omitted until loaded.
+  Widget _vaultCard() {
+    if (!_vaultLoaded) return const SizedBox.shrink();
+    final clean = _vaultPlaintext == 0;
+    return PitchCard(
+      title: 'CREDENTIAL VAULT',
+      subtitle: clean
+          ? 'OS keychain/keystore • encrypted on device'
+          : '$_vaultPlaintext plaintext secret${_vaultPlaintext == 1 ? '' : 's'} on device',
+      trailing: clean
+          ? Container(width: 30, height: 30, decoration: BoxDecoration(color: AppColors.success.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(8), border: Border.all(color: AppColors.success.withValues(alpha: 0.25))), child: const Icon(Icons.lock, size: 14, color: AppColors.success))
+          : FilledButton.icon(
+              onPressed: _vaultBusy ? null : _runMigration,
+              icon: _vaultBusy
+                  ? const SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black))
+                  : const Icon(Icons.lock_open, size: 13),
+              label: Text(_vaultBusy ? 'MIGRATING' : (_vaultMigrated ? 'RETRY MIGRATION' : 'MIGRATE NOW'), style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w800)),
+              style: FilledButton.styleFrom(backgroundColor: AppColors.warning, foregroundColor: Colors.black, padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8))),
+            ),
+      child: Row(children: [
+        Icon(clean ? Icons.check_circle : Icons.warning_amber_rounded, size: 16, color: clean ? AppColors.success : AppColors.warning),
+        const SizedBox(width: 10),
+        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(
+            clean
+                ? 'All secrets encrypted'
+                : (_vaultMigrated
+                    ? 'Keychain was unavailable — secrets stayed in app prefs'
+                    : 'Secrets predate keychain storage'),
+            style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: clean ? AppColors.textPrimary : AppColors.warning),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            clean
+                ? '${_servers.length} server credential${_servers.length == 1 ? '' : 's'} + tokens in the keychain — prefs hold markers only.'
+                : 'Migrating moves them to the OS keychain and wipes the prefs copies.',
+            style: const TextStyle(fontSize: 11, color: AppColors.textSecondary),
+          ),
+        ])),
+      ]),
+    );
+  }
+
+  Future<void> _runMigration() async {
+    setState(() => _vaultBusy = true);
+    await SecureStore.retryMigration();
+    final vs = await SecureStore.vaultStatus();
+    if (!mounted) return;
+    setState(() {
+      _vaultBusy = false;
+      _vaultMigrated = vs.migrated;
+      _vaultPlaintext = vs.plaintext;
+    });
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      backgroundColor: vs.plaintext == 0 ? AppColors.success.withValues(alpha: 0.14) : AppColors.critical.withValues(alpha: 0.14),
+      content: Text(
+        vs.plaintext == 0
+            ? 'Vault encrypted ✓ — secrets now live in the OS keychain.'
+            : 'Still ${vs.plaintext} plaintext secret${vs.plaintext == 1 ? '' : 's'} — keychain unavailable on this device, will retry on launch.',
+        style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: vs.plaintext == 0 ? AppColors.success : AppColors.critical),
+      ),
+      duration: const Duration(seconds: 4),
+    ));
   }
 
   Widget _emptyState() => Container(
@@ -369,6 +540,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
             Column(children: [
               Row(mainAxisSize: MainAxisSize.min, children: [
                 IconButton(icon: const Icon(Icons.bolt, size: 14, color: AppColors.accentCyan), tooltip: 'Test', onPressed: ()=> _testConnection(s), style: IconButton.styleFrom(backgroundColor: AppColors.accentCyan.withValues(alpha: 0.12), padding: const EdgeInsets.all(6), minimumSize: const Size(28,28))),
+                const SizedBox(width: 4),
+                IconButton(icon: const Icon(Icons.key_outlined, size: 14, color: AppColors.textSecondary), tooltip: 'Agent token', onPressed: ()=> _manageAgentToken(s), style: IconButton.styleFrom(backgroundColor: AppColors.surface2, padding: const EdgeInsets.all(6), minimumSize: const Size(28,28))),
                 const SizedBox(width: 4),
                 IconButton(icon: Icon(s.enabled ? Icons.visibility : Icons.visibility_off, size: 14, color: AppColors.textSecondary), tooltip: s.enabled ? 'Disable' : 'Enable', onPressed: () async { setState(()=> _servers[_servers.indexWhere((e)=>e.id==s.id)] = s.copyWith(enabled: !s.enabled)); await _saveServers(); }, style: IconButton.styleFrom(backgroundColor: AppColors.surface2, padding: const EdgeInsets.all(6), minimumSize: const Size(28,28))),
                 const SizedBox(width: 4),
@@ -1126,6 +1299,32 @@ class _ServerDialogState extends State<_ServerDialog> {
     _region = e?.region ?? 'us-east-1';
     _os = e?.os ?? 'Ubuntu 24.04';
     _cred.addListener(() => setState(() {})); // refresh key fingerprint line
+    if (e != null) {
+      _pinnedFor = '${e.host}:${e.port}';
+      _loadPinned(e.host, e.port);
+    }
+  }
+
+  String? _pinned;
+  String _pinnedFor = '';
+
+  /// Pinned SSH host key(s) for this server (TOFU pins, non-secret).
+  Future<void> _loadPinned(String host, int port) async {
+    final s = await SshHostKeys.summary(host, port);
+    if (!mounted) return;
+    setState(() => _pinned = s.isEmpty ? null : s);
+  }
+
+  /// Clear pins after a legitimate host reinstall / key rotation.
+  /// Next connect re-pins — verify the new fingerprint out-of-band first.
+  Future<void> _forgetPinned() async {
+    final e = widget.existing;
+    if (e == null) return;
+    await SshHostKeys.forget(e.host, e.port);
+    await _loadPinned(e.host, e.port);
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(backgroundColor: AppColors.surface1, content: Text('Pinned host key forgotten — next connect re-pins (verify it out-of-band)', style: TextStyle(fontSize: 12, color: AppColors.warning))));
+    }
   }
 
   /// Non-secret summary of what's in the credential field (never key material).
@@ -1170,7 +1369,7 @@ class _ServerDialogState extends State<_ServerDialog> {
               _field('Server name *', _name, 'prod-core-01', Icons.badge_outlined, validator: (v)=> v==null||v.trim().isEmpty ? 'Required' : null),
               const SizedBox(height: 10),
               Row(children: [
-                Expanded(flex: 3, child: _field('Host / IP *', _host, '10.0.1.10 or prod.example.com', Icons.language, validator: (v)=> v==null||v.trim().isEmpty ? 'Required' : null)),
+                Expanded(flex: 3, child: _field('Host / IP *', _host, '10.0.1.10 or prod.example.com', Icons.language, validator: validateServerHost)),
                 const SizedBox(width: 10),
                 Expanded(child: _field('Port *', _port, '22', Icons.numbers, keyboard: TextInputType.number, validator: (v){ if(v==null||v.isEmpty) return 'Req'; final p=int.tryParse(v); if(p==null||p<1||p>65535) return '1-65535'; return null; })),
               ]),
@@ -1233,6 +1432,19 @@ class _ServerDialogState extends State<_ServerDialog> {
                     const Icon(Icons.fingerprint, size: 13, color: AppColors.accentCyan),
                     const SizedBox(width: 6),
                     Expanded(child: Text(_keyFingerprint(), style: const TextStyle(fontSize: 10, color: AppColors.textSecondary, fontFamily: AppFonts.mono))),
+                  ]),
+                ),
+              if (isEdit)
+                Container(
+                  margin: const EdgeInsets.only(top: 6),
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                  decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(6), border: Border.all(color: AppColors.border)),
+                  child: Row(children: [
+                    const Icon(Icons.verified_user_outlined, size: 13, color: AppColors.accentCyan),
+                    const SizedBox(width: 6),
+                    Expanded(child: Text(_pinned == null ? 'No host key pinned for $_pinnedFor yet — first connect pins it (verify out-of-band).' : 'Pinned host key ($_pinnedFor): $_pinned', style: const TextStyle(fontSize: 10, color: AppColors.textSecondary, fontFamily: AppFonts.mono))),
+                    if (_pinned != null)
+                      TextButton(onPressed: _forgetPinned, child: const Text('FORGET', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800))),
                   ]),
                 ),
               const SizedBox(height: 10),
