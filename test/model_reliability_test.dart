@@ -79,8 +79,9 @@ void main() {
     });
 
     test('total errors collapse the score to F', () {
-      final s =
-          ModelReliability.capacityScore(errorRate: 1, p95Ms: 500, load1: 0.5);
+      final s = ModelReliability.capacityScore(
+          errorRate: 1, p95Ms: 30000, load1: 8);
+      expect(s, closeTo(0, 1e-9));
       expect(ModelReliability.reliabilityGrade(s), 'F');
     });
 
