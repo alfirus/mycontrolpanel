@@ -1,41 +1,33 @@
-import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:local_notifier/local_notifier.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// OS-level notifications for fresh alerts + failed CI runs.
 ///
-/// The control center already diffs firing alerts / failed runs through
+/// The control center already diffs firing alerts / failed CI runs through
 /// [AlertWatch] and shows an in-app SnackBar; this service delivers the
-/// same titles as real OS notifications so they survive when the app is
-/// backgrounded. Gated on the existing `notifications` preference
-/// (Settings, default on). All plugin calls are best-effort: init/show
-/// failures are swallowed so a missing platform backend can never crash
-/// the app. Unit-tested surface is the pure summary/gate logic below.
+/// same titles as real OS notifications via `local_notifier` (classic
+/// MethodChannel plugin on Linux/macOS/Windows — deliberately NOT an FFI
+/// plugin: the FFI-based alternative broke `flutter build windows` on CI
+/// with a silent flutter_assemble failure, see PR #85 discussion).
+/// On mobile (no desktop plugin) the channel call throws and is
+/// swallowed — the in-app SnackBar remains the mobile path.
+/// Gated on the existing `notifications` preference (Settings, default
+/// on). All plugin calls are best-effort: init/show failures are
+/// swallowed so a missing platform backend can never crash the app.
+/// Unit-tested surface is the pure summary/gate logic below.
 class AlertNotifications {
-  static const channelId = 'mcp_alerts';
-  static const channelName = 'Critical alerts';
   static const _prefKey = 'notifications';
-
-  static final FlutterLocalNotificationsPlugin _plugin =
-      FlutterLocalNotificationsPlugin();
   static bool _ready = false;
 
   /// Initialize once (safe to call repeatedly; failures stay silent).
+  /// `ignore` avoids writing Start-menu shortcuts on Windows dev boxes.
   static Future<void> init() async {
     if (_ready) return;
     try {
-      const settings = InitializationSettings(
-        android: AndroidInitializationSettings('@mipmap/ic_launcher'),
-        iOS: DarwinInitializationSettings(),
-        macOS: DarwinInitializationSettings(),
-        linux: LinuxInitializationSettings(
-            defaultActionName: 'Open MyControlPanel'),
-        windows: WindowsInitializationSettings(
-          appName: 'MyControlPanel',
-          appUserModelId: 'Alfirus.MyControlPanel',
-          guid: '{3B4F2A10-8C6D-4E2A-9F1B-7D5C8A0E1234}',
-        ),
+      await LocalNotifier.instance.setup(
+        appName: 'MyControlPanel',
+        shortcutPolicy: ShortcutPolicy.ignore,
       );
-      await _plugin.initialize(settings: settings);
       _ready = true;
     } catch (_) {
       _ready = false;
@@ -51,23 +43,13 @@ class AlertNotifications {
     try {
       await init();
       if (!_ready) return false;
-      await _plugin.show(
-        id: 0,
+      final note = LocalNotification(
+        identifier: 'mcp-alert-${DateTime.now().millisecondsSinceEpoch}',
         title: summary.title,
+        subtitle: 'MyControlPanel',
         body: summary.body,
-        notificationDetails: const NotificationDetails(
-          android: AndroidNotificationDetails(
-            channelId,
-            channelName,
-            importance: Importance.high,
-            priority: Priority.high,
-          ),
-          iOS: DarwinNotificationDetails(),
-          macOS: DarwinNotificationDetails(),
-          linux: LinuxNotificationDetails(),
-          windows: WindowsNotificationDetails(),
-        ),
       );
+      await LocalNotifier.instance.notify(note);
       return true;
     } catch (_) {
       return false;
