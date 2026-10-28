@@ -8,6 +8,7 @@ import '../models/app_proc.dart';
 import '../models/cron_entry.dart';
 import '../models/server_connection.dart';
 import 'agent_protocol.dart';
+import 'ssh_host_keys.dart';
 import 'ssh_key_loader.dart';
 
 class AgentInstallResult {
@@ -331,6 +332,7 @@ WantedBy=multi-user.target
       client = SSHClient(socket,
           username: s.username,
           onPasswordRequest: passwordCb,
+          onVerifyHostKey: SshHostKeys.verifierFor(s.host, s.port),
           identities: keyPairs ?? const []);
       await client.authenticated.timeout(const Duration(seconds: 20));
       log('SSH authenticated.');
@@ -430,7 +432,7 @@ WantedBy=multi-user.target
     SSHClient? client;
     try {
       final socket = await SSHSocket.connect(s.host, s.port, timeout: const Duration(seconds: 10));
-      client = SSHClient(socket, username: s.username, onPasswordRequest: passwordCb, identities: keys ?? const []);
+      client = SSHClient(socket, username: s.username, onPasswordRequest: passwordCb, onVerifyHostKey: SshHostKeys.verifierFor(s.host, s.port), identities: keys ?? const []);
       await client.authenticated.timeout(const Duration(seconds: 15));
 
       Future<String> run(String cmd) async {
@@ -499,7 +501,7 @@ WantedBy=multi-user.target
     SSHClient? client;
     try {
       final socket = await SSHSocket.connect(s.host, s.port, timeout: const Duration(seconds: 10));
-      client = SSHClient(socket, username: s.username, onPasswordRequest: passwordCb, identities: keys ?? const []);
+      client = SSHClient(socket, username: s.username, onPasswordRequest: passwordCb, onVerifyHostKey: SshHostKeys.verifierFor(s.host, s.port), identities: keys ?? const []);
       await client.authenticated.timeout(const Duration(seconds: 15));
 
       Future<String> run(String cmd) async {
@@ -573,7 +575,7 @@ WantedBy=multi-user.target
     SSHClient? client;
     try {
       final socket = await SSHSocket.connect(s.host, s.port, timeout: const Duration(seconds: 10));
-      client = SSHClient(socket, username: s.username, onPasswordRequest: passwordCb, identities: keys ?? const []);
+      client = SSHClient(socket, username: s.username, onPasswordRequest: passwordCb, onVerifyHostKey: SshHostKeys.verifierFor(s.host, s.port), identities: keys ?? const []);
       await client.authenticated.timeout(const Duration(seconds: 15));
 
       Future<String> run(String cmd) async {
@@ -678,7 +680,7 @@ WantedBy=multi-user.target
     SSHClient? client;
     try {
       final socket = await SSHSocket.connect(s.host, s.port, timeout: const Duration(seconds: 10));
-      client = SSHClient(socket, username: s.username, onPasswordRequest: passwordCb, identities: keys ?? const []);
+      client = SSHClient(socket, username: s.username, onPasswordRequest: passwordCb, onVerifyHostKey: SshHostKeys.verifierFor(s.host, s.port), identities: keys ?? const []);
       await client.authenticated.timeout(const Duration(seconds: 15));
       final session = await client.execute(cmd);
       final out = await session.stdout.cast<List<int>>().transform(utf8.decoder).join().timeout(const Duration(seconds: 30));
@@ -711,7 +713,7 @@ WantedBy=multi-user.target
     SSHClient? client;
     try {
       final socket = await SSHSocket.connect(s.host, s.port, timeout: const Duration(seconds: 10));
-      client = SSHClient(socket, username: s.username, onPasswordRequest: passwordCb, identities: keys ?? const []);
+      client = SSHClient(socket, username: s.username, onPasswordRequest: passwordCb, onVerifyHostKey: SshHostKeys.verifierFor(s.host, s.port), identities: keys ?? const []);
       await client.authenticated.timeout(const Duration(seconds: 15));
 
       Future<String> run(String cmd) async {
@@ -759,7 +761,7 @@ WantedBy=multi-user.target
     SSHClient? client;
     try {
       final socket = await SSHSocket.connect(s.host, s.port, timeout: const Duration(seconds: 10));
-      client = SSHClient(socket, username: s.username, onPasswordRequest: passwordCb, identities: keys ?? const []);
+      client = SSHClient(socket, username: s.username, onPasswordRequest: passwordCb, onVerifyHostKey: SshHostKeys.verifierFor(s.host, s.port), identities: keys ?? const []);
       await client.authenticated.timeout(const Duration(seconds: 15));
 
       Future<String> run(String cmd) async {
