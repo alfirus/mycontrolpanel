@@ -289,8 +289,8 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
           unawaited(MetricsHistory.record(c.host, cpu, ram, disk, sw.elapsedMilliseconds.toDouble()));
           if (mounted) {
             setState(() {
-              _latHistory[c.host] = <double>[...(_latHistory[c.host] ?? []), sw.elapsedMilliseconds.toDouble()].take(40).toList();
-              _cpuHistory[c.host] = <double>[...(_cpuHistory[c.host] ?? []), cpu].take(40).toList();
+              _latHistory[c.host] = [...?_latHistory[c.host], sw.elapsedMilliseconds.toDouble()].take(40).toList();
+              _cpuHistory[c.host] = [...?_cpuHistory[c.host], cpu].take(40).toList();
             });
           }
         }
