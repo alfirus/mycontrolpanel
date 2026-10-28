@@ -1,0 +1,22 @@
+[Unit]
+Description=MyControlPanel metrics agent (:9108)
+Documentation=https://github.com/alfirus/mycontrolpanel/blob/main/docs/runbooks/agent-lifecycle.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/mcp-agent/agent.py
+WorkingDirectory=/opt/mcp-agent
+Restart=always
+RestartSec=5
+# Least privilege: the agent only reads /proc + listens on :9108.
+# It must NOT run as root where avoidable; /opt/mcp-agent stays
+# owned by the service user with mode 755/644.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/mcp-agent
+
+[Install]
+WantedBy=multi-user.target
