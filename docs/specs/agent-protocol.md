@@ -61,6 +61,23 @@ Zara's polling job, and any load-balancer check; only fall through to
 
 Any other path → **404** with a JSON body (`{"error":"not_found",...}`).
 Non-GET methods → **405** (`{"error":"method_not_allowed",...}`).
+Bad `/logs` source → **400** (`{"error":"bad_source","allowed":[...]}`).
+
+### GET /logs → 200 application/json (agent v4+)
+
+```json
+{"version": 4, "source": "journal", "lines": ["Oct 28 sshd[1]: ..."]}
+```
+
+| field | type | rule |
+|---|---|---|
+| `source` | string | `journal` or `syslog` (allowlisted; anything else → 400) |
+| `lines` | array ≤ 500 | newest last, blank lines stripped |
+| query | `?source=&lines=` | `lines` clamped 20..500, defaults 100 |
+
+Read-only by construction: no shell (argv exec of `journalctl` only),
+no arbitrary paths (fixed syslog fallbacks). Token-gated like every
+other endpoint when `MCP_AGENT_TOKEN` is set.
 
 ### GET /sysstats (agent v3+) — see `docs/specs/agent-sysstats.md`
 
