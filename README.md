@@ -54,7 +54,7 @@ log-tail stream. All screens and models exist; API wiring is on the roadmap.
 | **Metrics & Uptime** | Latency p95 chart + Uptime/p95/Errors/Req-min KPIs | Agent + mock |
 | **Security Watch** | Findings with severity + category | Mock (API-ready) |
 | **AI Chatbox** | Floating assistant aware of all segments | Mock replies (LLM-ready) |
-| **Settings** | Server connections (password / SSH key / token), app prefs | `SharedPreferences` |
+| **Settings** | Server connections (password / SSH key / token), app prefs | OS keychain via `SecureStore` (`flutter_secure_storage`); prefs hold only `secure:` markers |
 
 ### Server Details
 
@@ -83,7 +83,9 @@ Cronjobs (each capped at 10 with a **View All** full-list screen), and Actions
 3. **Everything populates** — metrics, crons, apps, alerts stream in over SSH;
    rescan manually or by switching tabs.
 
-> Credentials are stored locally via `SharedPreferences`.
+> Credentials are stored in the OS keychain/keystore via `flutter_secure_storage`
+> (`SecureStore`); `SharedPreferences` holds only `secure:` markers.
+> Legacy prefs-resident secrets migrate automatically on first launch.
 > Private keys imported via picker are stored as content, never as paths.
 
 ## Getting started
