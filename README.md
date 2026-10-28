@@ -205,6 +205,13 @@ lib/
 
 Feedback and PRs welcome — especially homelab/self-hosted setups.
 
+## Pricing
+
+**Community (MIT) is the only edition today** — free, unlimited servers,
+public repo. Pro and MSP bundles are *proposed* post-traction concepts with
+no prices and no sale dates; quoting them is off-limits until Sofia + Finance
+sign the license call (PR #28). Full tier framing: [docs/packaging.md](docs/packaging.md).
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
