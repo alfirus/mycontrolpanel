@@ -23,6 +23,36 @@ class SettingsScreen extends StatefulWidget {
   State<SettingsScreen> createState() => _SettingsScreenState();
 }
 
+/// Host/IP validation for the server dialog (pure, unit-tested).
+/// Accepts IPv4 + DNS names (incl. single-label like `localhost`);
+/// rejects URLs, embedded ports, blanks and malformed names.
+String? validateServerHost(String? v) {
+  final s = (v ?? '').trim();
+  if (s.isEmpty) return 'Required';
+  if (s.contains('://') || s.contains('/')) return 'Host or IP — not a URL';
+  if (s.contains(':')) return 'No port here — use the Port field';
+  if (s.length > 253) return 'Too long';
+  final ipv4 = RegExp(r'^\d{1,3}(\.\d{1,3}){3}$');
+  if (ipv4.hasMatch(s)) {
+    for (final o in s.split('.')) {
+      final n = int.tryParse(o);
+      if (n == null || n > 255) return 'Invalid IPv4 address';
+    }
+    return null;
+  }
+  if (s.contains(' ') || s.contains('_')) return 'Invalid hostname';
+  final labels = s.split('.');
+  final labelOk = RegExp(r'^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$');
+  for (final l in labels) {
+    if (!labelOk.hasMatch(l)) return 'Invalid hostname';
+  }
+  // All-numeric dotted quads that failed IPv4 are mistyped IPs, not names.
+  if (labels.length > 1 && labels.every((l) => RegExp(r'^\d+$').hasMatch(l))) {
+    return 'Invalid IPv4 address';
+  }
+  return null;
+}
+
 class _SettingsScreenState extends State<SettingsScreen> {
   List<ServerConnection> _servers = [];
   bool _loading = true;
@@ -60,6 +90,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
   final _aiBaseCtrl = TextEditingController();
   final _aiKeyCtrl = TextEditingController();
   final _aiModelCtrl = TextEditingController();
+  // Credential-vault migration status (SecureStore.vaultStatus, loaded async)
+  bool _vaultLoaded = false;
+  bool _vaultMigrated = true;
+  int _vaultPlaintext = 0;
+  bool _vaultBusy = false;
 
   @override
   void initState() {
@@ -86,8 +121,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final ghTok = await SecureStore.readSecret('github_token') ?? '';
     final glTok = await SecureStore.readSecret('gitlab_token') ?? '';
     final aiK = await SecureStore.readSecret('ai_key') ?? '';
+    final vs = await SecureStore.vaultStatus();
     if (!mounted) return;
     setState(() {
+      _vaultLoaded = true;
+      _vaultMigrated = vs.migrated;
+      _vaultPlaintext = vs.plaintext;
       _githubToken = ghTok;
       _githubUser = prefs.getString('github_user') ?? '';
       _githubTokenCtrl.text = _githubToken;
@@ -270,6 +309,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
             Text('${filtered.length} shown', style: const TextStyle(fontSize: 10, color: AppColors.textMuted, fontFamily: AppFonts.mono)),
           ]),
         ),
+        // Credential vault — migration outcome + action
+        _vaultCard(),
         // Two-col for app prefs + integrations
         LayoutBuilder(builder: (_, c) {
           final isWide = c.maxWidth > 700;
@@ -331,6 +372,73 @@ class _SettingsScreenState extends State<SettingsScreen> {
         const Center(child: Text('MY CONTROL PANEL • SETTINGS • prefs for UI state, OS keychain for secrets', style: TextStyle(fontSize: 9, color: AppColors.textDim, letterSpacing: 0.6, fontWeight: FontWeight.w600))),
       ]),
     );
+  }
+
+  /// Credential-vault migration UI: silent auto-migration already ran in
+  /// _load — this card makes its outcome visible (success vs N plaintext
+  /// secrets left behind) with a MIGRATE/RETRY action. Omitted until loaded.
+  Widget _vaultCard() {
+    if (!_vaultLoaded) return const SizedBox.shrink();
+    final clean = _vaultPlaintext == 0;
+    return PitchCard(
+      title: 'CREDENTIAL VAULT',
+      subtitle: clean
+          ? 'OS keychain/keystore • encrypted on device'
+          : '$_vaultPlaintext plaintext secret${_vaultPlaintext == 1 ? '' : 's'} on device',
+      trailing: clean
+          ? Container(width: 30, height: 30, decoration: BoxDecoration(color: AppColors.success.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(8), border: Border.all(color: AppColors.success.withValues(alpha: 0.25))), child: const Icon(Icons.lock, size: 14, color: AppColors.success))
+          : FilledButton.icon(
+              onPressed: _vaultBusy ? null : _runMigration,
+              icon: _vaultBusy
+                  ? const SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black))
+                  : const Icon(Icons.lock_open, size: 13),
+              label: Text(_vaultBusy ? 'MIGRATING' : (_vaultMigrated ? 'RETRY MIGRATION' : 'MIGRATE NOW'), style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w800)),
+              style: FilledButton.styleFrom(backgroundColor: AppColors.warning, foregroundColor: Colors.black, padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8))),
+            ),
+      child: Row(children: [
+        Icon(clean ? Icons.check_circle : Icons.warning_amber_rounded, size: 16, color: clean ? AppColors.success : AppColors.warning),
+        const SizedBox(width: 10),
+        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(
+            clean
+                ? 'All secrets encrypted'
+                : (_vaultMigrated
+                    ? 'Keychain was unavailable — secrets stayed in app prefs'
+                    : 'Secrets predate keychain storage'),
+            style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: clean ? AppColors.textPrimary : AppColors.warning),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            clean
+                ? '${_servers.length} server credential${_servers.length == 1 ? '' : 's'} + tokens in the keychain — prefs hold markers only.'
+                : 'Migrating moves them to the OS keychain and wipes the prefs copies.',
+            style: const TextStyle(fontSize: 11, color: AppColors.textSecondary),
+          ),
+        ])),
+      ]),
+    );
+  }
+
+  Future<void> _runMigration() async {
+    setState(() => _vaultBusy = true);
+    await SecureStore.retryMigration();
+    final vs = await SecureStore.vaultStatus();
+    if (!mounted) return;
+    setState(() {
+      _vaultBusy = false;
+      _vaultMigrated = vs.migrated;
+      _vaultPlaintext = vs.plaintext;
+    });
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      backgroundColor: vs.plaintext == 0 ? AppColors.success.withValues(alpha: 0.14) : AppColors.critical.withValues(alpha: 0.14),
+      content: Text(
+        vs.plaintext == 0
+            ? 'Vault encrypted ✓ — secrets now live in the OS keychain.'
+            : 'Still ${vs.plaintext} plaintext secret${vs.plaintext == 1 ? '' : 's'} — keychain unavailable on this device, will retry on launch.',
+        style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: vs.plaintext == 0 ? AppColors.success : AppColors.critical),
+      ),
+      duration: const Duration(seconds: 4),
+    ));
   }
 
   Widget _emptyState() => Container(
@@ -1210,7 +1318,7 @@ class _ServerDialogState extends State<_ServerDialog> {
               _field('Server name *', _name, 'prod-core-01', Icons.badge_outlined, validator: (v)=> v==null||v.trim().isEmpty ? 'Required' : null),
               const SizedBox(height: 10),
               Row(children: [
-                Expanded(flex: 3, child: _field('Host / IP *', _host, '10.0.1.10 or prod.example.com', Icons.language, validator: (v)=> v==null||v.trim().isEmpty ? 'Required' : null)),
+                Expanded(flex: 3, child: _field('Host / IP *', _host, '10.0.1.10 or prod.example.com', Icons.language, validator: validateServerHost)),
                 const SizedBox(width: 10),
                 Expanded(child: _field('Port *', _port, '22', Icons.numbers, keyboard: TextInputType.number, validator: (v){ if(v==null||v.isEmpty) return 'Req'; final p=int.tryParse(v); if(p==null||p<1||p>65535) return '1-65535'; return null; })),
               ]),
