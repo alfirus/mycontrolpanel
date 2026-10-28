@@ -1,8 +1,8 @@
 # Secrets-hardening runbook (toward flutter_secure_storage)
 
 Decision context: `docs/decisions/001-credential-storage.md` mandates
-Option A — full migration to `flutter_secure_storage` (Alya owns the
-cutover execution; this runbook is the DevOps companion, not a second
+Option A — full migration to `flutter_secure_storage` (Alya's cutover,
+now merged to main; this runbook is the DevOps companion, not a second
 implementation).
 
 ## Where secrets live
@@ -34,10 +34,9 @@ If `findRawCredentials` is ever non-empty in production: re-run
 `SecureStore.migrateIfNeeded()` (idempotent, best-effort), then rotate the
 affected credentials — migration copies the secret, it does not expire it.
 
-## Rotation + pruning (Alya's cutover)
+## Rotation + pruning (in `SecureStore` on main)
 
-`SecureStore.rotateServerCredential` / `pruneServerCredentials` (mandated
-cutover branch) overwrite keychain entries without touching the masked
+`SecureStore.rotateServerCredential` / `pruneServerCredentials` overwrite keychain entries without touching the masked
 prefs JSON and delete entries for removed servers. Rotate on: suspected
 exposure, team-member offboarding, and after any migration that copied a
 previously-plaintext secret.
