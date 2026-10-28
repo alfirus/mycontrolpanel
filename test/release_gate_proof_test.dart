@@ -137,8 +137,14 @@ void main() {
     });
 
     test('install script carries the read-back markers the gate requires', () {
+      // Port 9108 lives in the agent payload (agentScript) and the
+      // AgentService.agentPort constant the app + firewall docs use — NOT
+      // in the systemd unit, which only launches agent.py. (A first draft
+      // of this test asserted 9108 in serviceUnit and CI correctly failed
+      // it; the gate proof caught a bad verifier claim before merge.)
       expect(AgentService.agentScript.contains('9108'), isTrue);
-      expect(AgentService.serviceUnit.contains('9108'), isTrue);
+      expect(AgentService.serviceUnit.contains('/opt/mcp-agent/agent.py'),
+          isTrue);
       expect(AgentService.serviceUnit.contains('mcp-agent'), isTrue);
     });
   });
