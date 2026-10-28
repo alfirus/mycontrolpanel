@@ -23,13 +23,16 @@ void main() {
     });
 
     test('caps output length', () {
+      // Each section renders at most 10 items, so overflow needs LONG
+      // items: 10 log lines x 800 chars each blows past the 6k ceiling.
+      final big = List.generate(10, (i) => 'log line $i ' + 'x' * 800);
       final ctx = ChatContextBuilder.build(
         servers: List.generate(60, (i) => {'name': 'h$i', 'ip': 'x', 'region': 'r', 'status': 'online'}),
         metrics: const {},
         alerts: List.generate(60, (i) => 'alert number $i with a fairly long description text'),
         crons: const [],
         apps: const [],
-        recentLogs: List.generate(200, (i) => 'log line $i ' * 20),
+        recentLogs: big,
       );
       expect(ctx.length, lessThanOrEqualTo(ChatContextBuilder.maxChars + 100));
       expect(ctx, contains('truncated'));
