@@ -6,6 +6,7 @@ import '../models/alert_entry.dart';
 import '../models/app_entry.dart';
 import '../models/app_proc.dart';
 import '../models/cron_entry.dart';
+import '../models/mock_data.dart';
 import '../models/server_connection.dart';
 import 'agent_protocol.dart';
 import 'service_contracts.dart';
@@ -103,6 +104,67 @@ class MockKeyLoader implements KeyLoader {
     return const KeyLoadOutcome(
         ok: true, detected: 'mock key (MCP_MOCKS)');
   }
+}
+
+/// Deterministic GitHub data behind the MCP_MOCKS flag: one open issue,
+/// one open PR, and a 3-run Actions history (success/failed/running) that
+/// exercises the CI badge + rerun paths in widget tests.
+class MockGithubRepository implements GithubRepo {
+  const MockGithubRepository();
+
+  static final _at = DateTime.utc(2026, 10, 27, 12);
+
+  @override
+  Future<String> validate() async => 'mock-user';
+
+  @override
+  Future<List<GithubItem>> repoIssues(String repo) async => [
+        GithubItem(
+          title: 'Mock: agent reconnect loop on flaky wifi',
+          repo: repo,
+          author: 'mock-user',
+          number: 101,
+          state: 'open',
+          labels: const ['bug'],
+          updatedAt: _at,
+          comments: 2,
+        ),
+      ];
+
+  @override
+  Future<List<GithubItem>> repoPRs(String repo) async => [
+        GithubItem(
+          title: 'Mock: harden agent token auth',
+          repo: repo,
+          author: 'mock-user',
+          number: 102,
+          state: 'open',
+          labels: const ['backend'],
+          updatedAt: _at,
+          comments: 1,
+        ),
+      ];
+
+  @override
+  Future<List<DeployItem>> repoRuns(String repo, {int limit = 8}) async => [
+        DeployItem(
+            app: 'ci', version: 'main', env: repo, actor: 'mock-user',
+            time: _at, status: 'success', duration: '3m'),
+        DeployItem(
+            app: 'ci', version: 'feat/x', env: repo, actor: 'mock-user',
+            time: _at, status: 'failed', duration: '5m', runId: 9001),
+        DeployItem(
+            app: 'ci', version: 'feat/y', env: repo, actor: 'mock-user',
+            time: _at, status: 'running', duration: '1m', runId: 9002),
+      ].take(limit).toList();
+
+  @override
+  Future<bool> rerunRun(String repo, int runId) async => true;
+
+  @override
+  Future<int> createIssue(String repo, String title,
+          {String body = '', List<String> labels = const []}) async =>
+      103;
 }
 
 /// In-memory secret store for tests/previews. Never touches the OS

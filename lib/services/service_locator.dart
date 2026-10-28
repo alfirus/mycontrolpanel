@@ -16,6 +16,7 @@ import '../models/cron_entry.dart';
 import '../models/server_connection.dart';
 import 'agent_protocol.dart';
 import 'agent_service.dart';
+import 'github_service.dart';
 import 'mock_services.dart';
 import 'secure_store.dart';
 import 'service_contracts.dart';
@@ -30,6 +31,7 @@ class Services {
   final AlertRepository alerts;
   final KeyLoader keys;
   final SecretStore secrets;
+  final GithubRepo github;
 
   const Services({
     required this.metrics,
@@ -39,6 +41,7 @@ class Services {
     required this.alerts,
     required this.keys,
     required this.secrets,
+    required this.github,
   });
 
   static Services? _current;
@@ -68,6 +71,7 @@ class MockServices extends Services {
           alerts: const MockAlertRepository(),
           keys: const MockKeyLoader(),
           secrets: _ErrorSecretStore(),
+          github: const MockGithubRepository(),
         );
 }
 
@@ -92,6 +96,8 @@ class LiveServices extends Services {
           alerts: _AgentAlertAdapter(),
           keys: _SshKeyLoaderAdapter(),
           secrets: _SecureStoreAdapter(),
+          github: LiveGithubRepo(
+              () => SecureStore.readSecret('github_token')),
         );
 }
 
