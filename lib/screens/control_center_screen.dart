@@ -28,6 +28,9 @@ import '../models/audit_entry.dart';
 import '../services/github_service.dart';
 import '../services/gitlab_service.dart';
 import '../services/ssh_key_loader.dart';
+import '../services/log_tail_service.dart';
+import '../services/metrics_history.dart';
+import '../services/alert_watch.dart';
 import 'server_details_screen.dart';
 import '../widgets/pitch_card.dart';
 import 'audit_screen.dart';
@@ -55,6 +58,14 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
   Timer? _autoTimer;
   DateTime? _lastAutoPoll;
   List<LogLine> _liveLogs = List.of(mockLogs);
+  String _logSource = 'journal'; // journal | syslog | docker
+  String _logContainer = '';
+  bool _logLoading = false;
+  String? _logError;
+  String? _logServerId; // null = first saved server
+  Map<String, List<double>> _latHistory = {}; // host -> recent latencies
+  Map<String, List<double>> _cpuHistory = {}; // host -> recent cpu 0..1
+  int _alertBadge = 0;
   List<ServerConnection> _savedServers = [];
   bool get _useRealServers => _savedServers.isNotEmpty;
   final _agent = AgentService();
@@ -266,9 +277,23 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     _agentsPolling = true;
     try {
       for (final c in _savedServers) {
+        final sw = Stopwatch()..start();
         final m = await _agent.fetch(c.host);
+        sw.stop();
         if (!mounted) return;
-        if (m != null) setState(() => _metrics[c.id] = m);
+        if (m != null) {
+          setState(() => _metrics[c.id] = m);
+          final cpu = (((m['cpu'] as num?) ?? 0).toDouble()).clamp(0.0, 1.0).toDouble();
+          final ram = (((m['ram'] as num?) ?? 0).toDouble()).clamp(0.0, 1.0).toDouble();
+          final disk = (((m['disk'] as num?) ?? 0).toDouble()).clamp(0.0, 1.0).toDouble();
+          unawaited(MetricsHistory.record(c.host, cpu, ram, disk, sw.elapsedMilliseconds.toDouble()));
+          if (mounted) {
+            setState(() {
+              _latHistory[c.host] = [...(_latHistory[c.host] ?? []), sw.elapsedMilliseconds.toDouble()].take(40).toList();
+              _cpuHistory[c.host] = [...(_cpuHistory[c.host] ?? []), cpu].take(40).toList();
+            });
+          }
+        }
         final ps = await _agent.fetchAppStats(c.host);
         if (!mounted) return;
         if (ps != null) {
@@ -280,8 +305,76 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
       _pollCrons();
       _pollApps();
       _pollAlerts();
+      _updateAlertBadge();
+      _pollRealLogs();
     } finally {
       _agentsPolling = false;
+    }
+  }
+
+  /// Foreground alert watcher: badge + snack on new firing alerts / failed runs.
+  Future<void> _updateAlertBadge() async {
+    try {
+      final keys = AlertWatch.currentKeys(_realAlerts, _allRuns);
+      final seen = await _readSeenKeys();
+      final fresh = AlertWatch.freshTitles(keys, seen, _realAlerts, _allRuns);
+      if (!mounted) return;
+      setState(() => _alertBadge = keys.length);
+      await AlertWatch.markSeen(keys);
+      if (fresh.isNotEmpty && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('⚠ ${fresh.first}${fresh.length > 1 ? ' (+${fresh.length - 1} more)' : ''}'), backgroundColor: AppColors.critical, duration: const Duration(seconds: 4)),
+        );
+      }
+    } catch (_) {}
+  }
+
+  Future<Set<String>> _readSeenKeys() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      return prefs.getStringList('alert_watch_seen_v1')?.toSet() ?? {};
+    } catch (_) {
+      return {};
+    }
+  }
+
+  /// Real log tail for the selected saved server (read-only SSH).
+  /// Runs on each agent poll tick; silent on failure (keeps last logs).
+  Future<void> _pollRealLogs() async {
+    if (!_useRealServers || _logLoading) return;
+    final matches = _logServerId == null
+        ? _savedServers
+        : _savedServers.where((s) => s.id == _logServerId).toList();
+    if (matches.isEmpty) return;
+    final server = matches.first;
+    var container = _logContainer;
+    if (_logSource == 'docker' && container.isEmpty) {
+      for (final a in _realApps) {
+        if (a.source == 'docker' && a.serverId == server.id) { container = a.name; break; }
+      }
+      if (container.isEmpty) {
+        for (final a in _realApps) {
+          if (a.source == 'docker') { container = a.name; break; }
+        }
+      }
+    }
+    setState(() { _logLoading = true; _logError = null; });
+    try {
+      final lines = await LogTailService().fetch(
+        _agent, server, container,
+        source: _logSource, lines: 100,
+      );
+      if (!mounted) return;
+      setState(() {
+        if (lines.isNotEmpty) _liveLogs = lines.take(40).toList();
+        _logLoading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _logLoading = false;
+        _logError = e.toString().replaceFirst('Exception: ', '').split('\n').first;
+      });
     }
   }
 
@@ -1012,6 +1105,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     _startAutoRefresh();
     _logTimer = Timer.periodic(const Duration(seconds: 3), (_) {
       if (!mounted) return;
+      if (_useRealServers) return; // real mode: logs come from _pollRealLogs
       setState(() {
         _liveLogs.insert(0, LogLine(time: DateTime.now(), level: ['INFO','INFO','WARN','DEBUG'][DateTime.now().second % 4], source: ['api-gateway','worker-queue','auth-service'][DateTime.now().second % 3], message: 'heartbeat ok ${DateTime.now().second}'));
         if (_liveLogs.length > 40) _liveLogs = _liveLogs.sublist(0, 40);
@@ -1746,7 +1840,18 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
           ]),
         ),
         IconButton(onPressed: () => _goTo(11), icon: Container(padding: const EdgeInsets.all(6), decoration: BoxDecoration(color: _navIndex==11 ? AppColors.accentCyan.withValues(alpha:0.2) : AppColors.surface1, borderRadius: BorderRadius.circular(8), border: Border.all(color: _navIndex==11 ? AppColors.accentCyan : AppColors.border)), child: Icon(Icons.settings_outlined, size: 16, color: _navIndex==11 ? AppColors.accentCyan : AppColors.textSecondary))),
-        IconButton(onPressed: (){}, icon: const Icon(Icons.notifications_none, size: 18, color: AppColors.textSecondary)),
+        Stack(children: [
+          IconButton(onPressed: () => _goTo(6), icon: const Icon(Icons.notifications_none, size: 18, color: AppColors.textSecondary)),
+          if (_alertBadge > 0)
+            Positioned(
+              right: 6, top: 6,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                decoration: BoxDecoration(color: AppColors.critical, borderRadius: BorderRadius.circular(8)),
+                child: Text('$_alertBadge', style: const TextStyle(fontSize: 9, fontWeight: FontWeight.w800, color: Colors.white)),
+              ),
+            ),
+        ]),
         const SizedBox(width: 4),
         Builder(builder: (ctx) => IconButton(onPressed: ()=> Scaffold.of(ctx).openEndDrawer(), icon: Container(padding: const EdgeInsets.all(6), decoration: BoxDecoration(color: AppColors.accentCyan, borderRadius: BorderRadius.circular(8)), child: const Icon(Icons.smart_toy_outlined, size: 16, color: Colors.black)))),
         const SizedBox(width: 12),
@@ -2767,9 +2872,62 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
   Widget _logsSegment({bool compact = false}) {
     final filtered = _logFilter=='ALL' ? _liveLogs : _liveLogs.where((l)=> l.level==_logFilter).toList();
     final display = compact ? filtered.take(6).toList() : filtered;
+    ServerConnection? logServer;
+    if (_savedServers.isNotEmpty) {
+      logServer = _savedServers.first;
+      for (final s in _savedServers) {
+        if (s.id == _logServerId) { logServer = s; break; }
+      }
+    }
     return PitchCard(
-      title: 'LIVE LOG TAIL',
-      trailing: compact ? InkWell(onTap: () => _goTo(8), child: const Text('EXPAND →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan))) : null,
+      title: _useRealServers && logServer != null ? 'LIVE LOG TAIL • ${logServer.name}' : 'LIVE LOG TAIL',
+      subtitle: _useRealServers
+          ? (_logError ?? (_logLoading ? 'fetching ${_logSource}…' : '${_liveLogs.length} lines via SSH (${_logSource})'))
+          : 'demo stream — add servers for real SSH logs',
+      trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+        if (_useRealServers && !compact) ...[
+          DropdownButton<String>(
+            value: _logSource,
+            dropdownColor: AppColors.surface1,
+            style: const TextStyle(fontSize: 10, color: AppColors.textSecondary),
+            underline: const SizedBox(),
+            items: const [
+              DropdownMenuItem(value: 'journal', child: Text('journal')),
+              DropdownMenuItem(value: 'syslog', child: Text('syslog')),
+              DropdownMenuItem(value: 'docker', child: Text('docker')),
+            ],
+            onChanged: (v) {
+              if (v == null) return;
+              setState(() => _logSource = v);
+              _pollRealLogs();
+            },
+          ),
+          if (_savedServers.length > 1)
+            DropdownButton<String?>(
+              value: _logServerId,
+              dropdownColor: AppColors.surface1,
+              style: const TextStyle(fontSize: 10, color: AppColors.textSecondary),
+              underline: const SizedBox(),
+              hint: Text(logServer?.name ?? 'server', style: const TextStyle(fontSize: 10, color: AppColors.textSecondary)),
+              items: [
+                const DropdownMenuItem<String?>(value: null, child: Text('first server')),
+                ..._savedServers.map((s) => DropdownMenuItem<String?>(value: s.id, child: Text(s.name))),
+              ],
+              onChanged: (v) {
+                setState(() => _logServerId = v);
+                _pollRealLogs();
+              },
+            ),
+          InkWell(
+            onTap: _logLoading ? null : _pollRealLogs,
+            child: _logLoading
+                ? const SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.accentCyan))
+                : const Text('REFRESH →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan)),
+          ),
+          const SizedBox(width: 8),
+        ],
+        if (compact) InkWell(onTap: () => _goTo(8), child: const Text('EXPAND →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan))),
+      ]),
       child: Container(
         height: compact ? 160 : 280,
         decoration: BoxDecoration(color: const Color(0xFF050505), borderRadius: BorderRadius.circular(10), border: Border.all(color: AppColors.border)),
@@ -2790,8 +2948,25 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
   }
 
   Widget _metricsSegment({bool compact = false}) {
+    // Real latency chart: merge per-host histories (agent poll round-trip ms).
+    List<FlSpot> spots = const [FlSpot(0,35),FlSpot(1,42),FlSpot(2,38),FlSpot(3,55),FlSpot(4,48)];
+    String p95label = '48ms';
+    if (_useRealServers) {
+      final allLat = _latHistory.values.expand((e) => e).toList();
+      final p = MetricsHistory.p95(allLat);
+      p95label = MetricsHistory.formatMs(p);
+      final series = allLat.isEmpty ? <double>[] : allLat.take(40).toList();
+      if (series.isNotEmpty) {
+        final maxV = series.reduce((a, b) => a > b ? a : b);
+        final scale = maxV <= 0 ? 1.0 : maxV;
+        spots = [for (var i = 0; i < series.length; i++) FlSpot(i.toDouble(), (series[i] / scale * 90).clamp(2, 100))];
+      } else {
+        spots = const [FlSpot(0, 4), FlSpot(1, 4)];
+      }
+    }
     return PitchCard(
-      title: 'METRICS',
+      title: _useRealServers ? 'METRICS • LIVE' : 'METRICS',
+      subtitle: _useRealServers ? 'agent round-trip latency (SSH poll)' : null,
       trailing: compact ? InkWell(onTap: () => _goTo(9), child: const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan))) : null,
       child: Column(children: [
         SizedBox(
@@ -2801,7 +2976,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
             titlesData: const FlTitlesData(leftTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)), bottomTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)), topTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)), rightTitles: AxisTitles(sideTitles: SideTitles(showTitles: false))),
             borderData: FlBorderData(show: true, border: const Border(bottom: BorderSide(color: AppColors.border), left: BorderSide(color: AppColors.border))),
             lineBarsData: [
-              LineChartBarData(spots: const [FlSpot(0,35),FlSpot(1,42),FlSpot(2,38),FlSpot(3,55),FlSpot(4,48)], isCurved: true, color: AppColors.accentCyan, barWidth: 1.8, dotData: const FlDotData(show: false), belowBarData: BarAreaData(show: true, color: AppColors.accentCyan.withValues(alpha: 0.08))),
+              LineChartBarData(spots: spots, isCurved: true, color: AppColors.accentCyan, barWidth: 1.8, dotData: const FlDotData(show: false), belowBarData: BarAreaData(show: true, color: AppColors.accentCyan.withValues(alpha: 0.08))),
             ],
           )),
         ),
@@ -2809,7 +2984,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
         Row(children: [
           _metricKpi('Uptime', '99.92%', AppColors.success, compact: compact),
           const SizedBox(width: 6),
-          _metricKpi('p95', _useRealServers ? '—' : '48ms', AppColors.accentCyan, compact: compact),
+          _metricKpi('p95', p95label, AppColors.accentCyan, compact: compact),
           const SizedBox(width: 6),
           _metricKpi('Errors', '0.31%', AppColors.warning, compact: compact),
           const SizedBox(width: 6),
