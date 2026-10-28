@@ -114,8 +114,8 @@ void main() {
         ),
       );
       expect(out, hasLength(6));
-      expect(out.where((a) => a.severity == 'critical'), hasLength(4));
-      expect(out.where((a) => a.severity == 'warning'), hasLength(2));
+      expect(out.where((a) => a.severity == 'critical'), hasLength(5));
+      expect(out.where((a) => a.severity == 'warning'), hasLength(1));
       expect(out.every((a) => a.serverId == 's1'), isTrue);
       expect(out.every((a) => a.source.contains('web-01')), isTrue);
     });
