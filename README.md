@@ -56,6 +56,8 @@ log-tail stream. All screens and models exist; API wiring is on the roadmap.
 | **AI Chatbox** | Floating assistant aware of all segments | Mock replies (LLM-ready) |
 | **Settings** | Server connections (password / SSH key / token), app prefs | `SharedPreferences` |
 
+![Feature map — one control center, every signal](docs/infographics/feature-map.png)
+
 ### Server Details
 
 Tapping any server (Overview or Servers tab) opens a **Server Details** screen —
@@ -74,6 +76,8 @@ Cronjobs (each capped at 10 with a **View All** full-list screen), and Actions
                                 │   install)       │
                                 └──────────────────┘
 ```
+
+![SSH to metrics-agent flow](docs/infographics/ssh-agent-flow.png)
 
 1. **Add a server** — Settings → Add Server (host, port, user, password or SSH key).
    Keys can be imported via file picker (sandbox-safe) or pasted as PEM content.
