@@ -24,6 +24,10 @@ const int kAgentPort = 9108;
 const String kMetricsPath = '/metrics';
 const String kProcStatsPath = '/procstats';
 
+/// v4+ liveness probe. Cheap by design (no /proc scan): load balancers,
+/// Zara's polling job, and the app install-verify all hit this first.
+const String kHealthPath = '/health';
+
 /// Client timeouts: connect 5s, /metrics read 6s, /procstats read 8s.
 /// Install-verify polls reuse the /metrics budget per attempt.
 const Duration kAgentConnectTimeout = Duration(seconds: 5);
@@ -88,6 +92,45 @@ class AgentMetrics {
       };
 }
 
+/// Validated /health payload (agent v4+).
+class AgentHealth {
+  final int agentVersion;
+  final int agentUptimeS;
+
+  const AgentHealth({
+    required this.agentVersion,
+    required this.agentUptimeS,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'status': 'ok',
+        'version': agentVersion,
+        'agent_uptime_s': agentUptimeS,
+      };
+}
+
+/// Validates a decoded /health body. Throws [AgentProtocolException].
+AgentHealth parseAgentHealth(Map<String, dynamic> json) {
+  if (json['status'] != 'ok') {
+    throw const AgentProtocolException(
+        AgentErrorCode.badPayload, '"/health.status" is not "ok"');
+  }
+  final version = json['version'];
+  if (version is! num || version.toInt() < kMinAgentVersion) {
+    throw const AgentProtocolException(
+        AgentErrorCode.staleAgent, '/health version missing or stale');
+  }
+  final uptime = json['agent_uptime_s'];
+  if (uptime is! num || uptime.toInt() < 0) {
+    throw const AgentProtocolException(
+        AgentErrorCode.badPayload, '"/health.agent_uptime_s" invalid');
+  }
+  return AgentHealth(
+    agentVersion: version.toInt(),
+    agentUptimeS: uptime.toInt(),
+  );
+}
+
 /// Validates a decoded /metrics body. Throws [AgentProtocolException].
 AgentMetrics parseAgentMetrics(Map<String, dynamic> json) {
   double ratio(String key) {
@@ -150,6 +193,10 @@ AgentProtocolException agentHttpError(int statusCode, String path) {
   if (statusCode == 404) {
     return AgentProtocolException(AgentErrorCode.badPayload,
         '"$path" unknown — stale agent (HTTP 404)');
+  }
+  if (statusCode == 405) {
+    return AgentProtocolException(AgentErrorCode.badPayload,
+        '"$path" method not allowed — agent only serves GET (HTTP 405)');
   }
   return AgentProtocolException(
       AgentErrorCode.badPayload, '"$path" HTTP $statusCode');
