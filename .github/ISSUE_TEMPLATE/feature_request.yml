@@ -1,0 +1,38 @@
+name: Feature request
+description: New capability or improvement
+title: "[feat]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Whose workflow hurts, and how?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: What should the app do? Mock data OK for the pitch — mark it DEMO.
+    validations:
+      required: true
+  - type: checkboxes
+    id: live-data
+    attributes:
+      label: Live-data check
+      description: MyControlPanel prefers live SSH/API data over static mocks.
+      options:
+        - label: I checked whether this needs live data, and noted the source (SSH / GitHub API / Actions / metrics agent :9108)
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Servers / SSH
+        - GitHub tab
+        - CI/CD timeline
+        - Alerts
+        - Secure storage
+        - Docs / repo
+        - Other
