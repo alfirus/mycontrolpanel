@@ -28,16 +28,13 @@ flutter run -d macos   # or windows / linux
 
 ## What works today vs what's mock
 
-**Live over SSH (real):**
-Server metrics (CPU/RAM/disk, latency, uptime), cronjob discovery
-(`crontab`, `/etc/crontab`, `/etc/cron.d/*`), running apps (systemd,
-Docker, listening ports), alert harvesting (failed units, disk ≥80/90%,
-brute-force, load, kernel errors, reboots), one-click metrics-agent
-install, built-in SSH + local terminal.
+| Segment | Status | Source |
+|---|---|---|
+| Server metrics, cronjobs, apps, alerts, log tail, terminal | **Live** when servers are configured (**Partial** — demo data when none are) | SSH discovery + `:9108` agent, see [Setup guide](docs/setup.md) |
+| GitHub, GitLab, CI/CD, Security findings | **Mock** (tabs hard-titled `• DEMO`) | Demo datasets; wiring is roadmap Phase 1 |
+| AI Chatbox | **Partial** — real provider streaming when configured, mock replies otherwise | Bring your own key/token |
 
-**UI-ready, API still to wire (honest mock):**
-GitHub issues/PRs, CI/CD timeline, security findings, AI chat replies,
-log-tail stream. All screens and models exist; API wiring is on the roadmap.
+Full per-screen matrix + gaps: [Live vs Mock](docs/roadmap.md).
 
 ## Features
 
