@@ -44,6 +44,14 @@ const Duration kProcStatsReadTimeout = Duration(seconds: 8);
 /// agent token is configured so rollout needs no app update.
 const String kAgentAuthHeader = 'X-MCP-Agent-Token';
 
+/// Headers to attach for v4 token auth. Returns {} when no token is
+/// configured (open agent) — pure, so polling code and tests share it.
+Map<String, String> agentAuthHeaders(String? token) {
+  final t = (token ?? '').trim();
+  if (t.isEmpty) return const {};
+  return {kAgentAuthHeader: t};
+}
+
 /// Machine-readable failure codes surfaced to the UI / alert pipeline.
 enum AgentErrorCode {
   /// TCP refused / host unreachable / DNS failure.
