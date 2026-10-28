@@ -58,10 +58,28 @@ class DeployItem {
   final String status; // success, failed, running
   final String duration;
   final int? runId; // GitHub Actions run id (live data only)
+  final String? ghRepo; // Full `owner/repo` for rerun (live GH runs only)
   final String vcs; // 'github' or 'gitlab'
   final String? glProject; // GitLab project path (live data only)
   final int? pipelineId; // GitLab pipeline id (live data only)
-  const DeployItem({required this.app, required this.version, required this.env, required this.actor, required this.time, required this.status, required this.duration, this.runId, this.vcs = 'github', this.glProject, this.pipelineId});
+  const DeployItem({required this.app, required this.version, required this.env, required this.actor, required this.time, required this.status, required this.duration, this.runId, this.ghRepo, this.vcs = 'github', this.glProject, this.pipelineId});
+
+  /// Copy with the full GitHub repo attached (stamped at fetch time so
+  /// the timeline can re-run without re-resolving short names).
+  DeployItem withRepo(String repo) => DeployItem(
+        app: app,
+        version: version,
+        env: env,
+        actor: actor,
+        time: time,
+        status: status,
+        duration: duration,
+        runId: runId,
+        ghRepo: repo,
+        vcs: vcs,
+        glProject: glProject,
+        pipelineId: pipelineId,
+      );
 }
 
 class LogLine {
