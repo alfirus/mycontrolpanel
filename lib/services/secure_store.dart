@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/server_connection.dart';
+import 'secret_hygiene.dart';
 
 /// Secrets live in the OS keychain/keystore; everything else stays in
 /// SharedPreferences. Server list JSON in prefs holds `secure:<key>`
@@ -11,7 +12,15 @@ class SecureStore {
   static const _credPrefix = 'srv_cred_';
   static const _migratedFlag = 'secrets_migrated_v1';
 
+  /// Per-host metrics-agent token (v4 token gate, X-MCP-Agent-Token).
+  /// Same keychain guarantees as server credentials; never in prefs JSON.
+  static const _agentTokenPrefix = 'agent_tok_';
+
   static String _credKey(String serverId) => '$_credPrefix$serverId';
+
+  /// Keychain key for one server's agent token (pure, unit-testable).
+  static String agentTokenKey(String serverId) =>
+      '$_agentTokenPrefix$serverId';
 
   static Future<String?> readSecret(String key) async {
     try {
@@ -68,6 +77,40 @@ class SecureStore {
     } catch (_) {}
   }
 
+  /// Vault status for the Settings UI: whether the one-time migration ran
+  /// plus how many plaintext secrets are still prefs-resident (missed or
+  /// keychain-unavailable). Read-only, never throws — the UI decides.
+  static Future<({bool migrated, int plaintext})> vaultStatus() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final migrated = prefs.getBool(_migratedFlag) == true;
+      var plaintext = 0;
+      final raw = prefs.getString('server_connections');
+      if (raw != null) {
+        try {
+          plaintext += SecretHygiene.findRawCredentials(jsonDecode(raw) as List).length;
+        } catch (_) {}
+      }
+      for (final k in ['github_token', 'gitlab_token', 'ai_key']) {
+        final v = prefs.getString(k);
+        if (v != null && v.isNotEmpty) plaintext++;
+      }
+      return (migrated: migrated, plaintext: plaintext);
+    } catch (_) {
+      return (migrated: false, plaintext: 0);
+    }
+  }
+
+  /// Clear the migration flag and re-run (Settings RETRY path for when the
+  /// keychain was unavailable at first launch). Best-effort, never throws.
+  static Future<void> retryMigration() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove(_migratedFlag);
+    } catch (_) {}
+    await migrateIfNeeded();
+  }
+
   /// Load servers, resolving `secure:` credential markers from the keychain.
   /// Falls back to raw values (pre-migration) if secure read misses.
   static Future<List<ServerConnection>> readServers() async {
@@ -118,8 +161,57 @@ class SecureStore {
     await prefs.setString('server_connections', ServerConnection.encodeList(masked));
   }
 
-  /// Remove a server's keychain entry (call on delete).
+  /// Remove a server's keychain entries (credential + agent token) —
+  /// call on delete so nothing orphans in the keychain.
   static Future<void> deleteServerCredential(String serverId) async {
     await deleteSecret(_credKey(serverId));
+    await deleteSecret(agentTokenKey(serverId));
+  }
+
+  /// Read this server's agent token (null when unset = open agent).
+  static Future<String?> readAgentToken(String serverId) =>
+      readSecret(agentTokenKey(serverId));
+
+  /// Store (or, when [token] is blank, clear) this server's agent token.
+  static Future<void> writeAgentToken(String serverId, String token) async {
+    if (token.trim().isEmpty) {
+      await deleteSecret(agentTokenKey(serverId));
+    } else {
+      await writeSecret(agentTokenKey(serverId), token.trim());
+    }
+  }
+
+  /// Key rotation (mandated cutover, Option A): overwrite the keychain entry
+  /// for [serverId] with [newCredential] without touching the masked prefs
+  /// JSON (it already holds only the `secure:` marker). Best-effort.
+  static Future<void> rotateServerCredential(
+      String serverId, String newCredential) async {
+    try {
+      if (newCredential.isEmpty) {
+        await deleteSecret(_credKey(serverId));
+      } else {
+        await writeSecret(_credKey(serverId), newCredential);
+      }
+    } catch (_) {}
+  }
+
+  /// Delete keychain entries whose server no longer exists (e.g. after
+  /// clear-all or an import that drops hosts). Covers server credentials
+  /// AND agent tokens. Best-effort, never throws.
+  static Future<void> pruneServerCredentials(Set<String> validIds) async {
+    try {
+      final all = await _sec.readAll();
+      for (final key in all.keys) {
+        if (key.startsWith(_credPrefix)) {
+          if (!validIds.contains(key.substring(_credPrefix.length))) {
+            await deleteSecret(key);
+          }
+        } else if (key.startsWith(_agentTokenPrefix)) {
+          if (!validIds.contains(key.substring(_agentTokenPrefix.length))) {
+            await deleteSecret(key);
+          }
+        }
+      }
+    } catch (_) {}
   }
 }
