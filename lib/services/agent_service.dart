@@ -20,16 +20,24 @@ class AgentInstallResult {
 class AgentService {
   static const int agentPort = 9108;
 
-  /// Agent v2: stdlib-only Python.
-  /// /metrics -> {"cpu","ram","disk","uptime_days","version":2}
-  /// /procstats -> {"version":2,"top":[{"pid","name","cpu","mem_mb"}], "ports":{"3000":{"listening":true,"established":2}}}
+  /// Agent v3: stdlib-only Python.
+  /// /metrics -> {"cpu","ram","disk","uptime_days","version":3,"load1":...}
+  /// /procstats -> {"version":3,"top":[{"pid","name","cpu","mem_mb"}], "ports":{"3000":{"listening":true,"established":2}}}
+  /// /sysstats (v3+) -> {"version":3,"load1","load5","load15",
+  ///   "mem":{"total_mb","avail_mb","swap_total_mb","swap_free_mb"},
+  ///   "gpu":{"present","count"},"agent_uptime_s":...}
   /// APM-lite: top processes by CPU + per-port established connections.
-  static const int agentVersion = 2;
+  /// Sysstats adds load average, memory detail, GPU presence and agent
+  /// uptime for capacity planning (e.g. sizing on-host model serving).
+  /// Inference stats themselves live app-side in LlmReliability and are
+  /// correlated by host — the agent never fabricates inference counters.
+  static const int agentVersion = 3;
   static const String agentScript = r'''
 import json, os, time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-AGENT_VERSION = 2
+AGENT_VERSION = 3
+START_TIME = time.time()
 
 def read_cpu():
     try:
@@ -73,6 +81,36 @@ def read_uptime_days():
         with open('/proc/uptime') as f:
             return int(float(f.read().split()[0]) // 86400)
     except Exception: return 0
+
+def read_loadavg():
+    try:
+        with open('/proc/loadavg') as f:
+            p = f.read().split()
+        return [float(p[0]), float(p[1]), float(p[2])]
+    except Exception:
+        return [0.0, 0.0, 0.0]
+
+def read_mem_detail():
+    try:
+        info = {}
+        with open('/proc/meminfo') as f:
+            for line in f:
+                k, v = line.split(':')
+                info[k.strip()] = int(v.strip().split()[0])
+        return {'total_mb': info.get('MemTotal', 0) // 1024,
+                'avail_mb': info.get('MemAvailable', info.get('MemFree', 0)) // 1024,
+                'swap_total_mb': info.get('SwapTotal', 0) // 1024,
+                'swap_free_mb': info.get('SwapFree', 0) // 1024}
+    except Exception:
+        return {'total_mb': 0, 'avail_mb': 0, 'swap_total_mb': 0, 'swap_free_mb': 0}
+
+def read_gpu():
+    try:
+        import glob
+        devs = glob.glob('/dev/nvidia[0-9]*')
+        return {'present': len(devs) > 0, 'count': len(devs)}
+    except Exception:
+        return {'present': False, 'count': 0}
 
 def _proc_snapshot():
     procs = {}
@@ -146,10 +184,18 @@ class H(BaseHTTPRequestHandler):
         if self.path == '/metrics':
             body = json.dumps({'cpu': round(read_cpu(), 3), 'ram': round(read_ram(), 3),
                                'disk': round(read_disk(), 3), 'uptime_days': read_uptime_days(),
+                               'load1': round(read_loadavg()[0], 2),
                                'version': AGENT_VERSION}).encode()
         elif self.path == '/procstats':
             body = json.dumps({'version': AGENT_VERSION, 'top': read_top_processes(),
                                'ports': read_ports()}).encode()
+        elif self.path == '/sysstats':
+            la = read_loadavg()
+            body = json.dumps({'version': AGENT_VERSION,
+                               'load1': round(la[0], 2), 'load5': round(la[1], 2),
+                               'load15': round(la[2], 2), 'mem': read_mem_detail(),
+                               'gpu': read_gpu(),
+                               'agent_uptime_s': int(time.time() - START_TIME)}).encode()
         else:
             self.send_response(404); self.end_headers(); return
         self.send_response(200)
