@@ -162,3 +162,12 @@ int sparklineP95(List<double> vals) {
   final idx = ((sorted.length * 0.95).ceil() - 1).clamp(0, sorted.length - 1).toInt();
   return sorted[idx].round();
 }
+
+/// Convert 0..1 poll-history points to the percent scale the demo
+/// sparklines use, so the live trend band matches the demo band.
+/// Returns [] when fewer than 2 points — a single spot renders no
+/// readable trend, so callers omit the band instead of faking one.
+List<double> trendPoints(List<double> unitPoints) {
+  if (unitPoints.length < 2) return [];
+  return unitPoints.map((v) => (v * 100).roundToDouble()).toList();
+}
