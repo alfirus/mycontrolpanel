@@ -31,6 +31,7 @@ import '../services/ssh_key_loader.dart';
 import '../services/log_tail_service.dart';
 import '../services/metrics_history.dart';
 import '../services/alert_watch.dart';
+import '../services/alert_notifications.dart';
 import 'server_details_screen.dart';
 import '../widgets/pitch_card.dart';
 import 'audit_screen.dart';
@@ -325,6 +326,8 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('⚠ ${fresh.first}${fresh.length > 1 ? ' (+${fresh.length - 1} more)' : ''}'), backgroundColor: AppColors.critical, duration: const Duration(seconds: 4)),
         );
+        // OS-level copy of the same titles (best-effort, pref-gated).
+        unawaited(AlertNotifications.showFresh(fresh));
       }
     } catch (_) {}
   }
