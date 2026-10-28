@@ -31,6 +31,7 @@ import '../services/ssh_key_loader.dart';
 import '../services/log_tail_service.dart';
 import '../services/metrics_history.dart';
 import '../services/alert_watch.dart';
+import '../services/deployments_service.dart';
 import 'server_details_screen.dart';
 import '../widgets/pitch_card.dart';
 import 'audit_screen.dart';
@@ -2761,12 +2762,9 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     );
   }
 
-  /// Merged CI/CD timeline: GitHub Actions runs + GitLab pipelines, newest first.
-  List<DeployItem> get _allRuns {
-    final all = [..._ghRuns, ..._glPipes];
-    all.sort((a, b) => b.time.compareTo(a.time));
-    return all;
-  }
+  /// Merged CI/CD timeline via [DeploymentsService] (newest first).
+  List<DeployItem> get _allRuns =>
+      DeploymentsService.merge(_ghRuns, _glPipes);
 
   bool get _ciConfigured => _ghConfigured || _glConfigured;
   bool get _ciLoading => _ghLoading || _glLoading;
