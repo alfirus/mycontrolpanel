@@ -1,7 +1,7 @@
 name: my_control_panel
 description: "Pitch-black, cross-platform IT Control Center — monitor servers over SSH: metrics, cronjobs, Docker, logs, alerts + built-in terminal."
-# The following line prevents the package from being accidentally published to
-# pub.dev using `flutter pub publish`. This is preferred for private packages.
+# This app is unpublished on pub.dev (end-user application, not a library).
+# Note: the repo itself is PUBLIC — never commit secrets, tokens, or keys.
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 
 # The following defines the version and build number for your application.
