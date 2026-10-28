@@ -12,11 +12,17 @@ activity, CI/CD, log tail, and an AI assistant with full control-center context.
 ![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Windows%20%7C%20Linux%20%7C%20iOS%20%7C%20Android-lightgrey)
 ![UI](https://img.shields.io/badge/UI-pitch%20black%20%23000000-black)
 
+![MyControlPanel — IT Control Center hero](assets/marketing/hero.png)
+
 ## Screenshots
 
 | Overview | Server details |
 |---|---|
 | ![Overview](docs/screenshots/overview.png) | ![Server details](docs/screenshots/server-details.png) |
+
+| Laptop | Phone |
+|---|---|
+| ![Laptop lifestyle](assets/marketing/hero-laptop.png) | ![Phone lifestyle](assets/marketing/hero-phone.png) |
 
 To capture them:
 
@@ -56,6 +62,8 @@ log-tail stream. All screens and models exist; API wiring is on the roadmap.
 | **AI Chatbox** | Floating assistant aware of all segments | Mock replies (LLM-ready) |
 | **Settings** | Server connections (password / SSH key / token), app prefs | `SharedPreferences` |
 
+![Feature map — one control center, every signal](docs/infographics/feature-map.png)
+
 ### Server Details
 
 Tapping any server (Overview or Servers tab) opens a **Server Details** screen —
@@ -74,6 +82,8 @@ Cronjobs (each capped at 10 with a **View All** full-list screen), and Actions
                                 │   install)       │
                                 └──────────────────┘
 ```
+
+![SSH to metrics-agent flow](docs/infographics/ssh-agent-flow.png)
 
 1. **Add a server** — Settings → Add Server (host, port, user, password or SSH key).
    Keys can be imported via file picker (sandbox-safe) or pasted as PEM content.
