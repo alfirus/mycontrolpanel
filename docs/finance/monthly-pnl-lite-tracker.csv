@@ -1,0 +1,2 @@
+month,income,budget_income,delivery_cost,overhead,gross,net,budget_net,variance_pct,notes
+YYYY-MM,0,0,0,0,0,0,TBD,0,"template row: gross=income-delivery_cost; net=gross-overhead"
