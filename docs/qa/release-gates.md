@@ -1,7 +1,7 @@
 # Release gates — MOCK-to-real acceptance (Burhanah, Release Verifier)
 
 Owner: Burhanah (Release Verifier — gate verdicts are binding) · Date: 2026-10-28
-Commit verified: `main` @ `b029509` (merge #82) + this PR's CI run.
+Commit verified: `main` @ `c3960ec` (merge #85) + this PR's CI run.
 Companion inputs (consumed, not re-decided): `docs/qa/go-hold-checklist.md`,
 `docs/qa/mock-vs-real-gap-report.md`,
 `docs/qa/regression-checklist-alerts-cron-apps.md`,
@@ -31,7 +31,7 @@ fact. Anything failing stays HOLD with the reason named.
 | Lane | GO criteria | Required receipt | Current verdict |
 |---|---|---|---|
 | GitHub | Issues/PRs live over PAT via `GithubService`; token in keychain; no mock tab without an explicit demo banner | CI green + `test/github_repo_test.dart` pass on the wiring PR; read-back: token read via `SecureStore.readSecret('github_token')`, never prefs | HOLD — #16 open, #19 (mock tab) open; PR #80 merged the `GithubRepo` contract only |
-| CI/CD | Timeline shows live Actions runs; failure surfacing; poll cadence + caching; offline fallback to last snapshot | CI green on the wiring PR; read-back of a live run list against the API in the PR's CI log or a verifier probe | HOLD — #18 open, #21 (demo deploys) open; PR #83 open, unreviewed by verifier |
+| CI/CD | Timeline shows live Actions runs; failure surfacing; poll cadence + caching; offline fallback to last snapshot | CI green on the wiring PR; read-back of a live run list against the API in the PR's CI log or a verifier probe | HOLD — #18 open, #21 (demo deploys) open; wiring PR #83 MERGED green (merge `8ef7254`, analyze/gitleaks/osv-scan/test all success, verifier-read 2026-10-28) — lane goes GO only when #18/#21 close with a live-run read-back |
 | Logs | Real SSH tail (`LogTailService.fetch`, journal/syslog/docker, 100 lines); parser total; no mock bleed under a LIVE title | `test/qa_mock_real_gap_test.dart` + `test/log_stream_test.dart` green in CI | CONDITIONAL GO — real path verified; #63 (mock bleed on fetch failure) is P2, ship only with the known-issue note |
 | Security | Live findings source OR the segment is demo-gated; never presented as live evidence | Live source wired + test pin, or an explicit demo label in UI | HOLD — #61 filed P1 (fully mock, no live source); excluded from all GO claims until wired or gated |
 | AI | Chat replies labelled live vs local/demo; provider fallback chain logged (`llm-fallback-log`); no secret in prompts/logs | `test/llm_reliability_test.dart` + `test/chat_context_test.dart` green; `redactForLog` pin green | GO on labelling + fallback logging; HOLD on any new model wiring until Alya's scope/token review lands |
@@ -88,14 +88,18 @@ uptime=…d` from `GET http://host:9108/metrics`. The one-click path
 (`AgentService.install`) and the manual path (`manualInstallCommand` ending
 in `AGENT_OK`) both count; post the full log, not excerpts.
 
-## 4. Verdicts on open lane PRs (verifier reviews)
+## 4. Verdicts on lane PRs (verifier-read 2026-10-28)
 
-- #83 deployments-service (CI/CD lane): **HOLD pending verifier review** —
-  may not be cited as the CI/CD receipt (§1) until reviewed + CI green read
-  by the verifier.
-- #81 cicd run-detail, #85 alert-notifications, #84 SSH TOFU, #77
-  state-views, #86 APM-lite: **no gate verdict yet** — each needs its own
-  receipt check at review time against §1 rows.
+- #83 deployments-service (CI/CD lane): **MERGED green** (merge `8ef7254`;
+  analyze/gitleaks/osv-scan/test all success on the merge commit,
+  verifier-read via check-runs API). The wiring half of the §1 CI/CD receipt
+  is met; the lane stays HOLD until #18/#21 close with a live-run read-back.
+- #77 state-views, #81 cicd run-detail, #84 SSH TOFU, #85
+  alert-notifications: **MERGED** (landed after this gate's first draft) —
+  building blocks, **not** lane GO evidence on their own; each §1 lane row
+  still needs its receipt before any GO claim.
+- #86 APM-lite: still OPEN — **no gate verdict yet**; needs its own receipt
+  check at review time against §1 rows.
 - #80 (GithubRepo contract), #79 (alert-rules), #82 (agent log stream):
   merged building blocks, **not** lane GO evidence on their own.
 
