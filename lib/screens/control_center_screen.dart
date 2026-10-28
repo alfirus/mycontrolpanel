@@ -289,7 +289,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     try {
       for (final c in _savedServers) {
         final sw = Stopwatch()..start();
-        final m = await _agent.fetch(c.host);
+        final m = await _agent.fetch(c.host, serverId: c.id);
         sw.stop();
         if (!mounted) return;
         if (m != null) {
@@ -305,7 +305,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
             });
           }
         }
-        final ps = await _agent.fetchAppStats(c.host);
+        final ps = await _agent.fetchAppStats(c.host, serverId: c.id);
         if (!mounted) return;
         if (ps != null) {
           setState(() => _procStats[c.id] = ps);
@@ -521,7 +521,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
                 r = await _agent.install(s, onLog, keyPassphrase: keyPassphrase);
                 if (r.success && mounted) {
                   try {
-                    final m = await _agent.fetch(s.host);
+                    final m = await _agent.fetch(s.host, serverId: s.id);
                     if (m != null && mounted) setState(() => _metrics[s.id] = m);
                   } catch (_) {
                     // metrics poll is best-effort; install already succeeded
@@ -685,7 +685,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
           FilledButton(onPressed: () async {
             Navigator.pop(ctx);
             ScaffoldMessenger.of(context).showSnackBar(const SnackBar(backgroundColor: AppColors.surface1, content: Text('Verifying agent...', style: TextStyle(fontSize: 12, color: AppColors.textSecondary))));
-            final m = await _agent.fetch(s.host);
+            final m = await _agent.fetch(s.host, serverId: s.id);
             if (!mounted) return;
             if (m != null) {
               setState(() => _metrics[s.id] = m);
@@ -815,7 +815,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
   Future<void> _checkAgent(ServerConnection c) async {
     setState(() => _checking.add(c.id));
     String verdict;
-    final m = await _agent.fetch(c.host);
+    final m = await _agent.fetch(c.host, serverId: c.id);
     if (m != null) {
       if (mounted) setState(() { _metrics[c.id] = m; _checking.remove(c.id); });
       if (!mounted) return;

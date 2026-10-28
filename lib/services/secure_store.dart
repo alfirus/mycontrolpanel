@@ -11,7 +11,15 @@ class SecureStore {
   static const _credPrefix = 'srv_cred_';
   static const _migratedFlag = 'secrets_migrated_v1';
 
+  /// Per-host metrics-agent token (v4 token gate, X-MCP-Agent-Token).
+  /// Same keychain guarantees as server credentials; never in prefs JSON.
+  static const _agentTokenPrefix = 'agent_tok_';
+
   static String _credKey(String serverId) => '$_credPrefix$serverId';
+
+  /// Keychain key for one server's agent token (pure, unit-testable).
+  static String agentTokenKey(String serverId) =>
+      '$_agentTokenPrefix$serverId';
 
   static Future<String?> readSecret(String key) async {
     try {
@@ -118,9 +126,24 @@ class SecureStore {
     await prefs.setString('server_connections', ServerConnection.encodeList(masked));
   }
 
-  /// Remove a server's keychain entry (call on delete).
+  /// Remove a server's keychain entries (credential + agent token) —
+  /// call on delete so nothing orphans in the keychain.
   static Future<void> deleteServerCredential(String serverId) async {
     await deleteSecret(_credKey(serverId));
+    await deleteSecret(agentTokenKey(serverId));
+  }
+
+  /// Read this server's agent token (null when unset = open agent).
+  static Future<String?> readAgentToken(String serverId) =>
+      readSecret(agentTokenKey(serverId));
+
+  /// Store (or, when [token] is blank, clear) this server's agent token.
+  static Future<void> writeAgentToken(String serverId, String token) async {
+    if (token.trim().isEmpty) {
+      await deleteSecret(agentTokenKey(serverId));
+    } else {
+      await writeSecret(agentTokenKey(serverId), token.trim());
+    }
   }
 
   /// Key rotation (mandated cutover, Option A): overwrite the keychain entry
@@ -138,14 +161,20 @@ class SecureStore {
   }
 
   /// Delete keychain entries whose server no longer exists (e.g. after
-  /// clear-all or an import that drops hosts). Best-effort, never throws.
+  /// clear-all or an import that drops hosts). Covers server credentials
+  /// AND agent tokens. Best-effort, never throws.
   static Future<void> pruneServerCredentials(Set<String> validIds) async {
     try {
       final all = await _sec.readAll();
       for (final key in all.keys) {
-        if (!key.startsWith(_credPrefix)) continue;
-        if (!validIds.contains(key.substring(_credPrefix.length))) {
-          await deleteSecret(key);
+        if (key.startsWith(_credPrefix)) {
+          if (!validIds.contains(key.substring(_credPrefix.length))) {
+            await deleteSecret(key);
+          }
+        } else if (key.startsWith(_agentTokenPrefix)) {
+          if (!validIds.contains(key.substring(_agentTokenPrefix.length))) {
+            await deleteSecret(key);
+          }
         }
       }
     } catch (_) {}

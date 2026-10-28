@@ -11,6 +11,7 @@ implementation).
 |---|---|---|
 | Server password / key text | OS keychain/keystore via `SecureStore` | prefs hold only `secure:srv_cred_<id>` markers |
 | GitHub / GitLab tokens, AI key | `SecureStore` standalone keys | migrated from prefs once (`secrets_migrated_v1`) |
+| Per-host agent token (v4 gate) | `SecureStore` key `agent_tok:<id>` | auto-provisioned by one-click install; Settings key icon to set/rotate/clear; wiped on server delete; never displayed |
 | SSH private key files | picked via file_picker, loaded via `SshKeyLoader` | key *material* never persisted except through `SecureStore` |
 | Non-secret settings | SharedPreferences | safe for backup/export |
 

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 import 'package:dartssh2/dartssh2.dart';
 import '../models/alert_entry.dart';
 import '../models/app_entry.dart';
@@ -8,6 +9,7 @@ import '../models/app_proc.dart';
 import '../models/cron_entry.dart';
 import '../models/server_connection.dart';
 import 'agent_protocol.dart';
+import 'secure_store.dart';
 import 'ssh_host_keys.dart';
 import 'ssh_key_loader.dart';
 
@@ -427,6 +429,19 @@ WantedBy=multi-user.target
       await unit.stdin.close().timeout(const Duration(seconds: 30));
       await unit.done.timeout(const Duration(seconds: 30));
       log('systemd unit written.');
+      // v4 token gate (secure default): mint a per-host secret, deploy it as
+      // the unit's EnvironmentFile, and keep the same value in the keychain
+      // so polling authenticates. Reinstall = rotation (both sides together).
+      final agentToken = newAgentToken();
+      final envUp = await client.execute(
+          'sudo -n tee /etc/mcp-agent.env > /dev/null && sudo -n chmod 600 /etc/mcp-agent.env && echo TOKEN_OK');
+      envUp.stdin.add(utf8.encode('MCP_AGENT_TOKEN=$agentToken\n'));
+      await envUp.stdin.close().timeout(const Duration(seconds: 30));
+      final envOut = await envUp.stdout.cast<List<int>>().transform(utf8.decoder).join().timeout(const Duration(seconds: 30));
+      await envUp.done.timeout(const Duration(seconds: 30));
+      if (!envOut.contains('TOKEN_OK')) throw Exception('agent token deploy failed');
+      await SecureStore.writeAgentToken(s.id, agentToken);
+      log('Agent token provisioned (keychain + host env, mode 600).');
       await run('sudo -n systemctl daemon-reload && sudo -n systemctl enable --now mcp-agent && sleep 2 && sudo -n systemctl is-active mcp-agent');
       log('Service active.');
       await run('ss -ltn 2>/dev/null | grep 9108 || netstat -ltn 2>/dev/null | grep 9108 || echo PORT_CHECK_SKIP');
@@ -441,7 +456,7 @@ WantedBy=multi-user.target
 
       // verify from this machine
       log('Verifying http://${s.host}:$agentPort/metrics ...');
-      final m = await fetch(s.host);
+      final m = await fetch(s.host, serverId: s.id);
       if (m == null) throw Exception('agent installed but /metrics unreachable from here (firewall? open TCP $agentPort)');
       log('Verified: cpu=${m['cpu']} ram=${m['ram']} disk=${m['disk']} uptime=${m['uptime_days']}d');
       return AgentInstallResult(true, logs.join('\n'));
@@ -875,9 +890,12 @@ WantedBy=multi-user.target
 
   /// GET http://host:9108/procstats -> AppStats or null (agent v2+ only).
   /// [agentToken] is sent as X-MCP-Agent-Token when the host enforces
-  /// v4 token auth; v2/v3 agents ignore the header.
-  Future<AppStats?> fetchAppStats(String host, {String? agentToken}) async {
+  /// v4 token auth; v2/v3 agents ignore the header. When omitted, the
+  /// per-host token is read from the keychain via [serverId].
+  Future<AppStats?> fetchAppStats(String host,
+      {String? agentToken, String? serverId}) async {
     try {
+      agentToken = await _resolveAgentToken(agentToken, serverId);
       final hc = HttpClient()..connectionTimeout = const Duration(seconds: 5);
       final req = await hc.get(host, agentPort, '/procstats');
       _applyAgentToken(req, agentToken);
@@ -893,10 +911,12 @@ WantedBy=multi-user.target
 
   /// GET http://host:9108/metrics -> {cpu,ram,disk,uptime_days} or null.
   /// [agentToken] is sent as X-MCP-Agent-Token when the host enforces
-  /// v4 token auth; v2/v3 agents ignore the header.
+  /// v4 token auth; v2/v3 agents ignore the header. When omitted, the
+  /// per-host token is read from the keychain via [serverId].
   Future<Map<String, dynamic>?> fetch(String host,
-      {String? agentToken}) async {
+      {String? agentToken, String? serverId}) async {
     try {
+      agentToken = await _resolveAgentToken(agentToken, serverId);
       final hc = HttpClient()..connectionTimeout = const Duration(seconds: 5);
       final req = await hc.get(host, agentPort, '/metrics');
       _applyAgentToken(req, agentToken);
@@ -913,9 +933,11 @@ WantedBy=multi-user.target
   /// GET http://host:9108/health -> AgentHealth or null (agent v4+ only).
   /// Null covers unreachable/timeout/non-200/stale-agent — use the typed
   /// pollers in service_locator for failures you must distinguish.
+  /// Token resolution matches [fetch]: explicit value or keychain [serverId].
   Future<AgentHealth?> fetchHealth(String host,
-      {String? agentToken}) async {
+      {String? agentToken, String? serverId}) async {
     try {
+      agentToken = await _resolveAgentToken(agentToken, serverId);
       final hc = HttpClient()..connectionTimeout = const Duration(seconds: 5);
       final req = await hc.get(host, agentPort, kHealthPath);
       _applyAgentToken(req, agentToken);
@@ -938,9 +960,13 @@ WantedBy=multi-user.target
   /// floor. Pair with `LogTailService.parse` / `LogTailService.watch`
   /// to render or stream the lines.
   Future<List<String>> fetchAgentLogs(String host,
-      {String source = 'journal', int lines = 100, String? agentToken}) async {
+      {String source = 'journal',
+      int lines = 100,
+      String? agentToken,
+      String? serverId}) async {
     final src = kAgentLogSources.contains(source) ? source : 'journal';
     final n = lines.clamp(20, 500);
+    agentToken = await _resolveAgentToken(agentToken, serverId);
     try {
       final hc = HttpClient()..connectionTimeout = const Duration(seconds: 5);
       final req = await hc.get(host, agentPort, '/logs?source=$src&lines=$n');
@@ -977,7 +1003,27 @@ WantedBy=multi-user.target
   /// Attaches the reserved agent token header when configured.
   /// v2/v3 agents ignore unknown headers, so this is safe to always send.
   static void _applyAgentToken(HttpClientRequest req, String? agentToken) {
-    final t = agentToken?.trim() ?? '';
-    if (t.isNotEmpty) req.headers.set(kAgentAuthHeader, t);
+    for (final e in agentAuthHeaders(agentToken).entries) {
+      req.headers.set(e.key, e.value);
+    }
   }
+
+  /// Explicit [agentToken] wins; otherwise the per-host token from the
+  /// keychain ([serverId]). Null = open agent, header omitted.
+  static Future<String?> _resolveAgentToken(
+      String? agentToken, String? serverId) async {
+    if ((agentToken ?? '').trim().isNotEmpty) return agentToken!.trim();
+    if (serverId == null || serverId.isEmpty) return null;
+    final stored = await SecureStore.readAgentToken(serverId);
+    return (stored ?? '').trim().isEmpty ? null : stored!.trim();
+  }
+
+  /// Fresh per-host agent token (256-bit, base64url). The value is written
+  /// to the host env file AND the keychain together — never logged.
+  static String newAgentToken() {
+    final bytes = List<int>.generate(32, (_) => _random.nextInt(256));
+    return base64Url.encode(bytes).replaceAll('=', '');
+  }
+
+  static final _random = Random.secure();
 }
