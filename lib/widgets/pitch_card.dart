@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../theme/app_theme.dart';
+import '../theme/design_tokens.dart';
 
 class PitchCard extends StatelessWidget {
   final Widget child;
@@ -17,21 +18,21 @@ class PitchCard extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       height: height,
-      margin: margin ?? const EdgeInsets.only(bottom: 16),
+      margin: margin ?? const EdgeInsets.only(bottom: AppSpacing.sectionGap),
       decoration: BoxDecoration(
         color: AppColors.surface0,
-        borderRadius: BorderRadius.circular(16),
+        borderRadius: AppRadii.xlAll,
         border: Border.all(color: AppColors.border, width: 1),
       ),
       child: ClipRRect(
-        borderRadius: BorderRadius.circular(16),
+        borderRadius: AppRadii.xlAll,
         child: Material(
           color: Colors.transparent,
           child: InkWell(
             onTap: onTap,
             splashColor: AppColors.borderLight,
             child: Padding(
-              padding: padding ?? const EdgeInsets.all(16),
+              padding: padding ?? const EdgeInsets.all(AppSpacing.lg),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
