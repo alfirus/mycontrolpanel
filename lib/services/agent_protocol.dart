@@ -28,6 +28,11 @@ const String kProcStatsPath = '/procstats';
 /// Zara's polling job, and the app install-verify all hit this first.
 const String kHealthPath = '/health';
 
+/// v4+ log sources for `GET /logs?source=`. Mirrors the agent's
+/// `ALLOWED_LOG_SOURCES`; the server allowlists again, so this is a
+/// client-side convenience for fail-fast validation + docs.
+const List<String> kAgentLogSources = ['journal', 'syslog'];
+
 /// Client timeouts: connect 5s, /metrics read 6s, /procstats read 8s.
 /// Install-verify polls reuse the /metrics budget per attempt.
 const Duration kAgentConnectTimeout = Duration(seconds: 5);
@@ -189,6 +194,10 @@ AgentProtocolException agentHttpError(int statusCode, String path) {
   if (statusCode == 401) {
     return const AgentProtocolException(
         AgentErrorCode.unauthorized, 'agent requires a token (HTTP 401)');
+  }
+  if (statusCode == 400) {
+    return AgentProtocolException(AgentErrorCode.badPayload,
+        '"$path" bad request — check query parameters (HTTP 400)');
   }
   if (statusCode == 404) {
     return AgentProtocolException(AgentErrorCode.badPayload,
