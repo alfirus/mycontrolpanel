@@ -111,7 +111,8 @@ on `:9108`. Full setup (account, permissions, one-command revoke):
 3. **Everything populates** — metrics, crons, apps, alerts stream in over SSH;
    rescan manually or by switching tabs.
 
-> Servers, passwords and private keys live in the OS keychain/keystore via
+> Server credentials, passwords, private keys (stored as content, never paths),
+> API tokens, and AI keys live in the OS keychain/keystore via
 > `flutter_secure_storage` (migrated one-time from legacy prefs).
 > Tokens are per-host; nothing secret is committed — CI runs gitleaks.
 
@@ -215,12 +216,18 @@ lib/
 
 Feedback and PRs welcome — especially homelab/self-hosted setups.
 
+## Positioning
+
+MyControlPanel is **free and open source (MIT)** for homelab and self-hosted
+use — public repo, unlimited servers, no paywall, no telemetry, no account.
+It is sustained by voluntary donations
+([Buy Me a Coffee](https://www.buymeacoffee.com/alfirus)).
+
 ## Pricing
 
 **Community (MIT) is the only edition today** — free, unlimited servers,
 public repo. Pro and MSP bundles are *proposed* post-traction concepts with
-no prices and no sale dates; quoting them is off-limits until Sofia + Finance
-sign the license call (PR #28). Full tier framing: [docs/packaging.md](docs/packaging.md).
+no prices and no sale dates yet. Full tier framing: [docs/packaging.md](docs/packaging.md).
 
 ## License
 
