@@ -10,7 +10,7 @@
 /// in `control_center_screen.dart::_aiSystemPrompt`. Swap that inline builder
 /// for [ChatContextBuilder.build] and prepend [ChatRetriever.retrieve] hits
 /// for the user query. Nothing here touches the network.
-library chat_context;
+library;
 
 import 'dart:math';
 
