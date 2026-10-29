@@ -118,7 +118,11 @@ class MockGithubRepository implements GithubRepo {
   Future<String> validate() async => 'mock-user';
 
   @override
-  Future<List<GithubItem>> repoIssues(String repo) async => [
+  Future<List<GithubItem>> repoIssues(String repo,
+          {int page = 1, int perPage = 30}) async =>
+      // Deterministic fixture: mocks ignore paging and always return the
+      // full set (page 1 semantics), so previews + widget tests are stable.
+      [
         GithubItem(
           title: 'Mock: agent reconnect loop on flaky wifi',
           repo: repo,
@@ -132,7 +136,9 @@ class MockGithubRepository implements GithubRepo {
       ];
 
   @override
-  Future<List<GithubItem>> repoPRs(String repo) async => [
+  Future<List<GithubItem>> repoPRs(String repo,
+          {int page = 1, int perPage = 30}) async =>
+      [
         GithubItem(
           title: 'Mock: harden agent token auth',
           repo: repo,
@@ -143,6 +149,40 @@ class MockGithubRepository implements GithubRepo {
           updatedAt: _at,
           comments: 1,
         ),
+      ];
+
+  @override
+  Future<List<Map<String, dynamic>>> projectsV2() async => [
+        {'id': 'mock-board', 'title': 'Mock board', 'url': '', 'items': 1},
+      ];
+
+  @override
+  Future<List<GithubItem>> projectTasks() async => [
+        GithubItem(
+          title: 'Mock: ship MCP_MOCKS backlog lane',
+          repo: 'Mock board',
+          author: 'mock-user',
+          number: 0,
+          state: 'open',
+          labels: const ['mock'],
+          updatedAt: _at,
+          comments: 0,
+        ),
+      ];
+
+  @override
+  Future<List<GithubItem>> myTasks(List<String> repos) async => [
+        for (final repo in repos)
+          GithubItem(
+            title: 'Mock: agent reconnect loop on flaky wifi',
+            repo: repo,
+            author: 'mock-user',
+            number: 101,
+            state: 'open',
+            labels: const ['bug'],
+            updatedAt: _at,
+            comments: 2,
+          ),
       ];
 
   @override

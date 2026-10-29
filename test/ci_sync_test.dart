@@ -35,9 +35,19 @@ class FakeGithub implements GithubRepo {
   @override
   Future<String> validate() async => 'fake';
   @override
-  Future<List<GithubItem>> repoIssues(String repo) async => [];
+  Future<List<GithubItem>> repoIssues(String repo,
+          {int page = 1, int perPage = 30}) async =>
+      [];
   @override
-  Future<List<GithubItem>> repoPRs(String repo) async => [];
+  Future<List<GithubItem>> repoPRs(String repo,
+          {int page = 1, int perPage = 30}) async =>
+      [];
+  @override
+  Future<List<Map<String, dynamic>>> projectsV2() async => [];
+  @override
+  Future<List<GithubItem>> projectTasks() async => [];
+  @override
+  Future<List<GithubItem>> myTasks(List<String> repos) async => [];
   @override
   Future<bool> rerunRun(String repo, int runId) async => true;
   @override

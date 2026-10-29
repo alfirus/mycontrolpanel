@@ -11,6 +11,8 @@ import '../models/server_connection.dart';
 import '../services/agent_service.dart';
 import '../services/secure_store.dart';
 import '../services/ssh_key_loader.dart';
+import '../services/apm_service.dart';
+import '../services/metrics_history.dart';
 import '../widgets/cron_dialogs.dart';
 import '../widgets/pitch_card.dart';
 
@@ -28,6 +30,7 @@ class _ServerDetailsScreenState extends State<ServerDetailsScreen> {
   final _agent = AgentService();
   ServerConnection? _conn;
   Map<String, dynamic>? _metrics;
+  ApmSummary? _apm;
   List<CronEntry> _crons = [];
   List<AppEntry> _apps = [];
   List<AlertEntry> _alerts = [];
@@ -79,6 +82,12 @@ class _ServerDetailsScreenState extends State<ServerDetailsScreen> {
         _metricsError = 'Agent not reachable at ${c.host}:${AgentService.agentPort}';
       }
     });
+    // APM-lite: roll up this host's recorded poll history (best-effort).
+    try {
+      final hist = await MetricsHistory.read(c.host);
+      if (!mounted) return;
+      setState(() => _apm = ApmService.summarize(c.host, hist));
+    } catch (_) {}
   }
 
   Future<void> _refreshCrons() async {
@@ -402,6 +411,15 @@ class _ServerDetailsScreenState extends State<ServerDetailsScreen> {
                 const SizedBox(width: 6),
                 Text('LIVE • ${((m['cpu'] as num).toDouble() * 100).toInt()}% CPU • ${((m['ram'] as num).toDouble() * 100).toInt()}% RAM • ${((m['disk'] as num).toDouble() * 100).toInt()}% DISK', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: AppColors.success)),
               ]),
+              if (_apm != null) ...[
+                const SizedBox(height: 6),
+                Row(children: [
+                  Container(width: 7, height: 7, decoration: BoxDecoration(color: _apm!.grade == 'A' ? AppColors.success : _apm!.grade == 'B' ? AppColors.accentCyan : AppColors.warning, shape: BoxShape.circle)),
+                  const SizedBox(width: 6),
+                  Expanded(child: Text(_apm!.headline, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: AppColors.textSecondary))),
+                  Text('${_apm!.samples} polls', style: const TextStyle(fontSize: 9, color: AppColors.textMuted)),
+                ]),
+              ],
             ])
           : Container(
               padding: const EdgeInsets.all(10),
