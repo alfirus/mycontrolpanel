@@ -1,0 +1,35 @@
+name: ci
+
+# Unit/widget test gate for main. Complements the `security` workflow
+# (analyze, osv-scan, gitleaks): this workflow owns `flutter test`.
+# The `test` job is a required status check on main via branch protection.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Least privilege: no job needs write access.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Setup Flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+      - name: Install dependencies
+        run: flutter pub get
+      - name: Run tests
+        run: flutter test
