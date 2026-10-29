@@ -212,7 +212,7 @@ Tracked under milestones
 
 ### v2-next — platform depth
 
-- [ ] Background alert polling + push notifications (alert on new firing signals / failed CI runs while the app is closed)
+- [ ] Background alert polling + push notifications (alert on new firing signals / failed CI runs while the app is closed; design: [docs/design/05-background-alerting.md](docs/design/05-background-alerting.md))
 - [ ] Biometric app lock enforcement (toggle persists; needs `local_auth` + lock screen)
 - [ ] Sentry / Datadog integration (placeholder row in Settings)
 
