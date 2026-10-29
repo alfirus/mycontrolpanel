@@ -1,0 +1,45 @@
+name: Bug report
+description: Something isn't working
+title: "[bug]: "
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you see vs what did you expect?
+      placeholder: App shows stale CPU graph after SSH reconnect; expected live refresh.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Minimal path from a fresh launch.
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Linux
+        - Windows
+        - macOS
+        - Android
+        - iOS
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: App version / commit
+      description: e.g. v1.0.0-alpha.1 or main@7d6dbf9
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Paste redacted logs. Never paste tokens, passwords, or private keys.
+      render: text
