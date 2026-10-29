@@ -172,14 +172,24 @@ class GitlabService {
     );
   }
 
-  String _apiError(http.Response r, String what) {
+  String _apiError(http.Response r, String what) =>
+      describeApiError(r.statusCode, r.body, what);
+
+  /// Pure, unit-testable mapping of an HTTP failure to the one-liner the
+  /// screen surfaces in its StateView error frame. A 429 (GitLab
+  /// throttling) gets friendly copy; everything else keeps the legacy
+  /// `failed (status)` shape. No token or request detail is ever included.
+  static String describeApiError(int statusCode, String body, String what) {
+    if (statusCode == 429) {
+      return 'GitLab throttle hit (429) — backing off a minute, then SYNC retries.';
+    }
     try {
-      final j = jsonDecode(r.body) as Map;
+      final j = jsonDecode(body) as Map;
       final msg = j['message'];
       final detail = msg is List ? msg.join(', ') : msg;
-      return 'GitLab $what failed (${r.statusCode}): $detail';
+      return 'GitLab $what failed ($statusCode): $detail';
     } catch (_) {
-      return 'GitLab $what failed (${r.statusCode})';
+      return 'GitLab $what failed ($statusCode)';
     }
   }
 }
