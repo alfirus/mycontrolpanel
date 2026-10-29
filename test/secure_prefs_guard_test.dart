@@ -37,7 +37,8 @@ void main() {
     test('server_connections key owned solely by secure_store.dart', () {
       final offenders = <String>[];
       for (final f in dartFiles) {
-        if (f.path.endsWith('lib/services/secure_store.dart')) continue;
+        // Windows paths use backslashes — normalize before matching.
+        if (f.path.replaceAll('\\', '/').endsWith('lib/services/secure_store.dart')) continue;
         final src = f.readAsStringSync();
         if (src.contains("'server_connections'") ||
             src.contains('"server_connections"')) {
@@ -72,7 +73,8 @@ void main() {
           RegExp(r'''getString\(\s*['"](github_token|gitlab_token|ai_key)['"]''');
       final offenders = <String>[];
       for (final f in dartFiles) {
-        if (f.path.endsWith('lib/services/secure_store.dart')) continue;
+        // Windows paths use backslashes — normalize before matching.
+        if (f.path.replaceAll('\\', '/').endsWith('lib/services/secure_store.dart')) continue;
         if (legacyRead.hasMatch(f.readAsStringSync())) {
           offenders.add(f.path);
         }
