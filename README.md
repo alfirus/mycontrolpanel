@@ -57,7 +57,7 @@ Full per-screen matrix + phased plan: [docs/roadmap.md](docs/roadmap.md).
 | **Metrics & Uptime** | Latency p95 chart + Uptime/p95/Errors/Req-min KPIs | Agent + mock |
 | **Security Watch** | Findings with severity + category | UI-ready (API wiring on roadmap) |
 | **AI Chatbox** | Streaming assistant aware of all segments, tool calling, audit trail | Live (bring provider key / Ollama) |
-| **Settings** | Server connections (password / SSH key / token), app prefs | `flutter_secure_storage` (Keychain/Keystore) |
+| **Settings** | Server connections (password / SSH key / token), app prefs | OS keychain via `SecureStore` (`flutter_secure_storage`, Keychain/Keystore); prefs hold only `secure:` markers |
 
 ![Feature map — one control center, every signal](docs/infographics/feature-map.png)
 
@@ -100,8 +100,8 @@ on `:9108`. Full setup (account, permissions, one-command revoke):
    rescan manually or by switching tabs.
 
 > Server credentials, passwords, private keys (stored as content, never paths),
-> API tokens, and AI keys live in the OS keychain/keystore via
-> `flutter_secure_storage` (migrated one-time from legacy prefs).
+> API tokens, and AI keys live in the OS keychain/keystore via `SecureStore`
+> (`flutter_secure_storage`, migrated one-time from legacy prefs on first launch).
 > Tokens are per-host; nothing secret is committed — CI runs gitleaks.
 
 ## Getting started
