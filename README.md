@@ -213,7 +213,6 @@ Tracked under milestones
 ### v2-next — platform depth
 
 - [ ] Background alert polling + push notifications (alert on new firing signals / failed CI runs while the app is closed; design: [docs/design/05-background-alerting.md](docs/design/05-background-alerting.md))
-- [ ] Biometric app lock enforcement (toggle persists; needs `local_auth` + lock screen)
 - [x] Sentry opt-in crash reporting (Settings → Integrations; explicit toggle default OFF, DSN in OS keychain, test-event verifies delivery) — Datadog sink still future
 
 <details>
@@ -228,6 +227,7 @@ Tracked under milestones
 - [x] GitHub Projects v2 (GraphQL) for the Tasks tab, with assigned-issue fallback
 - [x] In-app updates from GitHub Releases (Windows/Linux/macOS)
 - [x] Streaming chat responses (SSE/NDJSON per provider) + Anthropic/Gemini-native and Ollama tool calling
+- [x] Biometric app lock enforcement (`local_auth` + lock screen on launch/resume, device-PIN fallback)
 - [x] AI audit trail (append-only, capped at 200, filter + history viewer in chat drawer)
 
 </details>

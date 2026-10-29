@@ -380,12 +380,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
               _switchTile('Auto-refresh', 'Poll servers every interval', _autoRefresh, (v){ setState(()=> _autoRefresh=v); _savePrefs(); }),
               _sliderTile('Refresh interval', '${_refreshInterval.toInt()}s', _refreshInterval, 5, 60, (v){ setState(()=> _refreshInterval=v); _savePrefs(); }),
               _switchTile('Notifications', 'OS alert on critical incidents', _notifications, (v){ setState(()=> _notifications=v); _savePrefs(); }),
-              _switchTile('Biometrics', 'Face ID / Touch ID on launch (soon)', _biometrics, (v){ setState(()=> _biometrics=v); _savePrefs(); }),
+              _switchTile('Biometrics', 'Face ID / fingerprint / device PIN on launch + resume', _biometrics, (v){ setState(()=> _biometrics=v); _savePrefs(); }),
               const SizedBox(height: 4),
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
                 decoration: BoxDecoration(color: AppColors.surface2, borderRadius: BorderRadius.circular(6), border: Border.all(color: AppColors.border)),
-                child: const Text('Auto-refresh polls live now, with OS notifications for fresh critical alerts. Biometric lock screen is on the roadmap — its toggle is saved and ready.', style: TextStyle(fontSize: 10, color: AppColors.textMuted)),
+                child: const Text('Auto-refresh polls live now, with OS notifications for fresh critical alerts. When Biometrics is on, the app locks on launch and on return from background — unlock with biometrics or device PIN.', style: TextStyle(fontSize: 10, color: AppColors.textMuted)),
               ),
               const SizedBox(height: 4),
               Row(children: [

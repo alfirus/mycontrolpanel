@@ -24,6 +24,9 @@ releases are cut as Git tags `v<name>` via `.github/workflows/release.yml`
 - Streaming AI chat (SSE/NDJSON, Anthropic/Gemini-native, Ollama tool calling).
 - AI audit trail (append-only, capped at 200, filter + history viewer).
 - Log classifier, forecast alerts, anomaly baselines, chat grounding.
+- Biometric app lock: `local_auth` + lock screen on cold start and
+  resume-from-background when the Settings toggle is on, with device
+  PIN/passcode fallback and clear messaging where nothing is available.
 
 ### Security
 - Credential storage cut over to OS keychain/keystore; quality gates documented
