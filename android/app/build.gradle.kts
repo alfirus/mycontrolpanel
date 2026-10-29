@@ -24,7 +24,9 @@ android {
         applicationId = "com.mycontrolpanel.my_control_panel"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
-        minSdk = flutter.minSdkVersion
+        // minSdk 26 (Android 8.0): floor raised by sentry_flutter 10.x
+        // (#26), whose native SDK declares minSdk 26. Was Flutter default.
+        minSdk = 26
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
