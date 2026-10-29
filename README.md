@@ -148,6 +148,9 @@ flutter analyze
 flutter test
 ```
 
+See [`docs/release-gate.md`](docs/release-gate.md) for the full release gate
+and v1 acceptance criteria — no release ships until every box is checked.
+
 ## Project layout
 
 ```
