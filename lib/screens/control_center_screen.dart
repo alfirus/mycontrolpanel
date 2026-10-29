@@ -26,8 +26,9 @@ import '../services/update_service.dart';
 import '../services/ai_tools.dart';
 import '../services/audit_log.dart';
 import '../models/audit_entry.dart';
-import '../services/github_service.dart';
 import '../services/gitlab_service.dart';
+import '../services/service_locator.dart';
+import '../services/security_posture.dart';
 import '../services/ssh_key_loader.dart';
 import '../services/log_tail_service.dart';
 import '../services/metrics_history.dart';
@@ -151,8 +152,16 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
   bool _ghLoading = false;
   String? _ghError;
   bool get _ghConfigured => _ghToken.isNotEmpty && _ghRepos.isNotEmpty;
+  bool _ghSynced = false; // a live poll completed (even with zero rows)
   List<DeployItem> _ghRuns = [];
   String _ghCacheNote = ''; // non-empty when the timeline serves sync cache
+  // LOAD MORE paging (Issues/PRs tabs; Tasks aggregate Projects/assigned).
+  static const _ghPageSize = 30;
+  int _ghIssuesPage = 1;
+  int _ghPRsPage = 1;
+  bool _ghHasMoreIssues = false;
+  bool _ghHasMorePRs = false;
+  bool _ghLoadingMore = false;
   final CiSyncService _ciSync = CiSyncService(); // keeps backoff streaks
   // GitLab live state (PAT + base URL + projects from Settings)
   int _gitlabTab = 0; // 0 issues, 1 MRs, 2 tasks
@@ -167,6 +176,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
   bool _glLoading = false;
   String? _glError;
   bool get _glConfigured => _glToken.isNotEmpty && _glProjects.isNotEmpty;
+  bool _glSynced = false; // a live poll completed (even with zero rows)
   String? _terminalServerId;
   String? _terminalPrefill;
   int _terminalKey = 0;
@@ -218,7 +228,11 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     _pollGitlab();
   }
 
-  /// Fetch live GitHub Issues/PRs/Tasks/Runs for tracked repos.
+  /// Fetch live GitHub Issues/PRs/Tasks/Runs for tracked repos through
+  /// [Services.current].github (the [GithubRepo] contract: live via
+  /// [LiveGithubRepo], deterministic via [MockGithubRepository] under
+  /// MCP_MOCKS / widget tests). The token itself still comes from the
+  /// OS keychain via SecureStore — never hardcoded, never prefs.
   /// Validates the token first so auth failures surface instead of
   /// silently falling back to demo data. [force] bypasses the CI sync
   /// backoff (manual SYNC / retry buttons); the timed refresh reuses the
@@ -227,7 +241,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     if (!_ghConfigured || _ghLoading) return;
     setState(() { _ghLoading = true; _ghError = null; });
     try {
-      final svc = GithubService(_ghToken);
+      final svc = Services.current.github;
       await svc.validate();
       final issues = <GithubItem>[], prs = <GithubItem>[];
       for (final repo in _ghRepos) {
@@ -265,11 +279,19 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
         _ghRuns = runs.take(12).toList();
         _ghCacheNote = sync.cacheNote;
         _ghLoading = false;
+        // Fresh poll restarts paging: a full first page per tracked repo
+        // means GitHub may hold more (LOAD MORE fetches page 2+).
+        _ghIssuesPage = 1;
+        _ghPRsPage = 1;
+        _ghHasMoreIssues = issues.length >= _ghRepos.length * _ghPageSize;
+        _ghHasMorePRs = prs.length >= _ghRepos.length * _ghPageSize;
+        _ghSynced = true;
       });
     } catch (e) {
       if (!mounted) return;
       setState(() {
         _ghLoading = false;
+        _ghSynced = true;
         _ghError = e.toString().replaceFirst('Exception: ', '').split('\n').first;
       });
     }
@@ -303,11 +325,13 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
         _glTasks = tasks;
         _glPipes = pipes.take(12).toList();
         _glLoading = false;
+        _glSynced = true;
       });
     } catch (e) {
       if (!mounted) return;
       setState(() {
         _glLoading = false;
+        _glSynced = true;
         _glError = e.toString().replaceFirst('Exception: ', '').split('\n').first;
       });
     }
@@ -2606,8 +2630,10 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
   }
 
   Widget _githubSegment({bool compact = false}) {
-    // Live data once a PAT + repos are configured in Settings.
-    if (_ghConfigured && (_ghIssues.isNotEmpty || _ghPRs.isNotEmpty || _ghTasks.isNotEmpty || _ghLoading || _ghError != null)) {
+    // Live data once a PAT + repos are configured in Settings. After the
+    // first live poll completes (_ghSynced) the card stays live — even
+    // with zero rows, so the StateView empty frame shows instead of demo.
+    if (_ghConfigured && (_ghSynced || _ghLoading)) {
       return _realGithubCard(compact: compact);
     }
     final data = _githubTab==0 ? mockIssues : _githubTab==1 ? mockPRs : mockTasks;
@@ -2654,8 +2680,51 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
 
   /// Retry helper shared by the SYNC button and the StateView RETRY action.
   void _retryGithub() {
-    setState(() { _ghIssues = []; _ghPRs = []; _ghTasks = []; _ghProjects = []; _ghTasksSource = ''; _ghError = null; });
-    _pollGithub();
+    setState(() { _ghIssues = []; _ghPRs = []; _ghTasks = []; _ghProjects = []; _ghTasksSource = ''; _ghError = null; _ghIssuesPage = 1; _ghPRsPage = 1; _ghHasMoreIssues = false; _ghHasMorePRs = false; });
+    _pollGithub(force: true);
+  }
+
+  /// Fetch the next page for the active Issues/PRs tab and append it.
+  /// Tasks aggregate Projects v2 + assigned issues (no paging there).
+  Future<void> _loadMoreGithub() async {
+    if (!_ghConfigured || _ghLoadingMore) return;
+    final isIssues = _githubTab == 0;
+    if (_githubTab == 2) return;
+    if (isIssues && !_ghHasMoreIssues) return;
+    if (!isIssues && !_ghHasMorePRs) return;
+    setState(() => _ghLoadingMore = true);
+    try {
+      final svc = Services.current.github;
+      final next = (isIssues ? _ghIssuesPage : _ghPRsPage) + 1;
+      final more = <GithubItem>[];
+      for (final repo in _ghRepos) {
+        try {
+          more.addAll(isIssues
+              ? await svc.repoIssues(repo, page: next, perPage: _ghPageSize)
+              : await svc.repoPRs(repo, page: next, perPage: _ghPageSize));
+        } catch (_) {}
+      }
+      more.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+      if (!mounted) return;
+      setState(() {
+        if (isIssues) {
+          _ghIssues = [..._ghIssues, ...more];
+          _ghIssuesPage = next;
+          _ghHasMoreIssues = more.length >= _ghRepos.length * _ghPageSize;
+        } else {
+          _ghPRs = [..._ghPRs, ...more];
+          _ghPRsPage = next;
+          _ghHasMorePRs = more.length >= _ghRepos.length * _ghPageSize;
+        }
+        _ghLoadingMore = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _ghLoadingMore = false;
+        _ghError = e.toString().replaceFirst('Exception: ', '').split('\n').first;
+      });
+    }
   }
 
   /// GitHub rendered from the user's live API data.
@@ -2752,6 +2821,25 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
                 ]),
               ]),
             ),
+        if (!compact && _githubTab != 2 && (_githubTab == 0 ? _ghHasMoreIssues : _ghHasMorePRs))
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: TextButton.icon(
+              onPressed: _ghLoadingMore ? null : _loadMoreGithub,
+              icon: _ghLoadingMore
+                  ? const SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.accentCyan))
+                  : const Icon(Icons.expand_more, size: 14, color: AppColors.accentCyan),
+              label: Text(
+                _ghLoadingMore ? 'LOADING…' : 'LOAD MORE',
+                style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan),
+              ),
+              style: TextButton.styleFrom(
+                minimumSize: const Size(48, 32),
+                tapTargetSize: MaterialTapTargetSize.padded,
+                padding: const EdgeInsets.symmetric(horizontal: 6),
+              ),
+            ),
+          ),
         if (compact && data.length > display.length)
           Center(child: Text('+ ${data.length - display.length} more • tap VIEW ALL', style: const TextStyle(fontSize: 10, color: AppColors.textMuted, fontWeight: FontWeight.w600))),
       ]),
@@ -2803,7 +2891,9 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
   }
 
   Widget _gitlabSegment({bool compact = false}) {
-    if (_glConfigured && (_glIssues.isNotEmpty || _glMrs.isNotEmpty || _glTasks.isNotEmpty || _glLoading || _glError != null)) {
+    // Same stay-live rule as GitHub: after the first poll the card keeps
+    // the StateView empty/error frames instead of collapsing to demo.
+    if (_glConfigured && (_glSynced || _glLoading)) {
       return _realGitlabCard(compact: compact);
     }
     final data = _gitlabTab == 0 ? mockIssues : _gitlabTab == 1 ? mockPRs : mockTasks;
@@ -2828,6 +2918,12 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     );
   }
 
+  /// Retry helper shared by the SYNC button and the StateView RETRY action.
+  void _retryGitlab() {
+    setState(() { _glIssues = []; _glMrs = []; _glTasks = []; _glError = null; });
+    _pollGitlab();
+  }
+
   /// GitLab rendered from the user's live instance data.
   Widget _realGitlabCard({bool compact = false}) {
     final data = _gitlabTab == 0 ? _glIssues : _gitlabTab == 1 ? _glMrs : _glTasks;
@@ -2844,10 +2940,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
         if (_glLoading) const SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.accentPurple)),
         if (_glLoading) const SizedBox(width: 6),
         InkWell(
-          onTap: () {
-            setState(() { _glIssues = []; _glMrs = []; _glTasks = []; _glError = null; });
-            _pollGitlab();
-          },
+          onTap: _retryGitlab,
           child: const Row(children: [Icon(Icons.refresh, size: 11, color: AppColors.accentPurple), SizedBox(width: 3), Text('SYNC', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentPurple))]),
         ),
         if (compact) ...[const SizedBox(width: 10), InkWell(onTap: () => _goTo(5), child: const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan)))],
@@ -2860,14 +2953,22 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
           children: [Text('Issues (${_glIssues.length})', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700)), Text('MRs (${_glMrs.length})', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700)), Text('Tasks (${_glTasks.length})', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700))],
         ),
         const SizedBox(height: 8),
-        if (data.isEmpty && !_glLoading)
-          Padding(
-            padding: const EdgeInsets.all(12),
-            child: Row(children: [
-              Icon(_glError != null ? Icons.error_outline : Icons.check_circle, size: 15, color: _glError != null ? AppColors.warning : AppColors.success),
-              const SizedBox(width: 8),
-              Expanded(child: Text(_glError ?? 'No open $tabName — queue is clear ✓', style: const TextStyle(fontSize: 11, color: AppColors.textMuted))),
-            ]),
+        if (_glLoading && data.isEmpty)
+          StateView(
+            state: PanelState.loading,
+            loadingLabel: 'Syncing GitLab…',
+            compact: compact,
+          )
+        else if (data.isEmpty)
+          StateView(
+            state: _glError != null ? PanelState.error : PanelState.empty,
+            icon: _glError != null ? Icons.error_outline : Icons.check_circle,
+            headline: _glError != null ? 'GITLAB SYNC FAILED' : 'QUEUE IS CLEAR',
+            body: _glError ?? 'No open $tabName across ${_glProjects.length} project${_glProjects.length == 1 ? '' : 's'} ✓',
+            actionLabel: _glError != null ? 'RETRY' : null,
+            onAction: _glError != null ? _retryGitlab : null,
+            semanticLabel: _glError != null ? 'GitLab sync failed' : 'GitLab queue is clear',
+            compact: compact,
           )
         else
           for (final item in display) _vcsRow(item, compact: compact, accent: AppColors.accentPurple),
@@ -3006,8 +3107,9 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
   String? get _ciError => _ghError ?? _glError;
 
   Widget _deploysSegment({bool compact = false}) {
-    // Live runs once either VCS is configured.
-    if (_ciConfigured && (_allRuns.isNotEmpty || _ciLoading || _ciError != null)) return _realDeploysCard(compact: compact);
+    // Live runs once either VCS is configured. Stays live after the first
+    // poll so an empty timeline shows the StateView empty frame, not demo.
+    if (_ciConfigured && (_allRuns.isNotEmpty || _ciLoading || _ciError != null || _ghSynced || _glSynced)) return _realDeploysCard(compact: compact);
     final display = compact ? mockDeploys.take(3).toList() : mockDeploys;
     return PitchCard(
       title: 'CI/CD • DEMO', subtitle: compact ? '3 of ${mockDeploys.length} shown' : 'Last 6 deployments',
@@ -3330,10 +3432,18 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     child: Column(children: [Text(value, style: TextStyle(fontSize: compact ? 11 : 13, fontWeight: FontWeight.w800, color: c)), Text(label, style: TextStyle(fontSize: compact ? 8 : 9, color: AppColors.textMuted))]),
   ));
 
+  /// Live vault-audit findings for the saved servers ([SecurityPosture]:
+  /// raw pre-migration credentials = critical, missing credentials =
+  /// warning). Pure + local — no network.
+  List<SecurityItem> get _securityFindings =>
+      SecurityPosture.findingsFor(_savedServers);
+
   Widget _securitySegment({bool compact = false}) {
+    // Saved servers get the real vault-audit card — never mock findings.
+    if (_savedServers.isNotEmpty) return _realSecurityCard(compact: compact);
     final display = compact ? mockSecurity.take(3).toList() : mockSecurity;
     return PitchCard(
-      title: 'SECURITY',
+      title: 'SECURITY • DEMO',
       trailing: compact ? InkWell(onTap: () => _goTo(10), child: const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan))) : null,
       child: Column(children: display.map((s) => Container(
         margin: EdgeInsets.only(bottom: compact ? 6 : 8), padding: EdgeInsets.all(compact ? 8 : 10),
@@ -3347,6 +3457,49 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
           ])),
         ]),
       )).toList()),
+    );
+  }
+
+  /// Security rendered from the live vault audit (no mocks once servers
+  /// exist): raw pre-migration credentials surface as critical findings,
+  /// missing credentials as warnings, a clean vault as a StateView empty.
+  Widget _realSecurityCard({bool compact = false}) {
+    final findings = _securityFindings;
+    final display = compact ? findings.take(3).toList() : findings;
+    final critical = findings.where((s) => s.severity == 'critical').length;
+    return PitchCard(
+      title: 'SECURITY • LIVE',
+      subtitle: findings.isEmpty
+          ? 'vault clean • ${_savedServers.length} server${_savedServers.length == 1 ? '' : 's'} audited'
+          : '$critical critical • ${findings.length} finding${findings.length == 1 ? '' : 's'} • ${_savedServers.length} server${_savedServers.length == 1 ? '' : 's'}',
+      trailing: compact ? InkWell(onTap: () => _goTo(10), child: const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan))) : null,
+      child: findings.isEmpty
+          ? StateView(
+              state: PanelState.empty,
+              icon: Icons.verified_user_outlined,
+              headline: 'VAULT CLEAN',
+              body: 'No raw credentials — all ${_savedServers.length} server${_savedServers.length == 1 ? '' : 's'} keychain-backed ✓',
+              semanticLabel: 'Security vault clean',
+              compact: compact,
+            )
+          : Column(children: [
+              for (final s in display)
+                Container(
+                  margin: EdgeInsets.only(bottom: compact ? 6 : 8),
+                  padding: EdgeInsets.all(compact ? 8 : 10),
+                  decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(8), border: Border.all(color: s.severity == 'critical' ? AppColors.critical.withValues(alpha: 0.25) : AppColors.borderLight)),
+                  child: Row(children: [
+                    Container(width: compact ? 22 : 28, height: compact ? 22 : 28, decoration: BoxDecoration(color: severityColor(s.severity).withValues(alpha: 0.12), borderRadius: BorderRadius.circular(6)), child: Icon(Icons.shield_outlined, size: compact ? 11 : 14, color: severityColor(s.severity))),
+                    const SizedBox(width: 8),
+                    Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      Text(s.title, style: TextStyle(fontSize: compact ? 10 : 11, fontWeight: FontWeight.w600, color: AppColors.textPrimary), maxLines: 1, overflow: TextOverflow.ellipsis),
+                      Row(children: [Pill(text: s.severity.toUpperCase(), color: severityColor(s.severity)), const SizedBox(width: 5), Text(s.category, style: const TextStyle(fontSize: 9, color: AppColors.textMuted))]),
+                    ])),
+                  ]),
+                ),
+              if (compact && findings.length > display.length)
+                Center(child: Text('+ ${findings.length - display.length} more • tap VIEW ALL', style: const TextStyle(fontSize: 10, color: AppColors.textMuted, fontWeight: FontWeight.w600))),
+            ]),
     );
   }
 

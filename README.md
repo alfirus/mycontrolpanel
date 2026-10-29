@@ -34,24 +34,12 @@ flutter run -d macos   # or windows / linux
 
 ## What works today vs what's next
 
-| Capability | Status | Notes |
-|---|---|---|
-| Server metrics (CPU/RAM/disk, latency, uptime) | ✅ Live over SSH | Via one-click metrics agent (`:9108`) |
-| Cronjob discovery (`crontab`, `/etc/crontab`, `/etc/cron.d/*`) + last-run tracking | ✅ Live over SSH | Per-job log viewer, edit in place, LAST/DUR + OK/FAILED status from the agent run log |
-| Running apps (systemd, Docker, listening ports) + top processes | ✅ Live over SSH | Agent v2 `/procstats` |
-| Alert harvesting (failed units, disk ≥80/90%, brute-force, load, kernel errors, reboots) | ✅ Live over SSH | Foreground watcher: badge + snack on new signals |
-| Live log tail (journal/syslog/docker) | ✅ Live over SSH | Demo heartbeat only when no servers saved |
-| Metrics history + live p95 | ✅ Live | Per-host ring buffer, real p95 KPI |
-| Built-in SSH + local terminal | ✅ Live | Per-server sessions (`dartssh2`) |
-| AI chat (streaming, tool calling, audit trail) | ✅ Live | Bring your own provider key; Ollama local supported |
-| GitLab issues / MRs / tasks | ✅ Live | API-backed, mock fallback |
-| GitHub issues / PRs / tasks | ✅ Live | API-backed (PAT in Settings), Projects v2 board with assigned-issue fallback |
-| CI/CD deployment timeline | ✅ Live | GitHub Actions runs + GitLab pipelines, merged newest-first; SYNC forces a live retry, backoff + last-good cache when rate-limited |
 | Security findings | ◻️ UI-ready | Screens + models exist; API wiring on roadmap |
 
 Legend: ✅ works today · ◻️ UI-ready, API still to wire.
 Roadmap items (background polling, biometric lock, Sentry/Datadog) are tracked
 in [Roadmap](#roadmap) below — nothing above is presented as live unless it is.
+Full per-screen matrix + phased plan: [docs/roadmap.md](docs/roadmap.md).
 
 ## Features
 
@@ -69,7 +57,7 @@ in [Roadmap](#roadmap) below — nothing above is presented as live unless it is
 | **Metrics & Uptime** | Latency p95 chart + Uptime/p95/Errors/Req-min KPIs | Agent + mock |
 | **Security Watch** | Findings with severity + category | UI-ready (API wiring on roadmap) |
 | **AI Chatbox** | Streaming assistant aware of all segments, tool calling, audit trail | Live (bring provider key / Ollama) |
-| **Settings** | Server connections (password / SSH key / token), app prefs | `flutter_secure_storage` (Keychain/Keystore) |
+| **Settings** | Server connections (password / SSH key / token), app prefs | OS keychain via `SecureStore` (`flutter_secure_storage`, Keychain/Keystore); prefs hold only `secure:` markers |
 
 ![Feature map — one control center, every signal](docs/infographics/feature-map.png)
 
@@ -112,11 +100,16 @@ on `:9108`. Full setup (account, permissions, one-command revoke):
    rescan manually or by switching tabs.
 
 > Server credentials, passwords, private keys (stored as content, never paths),
-> API tokens, and AI keys live in the OS keychain/keystore via
-> `flutter_secure_storage` (migrated one-time from legacy prefs).
+> API tokens, and AI keys live in the OS keychain/keystore via `SecureStore`
+> (`flutter_secure_storage`, migrated one-time from legacy prefs on first launch).
 > Tokens are per-host; nothing secret is committed — CI runs gitleaks.
+>
+> Full contract: [Metrics Agent API reference](docs/agent-api.md).
 
 ## Getting started
+
+Server setup, SSH keys, agent install, and troubleshooting live in the
+[Setup + operations guide](docs/setup.md).
 
 ### Prerequisites
 
@@ -160,6 +153,9 @@ flutter analyze
 flutter test
 ```
 
+See [`docs/release-gate.md`](docs/release-gate.md) for the full release gate
+and v1 acceptance criteria — no release ships until every box is checked.
+
 ## Project layout
 
 ```
@@ -194,6 +190,28 @@ lib/
 
 ## Roadmap
 
+Release history: [CHANGELOG.md](CHANGELOG.md) · cutting a release:
+[Release checklist](docs/releases.md).
+
+Product direction: **ship v1 as the homelab/self-hosted IT Control Center** —
+every tab live against real data — then grow v2 platform depth.
+Tracked under milestones
+[v1-ship](https://github.com/alfirus/mycontrolpanel/milestone/1) and
+[v2-next](https://github.com/alfirus/mycontrolpanel/milestone/2).
+
+### v1-ship (current milestone) — make every tab real
+
+- [ ] Wire GitHub tab to `GithubService` (live issues/PRs/Tasks over PAT; demo fallback when no token)
+- [ ] Wire GitLab tab to `GitlabService` (live projects/issues/MRs; demo fallback when no token)
+- [ ] Wire CI/CD tab to live GitHub Actions runs (replace `mockDeploys`)
+- [ ] Wire Security tab to live findings (Dependabot/code-scanning via `GithubService`; demo fallback)
+- [ ] Live log-tail stream over SSH (replace simulated stream)
+- [ ] Release gate green per [`docs/release-gate.md`](docs/release-gate.md)
+  (`flutter analyze`, `flutter test`, 5-platform builds, agent install,
+  secure-storage migration verified)
+
+### v2-next — platform depth
+
 - [ ] Background alert polling + push notifications (alert on new firing signals / failed CI runs while the app is closed)
 - [ ] Biometric app lock enforcement (toggle persists; needs `local_auth` + lock screen)
 - [ ] Sentry / Datadog integration (placeholder row in Settings)
@@ -218,16 +236,17 @@ Feedback and PRs welcome — especially homelab/self-hosted setups.
 
 ## Positioning
 
-MyControlPanel is **free and open source (MIT)** for homelab and self-hosted
-use — public repo, unlimited servers, no paywall, no telemetry, no account.
-It is sustained by voluntary donations
-([Buy Me a Coffee](https://www.buymeacoffee.com/alfirus)).
+ MyControlPanel is **free and open source (MIT)** for homelab and self-hosted
+ use — public repo, unlimited servers, no paywall, no telemetry, no account.
+ It is sustained by voluntary donations
+ ([Buy Me a Coffee](https://www.buymeacoffee.com/alfirus)).
 
-## Pricing
+ ## Pricing
 
-**Community (MIT) is the only edition today** — free, unlimited servers,
-public repo. Pro and MSP bundles are *proposed* post-traction concepts with
-no prices and no sale dates yet. Full tier framing: [docs/packaging.md](docs/packaging.md).
+ **Community (MIT) is the only edition today** — free, unlimited servers,
+ public repo. Pro and MSP bundles are *proposed* post-traction concepts with
+ no prices and no sale dates yet. Full tier framing: [docs/packaging.md](docs/packaging.md).
+ License decision ratified: [`docs/decisions/002-commercial-packaging.md`](docs/decisions/002-commercial-packaging.md).
 
 ## License
 
