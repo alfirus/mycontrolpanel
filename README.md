@@ -103,6 +103,8 @@ on `:9108`. Full setup (account, permissions, one-command revoke):
 > API tokens, and AI keys live in the OS keychain/keystore via `SecureStore`
 > (`flutter_secure_storage`, migrated one-time from legacy prefs on first launch).
 > Tokens are per-host; nothing secret is committed — CI runs gitleaks.
+>
+> Full contract: [Metrics Agent API reference](docs/agent-api.md).
 
 ## Getting started
 
