@@ -190,6 +190,9 @@ lib/
 
 ## Roadmap
 
+Release history: [CHANGELOG.md](CHANGELOG.md) · cutting a release:
+[Release checklist](docs/releases.md).
+
 Product direction: **ship v1 as the homelab/self-hosted IT Control Center** —
 every tab live against real data — then grow v2 platform depth.
 Tracked under milestones
