@@ -112,13 +112,17 @@ class SecureStore {
   }
 
   /// Load servers, resolving `secure:` credential markers from the keychain.
-  /// Falls back to raw values (pre-migration) if secure read misses.
+  /// Owner-mandated full migration (Option A, 2026-10-28): raw prefs
+  /// credentials are never surfaced from disk — any legacy plaintext found
+  /// is moved into the keychain on the spot and the persisted entry masked.
+  /// A missing secure entry resolves to empty (force re-entry).
   static Future<List<ServerConnection>> readServers() async {
     final prefs = await SharedPreferences.getInstance();
     final raw = prefs.getString('server_connections');
     if (raw == null) return [];
     final decoded = ServerConnection.decodeList(raw);
     final out = <ServerConnection>[];
+    var healed = false;
     for (final s in decoded) {
       if (s.credential.startsWith('secure:')) {
         final key = s.credential.substring('secure:'.length);
@@ -132,10 +136,17 @@ class SecureStore {
                 env: s.env, tags: s.tags, createdAt: s.createdAt,
                 enabled: s.enabled,
               ));
+      } else if (s.credential.isNotEmpty) {
+        // Legacy plaintext on disk: move it into the keychain now, keep the
+        // secret in memory for this session only, persist only the marker.
+        await writeSecret(_credKey(s.id), s.credential);
+        healed = true;
+        out.add(s);
       } else {
         out.add(s);
       }
     }
+    if (healed) await writeServers(out);
     return out;
   }
 

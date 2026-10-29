@@ -43,7 +43,7 @@ Mock secrets are deliberately strict: the default mock secret store
 | `AgentService().fetchAlerts` | `Services.current.alerts.fetchAlerts` | Alya |
 | `SshKeyLoader.load` | `Services.current.keys.load` | Alya |
 | `SecureStore.*` statics | `Services.current.secrets.*` | Lina (done: adapter) |
-| `GithubService(token)` direct construction | `Services.current.github` | Lisa (done: `GithubRepo`) |
+| `GithubService(token)` direct construction | `Services.current.github` | Lisa (done: `GithubRepo`); control-center GitHub poll migrated by Elizabeth (t_ffb40ba3) |
 
 Notes:
 
@@ -51,7 +51,11 @@ Notes:
   live via `LiveGithubRepo`, fakes via `MockGithubRepository`); call
   sites migrate to `Services.current.github`. `GitlabService` stays
   concrete until its MR/pipeline contract work lands (tracked in
-  `docs/quality-gates.md`, squad split).
+  `docs/quality-gates.md`, squad split). The `GithubRepo` contract also
+  covers Issues/PRs paging (`page`/`perPage`, screen LOAD MORE),
+  Projects v2 lanes (`projectsV2`/`projectTasks`/`myTasks`), and
+  rate-limit-aware error one-liners (`describeApiError`); the SECURITY
+  panel reads the local vault audit (`SecurityPosture`, no network).
 - Legacy `AgentService.fetch`/`fetchAppStats` keep their null-on-error
   shape; only the new `pollMetrics`/`pollProcStats` paths throw typed
   errors. Call sites migrate one screen at a time.
