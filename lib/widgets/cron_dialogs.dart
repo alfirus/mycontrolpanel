@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../models/cron_entry.dart';
 import '../models/server_connection.dart';
 import '../services/agent_service.dart';
+import '../services/cron_runs.dart';
 import '../services/ssh_key_loader.dart';
 import '../theme/app_theme.dart';
 import 'pitch_card.dart';
@@ -134,6 +135,8 @@ Future<void> showCronLog(
   showDialog(
     context: context,
     builder: (ctx) => StatefulBuilder(builder: (ctx, setD) {
+      final lastRun =
+          log == null ? null : CronRuns.parse(command: entry.command, logText: log!);
       if (!started) {
         started = true;
         WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -149,6 +152,11 @@ Future<void> showCronLog(
           Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             Text('LOG • ${entry.command}', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: AppColors.textPrimary, fontFamily: AppFonts.mono)),
             Text('${conn.name} • last 7 days', style: const TextStyle(fontSize: 10, color: AppColors.textMuted)),
+            if (lastRun != null)
+              Text(
+                lastRun.caption(DateTime.now()),
+                style: TextStyle(fontSize: 10, color: lastRun.known ? AppColors.success : AppColors.textMuted),
+              ),
           ])),
           IconButton(onPressed: () => Navigator.pop(ctx), icon: const Icon(Icons.close, size: 16, color: AppColors.textMuted)),
         ]),
