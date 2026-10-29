@@ -45,7 +45,9 @@ class LocalAuthGate implements AuthGate {
   Future<bool> authenticate({required String reason}) =>
       _auth.authenticate(
         localizedReason: reason,
-        options: const AuthenticationOptions(biometricOnly: false),
+        // Biometric-first, but fall back to the device PIN/passcode
+        // where biometrics are unavailable (local_auth 3.x API).
+        biometricOnly: false,
       );
 }
 
