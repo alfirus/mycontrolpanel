@@ -1,10 +1,15 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import '../models/mock_data.dart';
+import 'service_contracts.dart';
 
 /// Minimal GitHub REST client (classic PAT or fine-grained token).
 /// Needs `repo` scope (or Contents/Issues/Pull requests read for fine-grained).
-class GithubService {
+///
+/// Implements [GithubRepo] so screens can depend on the abstraction via
+/// `Services.current.github`; the token still comes from Settings, exactly
+/// as before.
+class GithubService implements GithubRepo {
   final String token;
   GithubService(this.token);
 
@@ -23,9 +28,11 @@ class GithubService {
     return (j['login'] ?? 'unknown').toString();
   }
 
-  Future<List<GithubItem>> repoIssues(String repo) async {
+  Future<List<GithubItem>> repoIssues(String repo,
+      {int page = 1, int perPage = 30}) async {
     final r = await http.get(
-      Uri.parse('https://api.github.com/repos/$repo/issues?state=open&per_page=30&sort=updated'),
+      Uri.parse(
+          'https://api.github.com/repos/$repo/issues?state=open&per_page=$perPage&page=$page&sort=updated'),
       headers: _headers,
     );
     if (r.statusCode != 200) throw Exception(_apiError(r, 'issues'));
@@ -36,9 +43,11 @@ class GithubService {
         .toList();
   }
 
-  Future<List<GithubItem>> repoPRs(String repo) async {
+  Future<List<GithubItem>> repoPRs(String repo,
+      {int page = 1, int perPage = 30}) async {
     final r = await http.get(
-      Uri.parse('https://api.github.com/repos/$repo/pulls?state=open&per_page=30&sort=updated&direction=desc'),
+      Uri.parse(
+          'https://api.github.com/repos/$repo/pulls?state=open&per_page=$perPage&page=$page&sort=updated&direction=desc'),
       headers: _headers,
     );
     if (r.statusCode != 200) throw Exception(_apiError(r, 'pulls'));
@@ -264,12 +273,100 @@ class GithubService {
     );
   }
 
-  String _apiError(http.Response r, String what) {
+  String _apiError(http.Response r, String what) =>
+      describeApiError(r.statusCode, r.headers, r.body, what);
+
+  /// Pure, unit-testable mapping of an HTTP failure to the one-liner the
+  /// screen surfaces in its StateView error frame. Rate limits get
+  /// friendly copy (+ reset hint when GitHub sends one) instead of the
+  /// raw API JSON; everything else keeps the legacy `failed (status)`
+  /// shape. No token or request detail is ever included.
+  static String describeApiError(
+      int statusCode, Map<String, String> headers, String body, String what) {
+    final remaining = headers['x-ratelimit-remaining'];
+    final reset = headers['x-ratelimit-reset'];
+    String? resetHint;
+    final resetEpoch = reset == null ? null : int.tryParse(reset);
+    if (resetEpoch != null) {
+      final dt = DateTime.fromMillisecondsSinceEpoch(resetEpoch * 1000,
+              isUtc: true)
+          .toLocal();
+      final hh = dt.hour.toString().padLeft(2, '0');
+      final mm = dt.minute.toString().padLeft(2, '0');
+      resetHint = 'resets $hh:$mm';
+    }
+    final lowered = body.toLowerCase();
+    if (statusCode == 403 &&
+        (remaining == '0' || lowered.contains('rate limit'))) {
+      return 'GitHub rate limit exceeded${resetHint == null ? '' : ' — $resetHint'} — retry shortly or slim the repo list.';
+    }
+    if (statusCode == 429) {
+      return 'GitHub secondary limit hit — backing off a minute, then SYNC retries.';
+    }
     try {
-      final j = jsonDecode(r.body) as Map;
-      return 'GitHub $what failed (${r.statusCode}): ${j['message']}';
+      final j = jsonDecode(body) as Map;
+      return 'GitHub $what failed ($statusCode): ${j['message']}';
     } catch (_) {
-      return 'GitHub $what failed (${r.statusCode})';
+      return 'GitHub $what failed ($statusCode)';
     }
   }
+}
+
+/// Live [GithubRepo] wired into [Services] (see service_locator.dart).
+///
+/// Resolves the token lazily per call from [tokenProvider] (backed by the
+/// OS keychain via SecureStore) so the DI container stays synchronous.
+/// Every method throws [StateError] when no token is configured instead
+/// of firing an unauthenticated request.
+class LiveGithubRepo implements GithubRepo {
+  final Future<String?> Function() tokenProvider;
+  LiveGithubRepo(this.tokenProvider);
+
+  Future<GithubService> _svc() async {
+    final t = (await tokenProvider())?.trim() ?? '';
+    if (t.isEmpty) {
+      throw StateError(
+          'GitHub token not configured — add it in Settings → GitHub, then retry.');
+    }
+    return GithubService(t);
+  }
+
+  @override
+  Future<String> validate() async => (await _svc()).validate();
+
+  @override
+  Future<List<GithubItem>> repoIssues(String repo,
+          {int page = 1, int perPage = 30}) async =>
+      (await _svc()).repoIssues(repo, page: page, perPage: perPage);
+
+  @override
+  Future<List<GithubItem>> repoPRs(String repo,
+          {int page = 1, int perPage = 30}) async =>
+      (await _svc()).repoPRs(repo, page: page, perPage: perPage);
+
+  @override
+  Future<List<Map<String, dynamic>>> projectsV2() async =>
+      (await _svc()).projectsV2();
+
+  @override
+  Future<List<GithubItem>> projectTasks() async =>
+      (await _svc()).projectTasks();
+
+  @override
+  Future<List<GithubItem>> myTasks(List<String> repos) async =>
+      (await _svc()).myTasks(repos);
+
+  @override
+  Future<List<DeployItem>> repoRuns(String repo, {int limit = 8}) async =>
+      (await _svc()).repoRuns(repo, limit: limit);
+
+  @override
+  Future<bool> rerunRun(String repo, int runId) async =>
+      (await _svc()).rerunRun(repo, runId);
+
+  @override
+  Future<int> createIssue(String repo, String title,
+          {String body = '', List<String> labels = const []}) async =>
+      (await _svc())
+          .createIssue(repo, title, body: body, labels: labels);
 }
