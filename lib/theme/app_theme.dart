@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'design_tokens.dart';
 
 class AppColors {
   // Pitch black system
@@ -50,25 +51,28 @@ class AppTheme {
         elevation: 0,
         scrolledUnderElevation: 0,
         surfaceTintColor: Colors.transparent,
-        titleTextStyle: TextStyle(color: AppColors.textPrimary, fontSize: 16, fontWeight: FontWeight.w600),
+        titleTextStyle: TextStyle(color: AppColors.textPrimary, fontSize: AppType.heading, fontWeight: FontWeight.w600),
       ),
       cardTheme: CardThemeData(
         color: AppColors.surface0,
         elevation: 0,
         shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(16),
+          borderRadius: AppRadii.xlAll,
           side: const BorderSide(color: AppColors.border, width: 1),
         ),
       ),
       dividerTheme: const DividerThemeData(color: AppColors.border, thickness: 1, space: 1),
+      // Spec 01 "next step": entries whose size matches an AppType step
+      // reference the token so Theme.of stops drifting from one-off sizes.
+      // 28/18/14/12/10 have no AppType step yet — left literal pending Kira.
       textTheme: const TextTheme(
         displayLarge: TextStyle(color: AppColors.textPrimary, fontSize: 28, fontWeight: FontWeight.w700, letterSpacing: -0.5),
         titleLarge: TextStyle(color: AppColors.textPrimary, fontSize: 18, fontWeight: FontWeight.w600, letterSpacing: -0.3),
         titleMedium: TextStyle(color: AppColors.textPrimary, fontSize: 14, fontWeight: FontWeight.w600),
-        titleSmall: TextStyle(color: AppColors.textSecondary, fontSize: 11, fontWeight: FontWeight.w600, letterSpacing: 0.8),
+        titleSmall: TextStyle(color: AppColors.textSecondary, fontSize: AppType.body, fontWeight: FontWeight.w600, letterSpacing: 0.8),
         bodyLarge: TextStyle(color: AppColors.textPrimary, fontSize: 14, fontWeight: FontWeight.w400),
-        bodyMedium: TextStyle(color: AppColors.textSecondary, fontSize: 13, fontWeight: FontWeight.w400),
-        bodySmall: TextStyle(color: AppColors.textMuted, fontSize: 11, fontWeight: FontWeight.w400),
+        bodyMedium: TextStyle(color: AppColors.textSecondary, fontSize: AppType.title, fontWeight: FontWeight.w400),
+        bodySmall: TextStyle(color: AppColors.textMuted, fontSize: AppType.body, fontWeight: FontWeight.w400),
         labelLarge: TextStyle(color: AppColors.textSecondary, fontSize: 12, fontWeight: FontWeight.w500),
         labelSmall: TextStyle(color: AppColors.textMuted, fontSize: 10, fontWeight: FontWeight.w600, letterSpacing: 0.6),
       ),

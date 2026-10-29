@@ -1,8 +1,7 @@
-# Decision 002 (PROPOSAL — needs owner sign-off): License + paid tiers
+# Decision 002 (RATIFIED 2026-10-29): License + paid tiers
 
-Status: **proposed** — narrowed by owner ruling 2026-10-28 (internal-only is
-off the table; the repo is PUBLIC and stays public).
-Label: `need-owner-decision`.
+Status: **ratified** — owner approved MIT + donations through v1 (2026-10-29);
+paid tiers revisit post-traction. Label `need-owner-decision` removed on merge.
 
 ## Context
 
@@ -39,8 +38,8 @@ multi-team roles, audit export, managed alerting relay.
 This PR adds a short Positioning section to the README so the posture is
 stated publicly.
 
-## Owner question
+## Resolution
 
-@alfirus — please approve or reject: **MIT + donations through v1, revisit
-paid post-traction?** If you want paid now, say so and this note gets
-rewritten before merge.
+**MIT, no paid tiers through v1-ship — ratified by owner 2026-10-29.**
+Pro/MSP bundles remain post-traction concepts (docs/packaging.md) with no
+prices and no sale dates.
