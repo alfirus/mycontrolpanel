@@ -12,11 +12,17 @@ activity, CI/CD, log tail, and an AI assistant with full control-center context.
 ![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Windows%20%7C%20Linux%20%7C%20iOS%20%7C%20Android-lightgrey)
 ![UI](https://img.shields.io/badge/UI-pitch%20black%20%23000000-black)
 
+![MyControlPanel — IT Control Center hero](assets/marketing/hero.png)
+
 ## Screenshots
 
 | Overview | Server details |
 |---|---|
 | ![Overview](docs/screenshots/overview.png) | ![Server details](docs/screenshots/server-details.png) |
+
+| Laptop | Phone |
+|---|---|
+| ![Laptop lifestyle](assets/marketing/hero-laptop.png) | ![Phone lifestyle](assets/marketing/hero-phone.png) |
 
 To capture them:
 
@@ -26,18 +32,14 @@ flutter run -d macos   # or windows / linux
 # open a Server Details screen, screenshot to docs/screenshots/server-details.png
 ```
 
-## What works today vs what's mock
+## What works today vs what's next
 
-**Live over SSH (real):**
-Server metrics (CPU/RAM/disk, latency, uptime), cronjob discovery
-(`crontab`, `/etc/crontab`, `/etc/cron.d/*`), running apps (systemd,
-Docker, listening ports), alert harvesting (failed units, disk ≥80/90%,
-brute-force, load, kernel errors, reboots), one-click metrics-agent
-install, built-in SSH + local terminal.
+| Security findings | ◻️ UI-ready | Screens + models exist; API wiring on roadmap |
 
-**UI-ready, API still to wire (honest mock):**
-GitHub issues/PRs, CI/CD timeline, security findings, AI chat replies,
-log-tail stream. All screens and models exist; API wiring is on the roadmap.
+Legend: ✅ works today · ◻️ UI-ready, API still to wire.
+Roadmap items (background polling, biometric lock, Sentry/Datadog) are tracked
+in [Roadmap](#roadmap) below — nothing above is presented as live unless it is.
+Full per-screen matrix + phased plan: [docs/roadmap.md](docs/roadmap.md).
 
 ## Features
 
@@ -48,13 +50,16 @@ log-tail stream. All screens and models exist; API wiring is on the roadmap.
 | **Apps** | Running services (systemd), Docker containers, listening ports | SSH discovery |
 | **Alerts** | Failed units, disk ≥80/90%, SSH brute force, load, kernel errors, reboots | SSH harvest |
 | **Terminal** | Built-in SSH + local shell, per-server sessions | `dartssh2` / `Process` |
-| **GitHub** | Issues / PRs / Tasks tabbed view | Mock (API-ready) |
-| **CI/CD & Deployments** | Deployment timeline with success/failed/running | Mock (API-ready) |
-| **Live Log Tail** | Streaming terminal (`:050505`) with level filters | Simulated stream |
+| **GitHub** | Issues / PRs / Tasks tabbed view | UI-ready (API wiring on roadmap) |
+| **GitLab** | Issues / MRs / Tasks, API-backed with mock fallback | Live API + fallback |
+| **CI/CD & Deployments** | Deployment timeline with success/failed/running | Demo data (wiring on roadmap) |
+| **Live Log Tail** | Real journal/syslog/docker tail over SSH (`:050505` stream) with level filters | Live over SSH; demo heartbeat with no servers |
 | **Metrics & Uptime** | Latency p95 chart + Uptime/p95/Errors/Req-min KPIs | Agent + mock |
-| **Security Watch** | Findings with severity + category | Mock (API-ready) |
-| **AI Chatbox** | Floating assistant aware of all segments | Mock replies (LLM-ready) |
-| **Settings** | Server connections (password / SSH key / token), app prefs | `SharedPreferences` |
+| **Security Watch** | Findings with severity + category | UI-ready (API wiring on roadmap) |
+| **AI Chatbox** | Streaming assistant aware of all segments, tool calling, audit trail | Live (bring provider key / Ollama) |
+| **Settings** | Server connections (password / SSH key / token), app prefs | OS keychain via `SecureStore` (`flutter_secure_storage`, Keychain/Keystore); prefs hold only `secure:` markers |
+
+![Feature map — one control center, every signal](docs/infographics/feature-map.png)
 
 ### Server Details
 
@@ -75,6 +80,17 @@ Cronjobs (each capped at 10 with a **View All** full-list screen), and Actions
                                 └──────────────────┘
 ```
 
+![SSH to metrics-agent flow](docs/infographics/ssh-agent-flow.png)
+
+### Read-only by enforcement, not by promise
+
+The app only reads by design — but design is a promise, and promises don't
+stop writes. Enforcement does: connect with a dedicated `monitor` user that
+has no sudo and key-only SSH, so the OS itself refuses anything but reads.
+Metrics need no SSH whatsoever — they come from the agent's `GET /metrics`
+on `:9108`. Full setup (account, permissions, one-command revoke):
+[read-only access runbook](docs/runbooks/read-only-access.md).
+
 1. **Add a server** — Settings → Add Server (host, port, user, password or SSH key).
    Keys can be imported via file picker (sandbox-safe) or pasted as PEM content.
 2. **Install the metrics agent** — one click per server card (password, key, or
@@ -83,8 +99,10 @@ Cronjobs (each capped at 10 with a **View All** full-list screen), and Actions
 3. **Everything populates** — metrics, crons, apps, alerts stream in over SSH;
    rescan manually or by switching tabs.
 
-> Credentials are stored locally via `SharedPreferences`.
-> Private keys imported via picker are stored as content, never as paths.
+> Server credentials, passwords, private keys (stored as content, never paths),
+> API tokens, and AI keys live in the OS keychain/keystore via `SecureStore`
+> (`flutter_secure_storage`, migrated one-time from legacy prefs on first launch).
+> Tokens are per-host; nothing secret is committed — CI runs gitleaks.
 
 ## Getting started
 
@@ -167,6 +185,25 @@ lib/
 
 ## Roadmap
 
+Product direction: **ship v1 as the homelab/self-hosted IT Control Center** —
+every tab live against real data — then grow v2 platform depth.
+Tracked under milestones
+[v1-ship](https://github.com/alfirus/mycontrolpanel/milestone/1) and
+[v2-next](https://github.com/alfirus/mycontrolpanel/milestone/2).
+
+### v1-ship (current milestone) — make every tab real
+
+- [ ] Wire GitHub tab to `GithubService` (live issues/PRs/Tasks over PAT; demo fallback when no token)
+- [ ] Wire GitLab tab to `GitlabService` (live projects/issues/MRs; demo fallback when no token)
+- [ ] Wire CI/CD tab to live GitHub Actions runs (replace `mockDeploys`)
+- [ ] Wire Security tab to live findings (Dependabot/code-scanning via `GithubService`; demo fallback)
+- [ ] Live log-tail stream over SSH (replace simulated stream)
+- [ ] Release gate green per [`docs/release-gate.md`](docs/release-gate.md)
+  (`flutter analyze`, `flutter test`, 5-platform builds, agent install,
+  secure-storage migration verified)
+
+### v2-next — platform depth
+
 - [ ] Background alert polling + push notifications (alert on new firing signals / failed CI runs while the app is closed)
 - [ ] Biometric app lock enforcement (toggle persists; needs `local_auth` + lock screen)
 - [ ] Sentry / Datadog integration (placeholder row in Settings)
@@ -174,6 +211,9 @@ lib/
 <details>
 <summary>Done</summary>
 
+- [x] Real log tail — journal/syslog/docker over SSH per saved server (source + server picker, refresh on poll tick; demo heartbeat only when no servers)
+- [x] Metrics history — per-host latency/CPU ring buffer (SharedPreferences, cap 120) + live chart and real p95 KPI
+- [x] Foreground alert watcher — bell badge + snack on new firing alerts / failed CI runs (diffed against last-seen set)
 - [x] Structured cronjob last-run tracking (log viewer per job + edit in place)
 - [x] APM-lite — agent v2 `/procstats`: top processes by CPU + per-port connections, surfaced in Apps + Server Details
 - [x] Secure credentials — `flutter_secure_storage` (Keychain/Keystore) for servers, PATs, AI keys, with SharedPreferences migration
@@ -185,6 +225,20 @@ lib/
 </details>
 
 Feedback and PRs welcome — especially homelab/self-hosted setups.
+
+## Positioning
+
+ MyControlPanel is **free and open source (MIT)** for homelab and self-hosted
+ use — public repo, unlimited servers, no paywall, no telemetry, no account.
+ It is sustained by voluntary donations
+ ([Buy Me a Coffee](https://www.buymeacoffee.com/alfirus)).
+
+ ## Pricing
+
+ **Community (MIT) is the only edition today** — free, unlimited servers,
+ public repo. Pro and MSP bundles are *proposed* post-traction concepts with
+ no prices and no sale dates yet. Full tier framing: [docs/packaging.md](docs/packaging.md).
+ License decision ratified: [`docs/decisions/002-commercial-packaging.md`](docs/decisions/002-commercial-packaging.md).
 
 ## License
 
