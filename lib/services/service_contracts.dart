@@ -56,10 +56,28 @@ abstract class GithubRepo {
   Future<String> validate();
 
   /// Open issues (PRs excluded) for `owner/repo`, newest first.
-  Future<List<GithubItem>> repoIssues(String repo);
+  /// [page]/[perPage] drive the screen's LOAD MORE affordance (GitHub
+  /// caps pages at 100 items; the screen passes 30).
+  Future<List<GithubItem>> repoIssues(String repo,
+      {int page = 1, int perPage = 30});
 
   /// Open pull requests for `owner/repo`, newest first.
-  Future<List<GithubItem>> repoPRs(String repo);
+  /// [page]/[perPage] mirror [repoIssues] for the PR tab's LOAD MORE.
+  Future<List<GithubItem>> repoPRs(String repo, {int page = 1, int perPage = 30});
+
+  /// Projects v2 boards owned by the token viewer (id/title/open count).
+  /// Empty when the token lacks Projects access — the screen falls back
+  /// to assigned issues instead of failing.
+  Future<List<Map<String, dynamic>>> projectsV2();
+
+  /// Open items across the viewer's recent Projects v2 boards, skipping
+  /// Done/Closed/Complete statuses. Throws when Projects is unreachable
+  /// so the caller can use the assigned-issue fallback.
+  Future<List<GithubItem>> projectTasks();
+
+  /// "Tasks" = open issues assigned to the token owner across [repos].
+  /// Falls back to recently updated issues when assignee data is empty.
+  Future<List<GithubItem>> myTasks(List<String> repos);
 
   /// Recent Actions workflow runs for `owner/repo` as deploy items.
   Future<List<DeployItem>> repoRuns(String repo, {int limit = 8});
