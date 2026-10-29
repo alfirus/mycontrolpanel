@@ -99,6 +99,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
   Timer? _autoTimer;
   DateTime? _lastAutoPoll;
   List<LogLine> _liveLogs = List.of(mockLogs);
+  bool _logsFromDemo = true; // cleared on first real fetch (#63)
   String _logSource = 'journal'; // journal | syslog | docker
   String _logContainer = '';
   bool _logLoading = false;
@@ -107,6 +108,8 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
   Map<String, List<double>> _latHistory = {}; // host -> recent latencies
   Map<String, List<double>> _cpuHistory = {}; // host -> recent cpu 0..1
   int _alertBadge = 0;
+  int _pollTotal = 0; // session agent-poll attempts (#62 Errors KPI)
+  int _pollErr = 0; // session agent-poll failures
   List<ServerConnection> _savedServers = [];
   bool get _useRealServers => _savedServers.isNotEmpty;
   final _agent = AgentService();
@@ -348,6 +351,8 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
         final m = await _agent.fetch(c.host, serverId: c.id);
         sw.stop();
         if (!mounted) return;
+        _pollTotal++; // session error-rate counters (#62)
+        if (m == null) _pollErr++;
         if (m != null) {
           setState(() => _metrics[c.id] = m);
           final cpu = (((m['cpu'] as num?) ?? 0).toDouble()).clamp(0.0, 1.0).toDouble();
@@ -435,13 +440,19 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
       );
       if (!mounted) return;
       setState(() {
-        if (lines.isNotEmpty) _liveLogs = lines.take(40).toList();
+        if (lines.isNotEmpty) {
+          _liveLogs = lines.take(40).toList();
+          _logsFromDemo = false;
+        } else if (_logsFromDemo) {
+          _liveLogs = []; // #63: never show stale demos behind a live label
+        }
         _logLoading = false;
       });
     } catch (e) {
       if (!mounted) return;
       setState(() {
         _logLoading = false;
+        if (_logsFromDemo) _liveLogs = []; // #63: error must not sit under demo lines
         _logError = e.toString().replaceFirst('Exception: ', '').split('\n').first;
       });
     }
@@ -3383,7 +3394,18 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     // Real latency chart: merge per-host histories (agent poll round-trip ms).
     List<FlSpot> spots = const [FlSpot(0,35),FlSpot(1,42),FlSpot(2,38),FlSpot(3,55),FlSpot(4,48)];
     String p95label = '48ms';
+    String uptimeLabel = '99.92%'; // demo values until servers are saved
+    String errorsLabel = '0.31%';
+    String reqLabel = '6.2k';
+    String reqName = 'Req/min';
     if (_useRealServers) {
+      // #62: live Uptime from agent uptime_days, Errors from the session
+      // poll counters; Req/min has no source yet so it stays demo-marked.
+      final days = _metrics.values.map((m) => ((m['uptime_days'] as num?) ?? 0).toInt()).toList();
+      uptimeLabel = days.isEmpty ? '—' : '${days.reduce((a, b) => a > b ? a : b)}d';
+      errorsLabel = _pollTotal == 0 ? '—' : '${(_pollErr * 100 / _pollTotal).toStringAsFixed(1)}%';
+      reqLabel = '—';
+      reqName = 'Req/min • demo';
       final allLat = _latHistory.values.expand((e) => e).toList();
       final p = MetricsHistory.p95(allLat);
       p95label = MetricsHistory.formatMs(p);
@@ -3397,8 +3419,8 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
       }
     }
     return PitchCard(
-      title: _useRealServers ? 'METRICS • LIVE' : 'METRICS',
-      subtitle: _useRealServers ? 'agent round-trip latency (SSH poll)' : null,
+      title: _useRealServers ? 'METRICS • LIVE' : 'METRICS • DEMO',
+      subtitle: _useRealServers ? 'agent round-trip latency (SSH poll)' : 'demo values — add servers for live metrics',
       trailing: compact ? InkWell(onTap: () => _goTo(9), child: const Text('VIEW ALL →', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.accentCyan))) : null,
       child: Column(children: [
         SizedBox(
@@ -3414,13 +3436,13 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
         ),
         const SizedBox(height: 8),
         Row(children: [
-          _metricKpi('Uptime', '99.92%', AppColors.success, compact: compact),
+          _metricKpi('Uptime', uptimeLabel, AppColors.success, compact: compact),
           const SizedBox(width: 6),
           _metricKpi('p95', p95label, AppColors.accentCyan, compact: compact),
           const SizedBox(width: 6),
-          _metricKpi('Errors', '0.31%', AppColors.warning, compact: compact),
+          _metricKpi('Errors', errorsLabel, AppColors.warning, compact: compact),
           const SizedBox(width: 6),
-          _metricKpi('Req/min', '6.2k', AppColors.textPrimary, compact: compact),
+          _metricKpi(reqName, reqLabel, AppColors.textPrimary, compact: compact),
         ]),
       ]),
     );
