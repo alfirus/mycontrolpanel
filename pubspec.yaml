@@ -46,6 +46,10 @@ dependencies:
   crypto: ^3.0.8
   flutter_secure_storage: ^11.2.0
   local_notifier: ^0.1.6
+  # Opt-in crash reporting (#26). Pinned 2026-10-29: latest stable per
+  # https://pub.dev/api/packages/sentry_flutter; needs Dart >=3.12 /
+  # Flutter >=3.44, satisfied by CI stable (Flutter 3.47.8 / Dart 3.13.7).
+  sentry_flutter: ^10.2.0
 
 dev_dependencies:
   flutter_test:
