@@ -32,6 +32,14 @@ set(CMAKE_CXX_FLAGS_PROFILE "${CMAKE_CXX_FLAGS_RELEASE}")
 # Use Unicode for all projects.
 add_definitions(-DUNICODE -D_UNICODE)
 
+# local_auth_windows 2.0.2 still builds its C++ plugin with /await +
+# <experimental/coroutine>, which MSVC >= 14.51 (VS 18, windows-latest)
+# rejects as a hard error (STL1011). Upstream has not migrated to C++20
+# <coroutine> yet, so define the vendor silence macro Microsoft's own
+# error message instructs, until the plugin catches up. Drop this when
+# local_auth_windows fixes it upstream.
+add_compile_definitions(_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS)
+
 # Compilation settings that should be applied to most targets.
 #
 # Be cautious about adding new options here, as plugins use this function by
