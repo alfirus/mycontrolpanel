@@ -214,7 +214,7 @@ Tracked under milestones
 
 - [ ] Background alert polling + push notifications (alert on new firing signals / failed CI runs while the app is closed)
 - [ ] Biometric app lock enforcement (toggle persists; needs `local_auth` + lock screen)
-- [ ] Sentry / Datadog integration (placeholder row in Settings)
+- [x] Sentry opt-in crash reporting (Settings → Integrations; explicit toggle default OFF, DSN in OS keychain, test-event verifies delivery) — Datadog sink still future
 
 <details>
 <summary>Done</summary>

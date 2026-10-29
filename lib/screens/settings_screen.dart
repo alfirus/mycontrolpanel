@@ -9,6 +9,7 @@ import 'package:uuid/uuid.dart';
 import '../theme/app_theme.dart';
 import '../models/server_connection.dart';
 import '../services/ai_service.dart';
+import '../services/error_reporting.dart';
 import '../services/github_service.dart';
 import '../services/gitlab_service.dart';
 import '../services/secure_store.dart';
@@ -95,6 +96,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _vaultMigrated = true;
   int _vaultPlaintext = 0;
   bool _vaultBusy = false;
+  // Sentry opt-in crash reporting (#26): toggle default OFF, DSN in keychain.
+  // The DSN value is never displayed back (SET/HIDDEN only, like agent tokens).
+  bool _sentryOptIn = false;
+  bool _sentryHasDsn = false;
+  bool _sentryBusy = false;
+  final _sentryDsnCtrl = TextEditingController();
 
   @override
   void initState() {
@@ -122,6 +129,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final glTok = await SecureStore.readSecret('gitlab_token') ?? '';
     final aiK = await SecureStore.readSecret('ai_key') ?? '';
     final vs = await SecureStore.vaultStatus();
+    final sentry = await ErrorReporting.loadStatus();
     if (!mounted) return;
     setState(() {
       _vaultLoaded = true;
@@ -144,6 +152,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _aiBaseCtrl.text = _aiBaseUrl;
       _aiKeyCtrl.text = _aiKey;
       _aiModelCtrl.text = _aiModel;
+      _sentryOptIn = sentry.optedIn;
+      _sentryHasDsn = sentry.hasDsn;
     });
   }
 
@@ -169,6 +179,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _aiBaseCtrl.dispose();
     _aiKeyCtrl.dispose();
     _aiModelCtrl.dispose();
+    _sentryDsnCtrl.dispose();
     super.dispose();
   }
 
@@ -394,7 +405,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               const SizedBox(height: 6),
               _aiSection(),
               const SizedBox(height: 6),
-              _integrationRow('Sentry / Datadog', 'Not connected', Icons.bug_report_outlined, AppColors.textMuted, 'Add'),
+              _sentrySection(),
             ]),
             footer: const Text('Server creds + tokens live in the OS keychain/keystore (never in plain prefs, never in the cloud).', style: TextStyle(fontSize: 10, color: AppColors.textDim)),
           );
@@ -1137,15 +1148,151 @@ class _SettingsScreenState extends State<SettingsScreen> {
     });
   }
 
-  Widget _integrationRow(String name, String masked, IconData icon, Color c, String action) => Padding(
-    padding: const EdgeInsets.only(bottom: 10),
-    child: Row(children: [
-      Container(width: 30, height: 30, decoration: BoxDecoration(color: c.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(7), border: Border.all(color: c.withValues(alpha: 0.2))), child: Icon(icon, size: 14, color: c)),
-      const SizedBox(width: 10),
-      Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(name, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.textPrimary)), Text(masked, style: const TextStyle(fontSize: 10, color: AppColors.textMuted, fontFamily: AppFonts.mono))])),
-      OutlinedButton(onPressed: (){}, style: OutlinedButton.styleFrom(side: const BorderSide(color: AppColors.border), foregroundColor: AppColors.textSecondary, padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6)), child: Text(action, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700))),
-    ]),
-  );
+  /// Sentry opt-in crash reporting (#26). Explicit consent toggle
+  /// (default OFF) + DSN stored ONLY in the OS keychain. Reporting is
+  /// armed at startup when opted-in with a DSN; the test-event button
+  /// verifies delivery against the user's own Sentry project.
+  Widget _sentrySection() {
+    final armed = _sentryOptIn && _sentryHasDsn;
+    return Container(
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(color: AppColors.surface1, borderRadius: BorderRadius.circular(10), border: Border.all(color: armed ? AppColors.success.withValues(alpha: 0.3) : AppColors.borderLight)),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Container(width: 30, height: 30, decoration: BoxDecoration(color: AppColors.warning.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(7), border: Border.all(color: AppColors.warning.withValues(alpha: 0.25))), child: const Icon(Icons.bug_report_outlined, size: 14, color: AppColors.warning)),
+          const SizedBox(width: 10),
+          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const Text('Sentry', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+            Text(armed ? 'Opted in • DSN set (value hidden)' : 'Opt-in crash reporting • OFF by default', style: TextStyle(fontSize: 10, color: armed ? AppColors.success : AppColors.textMuted, fontFamily: AppFonts.mono)),
+          ])),
+          Container(width: 8, height: 8, decoration: BoxDecoration(color: armed ? AppColors.success : AppColors.textDim, shape: BoxShape.circle)),
+        ]),
+        const SizedBox(height: 8),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+          decoration: BoxDecoration(color: AppColors.surface2, borderRadius: BorderRadius.circular(6), border: Border.all(color: AppColors.border)),
+          child: const Text('Off by default. When ON, crash/error reports go ONLY to your Sentry DSN (self-hosted or Sentry cloud) — nothing is sent anywhere otherwise. The DSN lives in the OS keychain, never in plain prefs.', style: TextStyle(fontSize: 10, color: AppColors.textMuted)),
+        ),
+        const SizedBox(height: 8),
+        Row(children: [
+          const Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text('Enable crash reporting', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+            Text('Explicit opt-in — stays off until you enable it', style: TextStyle(fontSize: 10, color: AppColors.textMuted)),
+          ])),
+          Switch(value: _sentryOptIn, onChanged: _sentryBusy ? null : _setSentryOptIn, activeTrackColor: AppColors.accentCyan, thumbColor: WidgetStateProperty.all(Colors.black)),
+        ]),
+        const SizedBox(height: 8),
+        Row(children: [
+          Expanded(
+            child: TextField(
+              controller: _sentryDsnCtrl,
+              obscureText: true,
+              style: const TextStyle(fontSize: 11, color: AppColors.textPrimary, fontFamily: AppFonts.mono),
+              decoration: InputDecoration(
+                hintText: _sentryHasDsn ? 'DSN set (hidden) — paste a new one to rotate' : 'https://…@your-sentry/… (DSN)',
+                hintStyle: const TextStyle(fontSize: 10, color: AppColors.textMuted, fontFamily: AppFonts.mono),
+                filled: true, fillColor: AppColors.surface2,
+                contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.border)),
+                enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.border)),
+                focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.accentCyan)),
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          FilledButton(
+            onPressed: _sentryBusy ? null : _saveSentryDsn,
+            style: FilledButton.styleFrom(backgroundColor: AppColors.accentCyan, foregroundColor: Colors.black, padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12)),
+            child: _sentryBusy
+                ? const SizedBox(width: 13, height: 13, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black))
+                : Text(_sentryHasDsn ? 'UPDATE' : 'SAVE', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w800)),
+          ),
+        ]),
+        if (armed) ...[
+          const SizedBox(height: 8),
+          Row(children: [
+            Expanded(
+              child: OutlinedButton.icon(
+                onPressed: _sentryBusy ? null : _sendSentryTestEvent,
+                icon: _sentryBusy
+                    ? const SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 2))
+                    : const Icon(Icons.outgoing_mail, size: 13),
+                label: Text(_sentryBusy ? 'SENDING…' : 'SEND TEST EVENT', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w800)),
+                style: OutlinedButton.styleFrom(foregroundColor: AppColors.accentCyan, side: const BorderSide(color: AppColors.accentCyan), padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 11)),
+              ),
+            ),
+          ]),
+          TextButton.icon(
+            onPressed: _sentryBusy ? null : _disconnectSentry,
+            icon: const Icon(Icons.link_off, size: 12),
+            label: const Text('Disconnect (delete DSN, opt out)', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600)),
+            style: TextButton.styleFrom(foregroundColor: AppColors.critical),
+          ),
+        ] else if (_sentryOptIn && !_sentryHasDsn) ...[
+          const SizedBox(height: 6),
+          const Text('Opt-in recorded — save a DSN above to arm reporting.', style: TextStyle(fontSize: 10, color: AppColors.warning)),
+        ],
+      ]),
+    );
+  }
+
+  Future<void> _setSentryOptIn(bool v) async {
+    await ErrorReporting.setOptIn(v);
+    if (!v) await ErrorReporting.shutdown();
+    if (!mounted) return;
+    setState(() => _sentryOptIn = v);
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(backgroundColor: AppColors.surface1, content: Text(v ? 'Crash reporting opted IN — save a DSN to arm it' : 'Crash reporting OFF — Sentry shut down, nothing is sent', style: const TextStyle(fontSize: 12, color: AppColors.textSecondary))));
+  }
+
+  Future<void> _saveSentryDsn() async {
+    final dsn = _sentryDsnCtrl.text.trim();
+    if (dsn.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(backgroundColor: AppColors.surface1, content: Text('Paste a DSN first', style: TextStyle(fontSize: 12, color: AppColors.warning))));
+      return;
+    }
+    if (!ErrorReporting.isValidDsn(dsn)) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(backgroundColor: AppColors.surface1, content: Text('That does not look like a DSN URL (https://…)', style: TextStyle(fontSize: 12, color: AppColors.warning))));
+      return;
+    }
+    setState(() => _sentryBusy = true);
+    await ErrorReporting.setDsn(dsn);
+    final status = await ErrorReporting.loadStatus();
+    if (!mounted) return;
+    setState(() {
+      _sentryBusy = false;
+      _sentryHasDsn = status.hasDsn;
+      _sentryOptIn = status.optedIn;
+      _sentryDsnCtrl.clear();
+    });
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(backgroundColor: AppColors.surface1, content: Text('Sentry DSN saved to keychain ✓ — send a test event to verify', style: TextStyle(fontSize: 12, color: AppColors.success))));
+  }
+
+  Future<void> _sendSentryTestEvent() async {
+    setState(() => _sentryBusy = true);
+    try {
+      final id = await ErrorReporting.sendTestEvent();
+      if (!mounted) return;
+      setState(() => _sentryBusy = false);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(backgroundColor: AppColors.success.withValues(alpha: 0.14), content: Text('Test event delivered ✓ (id $id) — check your Sentry project', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.success)), duration: const Duration(seconds: 5)));
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _sentryBusy = false);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(backgroundColor: AppColors.critical.withValues(alpha: 0.14), content: Text(e.toString().replaceFirst('StateError: ', '').replaceFirst('Exception: ', '').split('\n').first, style: const TextStyle(fontSize: 12, color: AppColors.critical)), duration: const Duration(seconds: 5)));
+    }
+  }
+
+  Future<void> _disconnectSentry() async {
+    await ErrorReporting.setDsn('');
+    await ErrorReporting.setOptIn(false);
+    await ErrorReporting.shutdown();
+    if (!mounted) return;
+    setState(() {
+      _sentryOptIn = false;
+      _sentryHasDsn = false;
+      _sentryDsnCtrl.clear();
+    });
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(backgroundColor: AppColors.surface1, content: Text('Sentry disconnected — DSN deleted, opted out', style: TextStyle(fontSize: 12, color: AppColors.textSecondary))));
+  }
 
   // --- App updates (GitHub Releases, desktop) ---
   String _appVersion = '';
