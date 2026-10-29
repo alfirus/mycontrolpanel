@@ -225,16 +225,17 @@ Feedback and PRs welcome — especially homelab/self-hosted setups.
 
 ## Positioning
 
-MyControlPanel is **free and open source (MIT)** for homelab and self-hosted
-use — public repo, unlimited servers, no paywall, no telemetry, no account.
-It is sustained by voluntary donations
-([Buy Me a Coffee](https://www.buymeacoffee.com/alfirus)).
+ MyControlPanel is **free and open source (MIT)** for homelab and self-hosted
+ use — public repo, unlimited servers, no paywall, no telemetry, no account.
+ It is sustained by voluntary donations
+ ([Buy Me a Coffee](https://www.buymeacoffee.com/alfirus)).
 
-## Pricing
+ ## Pricing
 
-**Community (MIT) is the only edition today** — free, unlimited servers,
-public repo. Pro and MSP bundles are *proposed* post-traction concepts with
-no prices and no sale dates yet. Full tier framing: [docs/packaging.md](docs/packaging.md).
+ **Community (MIT) is the only edition today** — free, unlimited servers,
+ public repo. Pro and MSP bundles are *proposed* post-traction concepts with
+ no prices and no sale dates yet. Full tier framing: [docs/packaging.md](docs/packaging.md).
+ License decision ratified: [`docs/decisions/002-commercial-packaging.md`](docs/decisions/002-commercial-packaging.md).
 
 ## License
 
