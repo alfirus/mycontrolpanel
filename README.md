@@ -182,6 +182,25 @@ lib/
 
 ## Roadmap
 
+Product direction: **ship v1 as the homelab/self-hosted IT Control Center** —
+every tab live against real data — then grow v2 platform depth.
+Tracked under milestones
+[v1-ship](https://github.com/alfirus/mycontrolpanel/milestone/1) and
+[v2-next](https://github.com/alfirus/mycontrolpanel/milestone/2).
+
+### v1-ship (current milestone) — make every tab real
+
+- [ ] Wire GitHub tab to `GithubService` (live issues/PRs/Tasks over PAT; demo fallback when no token)
+- [ ] Wire GitLab tab to `GitlabService` (live projects/issues/MRs; demo fallback when no token)
+- [ ] Wire CI/CD tab to live GitHub Actions runs (replace `mockDeploys`)
+- [ ] Wire Security tab to live findings (Dependabot/code-scanning via `GithubService`; demo fallback)
+- [ ] Live log-tail stream over SSH (replace simulated stream)
+- [ ] Release gate green per [`docs/release-gate.md`](docs/release-gate.md)
+  (`flutter analyze`, `flutter test`, 5-platform builds, agent install,
+  secure-storage migration verified)
+
+### v2-next — platform depth
+
 - [ ] Background alert polling + push notifications (alert on new firing signals / failed CI runs while the app is closed)
 - [ ] Biometric app lock enforcement (toggle persists; needs `local_auth` + lock screen)
 - [ ] Sentry / Datadog integration (placeholder row in Settings)
