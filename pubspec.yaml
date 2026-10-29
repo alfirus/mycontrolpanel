@@ -46,6 +46,7 @@ dependencies:
   crypto: ^3.0.8
   flutter_secure_storage: ^11.2.0
   local_notifier: ^0.1.6
+  local_auth: ^3.0.2 # biometric app lock, issue #24 (latest stable; needs Flutter >=3.38 — CI runs stable)
 
 dev_dependencies:
   flutter_test:
