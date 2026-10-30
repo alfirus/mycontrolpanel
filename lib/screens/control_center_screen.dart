@@ -36,6 +36,7 @@ import '../services/alert_watch.dart';
 import '../services/alert_notifications.dart';
 import '../services/background_alerts.dart';
 import '../services/deployments_service.dart';
+import '../services/desktop_alerts.dart';
 import '../services/ci_sync.dart';
 import '../services/cron_run_tracker.dart';
 import '../services/alert_notifications.dart';
@@ -399,11 +400,20 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
           SnackBar(content: Text('⚠ ${fresh.first}${fresh.length > 1 ? ' (+${fresh.length - 1} more)' : ''}'), backgroundColor: AppColors.critical, duration: const Duration(seconds: 4)),
         );
         // OS-level copy of the same titles (best-effort, pref-gated).
-        // Desktop rail (local_notifier) + mobile rail
-        // (flutter_local_notifications via BackgroundAlerts) — each
-        // self-guards by platform, so calling both is safe everywhere.
-        unawaited(AlertNotifications.showFresh(fresh));
+        // Mobile rail: flutter_local_notifications via BackgroundAlerts
+        // (self-guards: no-op off mobile). Desktop: flutter_local
+        // notifications via DesktopAlerts when the SHARED background-alerts
+        // consent is ON, else the legacy local_notifier rail
+        // (AlertNotifications, `notifications` pref) — exactly one desktop
+        // toast per fresh batch, never both. Closed-app delivery stays
+        // deferred to tray-mode work (DesktopAlerts.closedAppNote).
         unawaited(BackgroundAlerts.showFresh(fresh));
+        if (DesktopAlerts.isSupportedPlatform &&
+            await DesktopAlerts.isEnabled()) {
+          unawaited(DesktopAlerts.showFresh(fresh));
+        } else {
+          unawaited(AlertNotifications.showFresh(fresh));
+        }
       }
     } catch (_) {}
   }
