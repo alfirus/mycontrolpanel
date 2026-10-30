@@ -68,5 +68,21 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
+	<!-- Background alerting (beta.1, owner green-lit 2026-10-30): WorkManager
+	     periodic BGTaskScheduler task (~15 min hint; iOS may defer to hours —
+	     the UI is stale-tolerant by design). The task identifier MUST match
+	     BackgroundAlerts.taskName in Dart and the registerPeriodicTask hint
+	     in AppDelegate.swift, or iOS throws BGTaskSchedulerErrorDomain 3.
+	     No remote-push keys: local notifications need no plist entitlement,
+	     only the runtime UNUserNotificationCenter prompt (requested in-app
+	     when the background toggle flips on). -->
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>fetch</string>
+	</array>
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>com.mycontrolpanel.my_control_panel.backgroundAlerts</string>
+	</array>
 </dict>
 </plist>

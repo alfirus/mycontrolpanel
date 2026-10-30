@@ -34,6 +34,7 @@ import '../services/log_tail_service.dart';
 import '../services/metrics_history.dart';
 import '../services/alert_watch.dart';
 import '../services/alert_notifications.dart';
+import '../services/background_alerts.dart';
 import '../services/deployments_service.dart';
 import '../services/ci_sync.dart';
 import '../services/cron_run_tracker.dart';
@@ -398,7 +399,11 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
           SnackBar(content: Text('⚠ ${fresh.first}${fresh.length > 1 ? ' (+${fresh.length - 1} more)' : ''}'), backgroundColor: AppColors.critical, duration: const Duration(seconds: 4)),
         );
         // OS-level copy of the same titles (best-effort, pref-gated).
+        // Desktop rail (local_notifier) + mobile rail
+        // (flutter_local_notifications via BackgroundAlerts) — each
+        // self-guards by platform, so calling both is safe everywhere.
         unawaited(AlertNotifications.showFresh(fresh));
+        unawaited(BackgroundAlerts.showFresh(fresh));
       }
     } catch (_) {}
   }

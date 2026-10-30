@@ -1,6 +1,8 @@
 import 'package:local_notifier/local_notifier.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'polling_alerts.dart';
+
 /// OS-level notifications for fresh alerts + failed CI runs.
 ///
 /// The control center already diffs firing alerts / failed CI runs through
@@ -36,18 +38,25 @@ class AlertNotifications {
 
   /// Fire one OS notification for [freshTitles] when the user opted in.
   /// Returns true when a notification was shown.
+  ///
+  /// The payload goes through [NotificationHook.build] verbatim — the same
+  /// `{title, body}` funnel (max 3 + "…and N more") the background rail
+  /// (`BackgroundAlerts.showFresh`) and the snack bar share. No new payload
+  /// formats (background-alerting beta.1 contract).
   static Future<bool> showFresh(List<String> freshTitles) async {
     if (!await _enabled()) return false;
-    if (freshTitles.isEmpty) return false;
-    final summary = buildSummary(freshTitles);
+    final titles = freshTitles.where((t) => t.trim().isNotEmpty).toList();
+    if (titles.isEmpty) return false;
+    final payload = NotificationHook.build('MyControlPanel alert', titles);
+    if ((payload['body'] ?? '').isEmpty) return false;
     try {
       await init();
       if (!_ready) return false;
       final note = LocalNotification(
         identifier: 'mcp-alert-${DateTime.now().millisecondsSinceEpoch}',
-        title: summary.title,
+        title: payload['title']!,
         subtitle: 'MyControlPanel',
-        body: summary.body,
+        body: payload['body']!,
       );
       await LocalNotifier.instance.notify(note);
       return true;

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'services/app_lock.dart';
+import 'services/background_alerts.dart';
 import 'services/error_reporting.dart';
 import 'theme/app_theme.dart';
 import 'screens/control_center_screen.dart';
@@ -12,6 +13,12 @@ import 'widgets/app_lock_screen.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await ErrorReporting.initIfOptedIn();
+  // Mobile background alerting (beta.1): re-register the WorkManager
+  // dispatcher + periodic task when the user opted in. Desktop no-ops
+  // (guarded inside); failures never block launch.
+  try {
+    await BackgroundAlerts.ensureInitialized();
+  } catch (_) {}
   runApp(const MyControlPanelApp());
 }
 

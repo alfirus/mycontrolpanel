@@ -51,6 +51,15 @@ dependencies:
   # https://pub.dev/api/packages/sentry_flutter; needs Dart >=3.12 /
   # Flutter >=3.44, satisfied by CI stable (Flutter 3.47.8 / Dart 3.13.7).
   sentry_flutter: ^10.2.0
+  # Mobile background alerting (beta.1, owner green-lit 2026-10-30 for ALL
+  # platforms; desktop closed-app deferred to tray-mode work). Mobile-only at
+  # runtime (guarded by Platform.isAndroid/isIOS): WorkManager periodic poll
+  # (>=15 min OS minimum) + local notifications. Compiles on desktop (CI
+  # build-matrix) but never schedules there.
+  # Pinned 2026-10-30: latest stable per pub.dev API (needs Flutter >=3.38 /
+  # Dart >=3.5, satisfied by CI stable Flutter 3.47.8 / Dart 3.13.7).
+  flutter_local_notifications: ^22.3.3
+  workmanager: ^0.10.10
 
 dev_dependencies:
   flutter_test:
