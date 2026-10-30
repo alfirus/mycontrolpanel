@@ -77,6 +77,14 @@ abstract class DesktopAlerts {
   /// OFF. One toggle in Settings, not a second desktop-only pref.
   static Future<bool> isEnabled() => BackgroundAlerts.isEnabled();
 
+  /// Record an in-app check against the shared staleness stamp
+  /// ([BackgroundAlerts.prefLastCheckKey]) — on desktop the in-app timer IS
+  /// the beta.1 rail, so the alerts-surface "last checked …" line stays
+  /// honest while the app runs. Called on every fan-out tick, even with zero
+  /// fresh titles (staleness is honest, never silent). Never throws.
+  static Future<void> recordCheck([DateTime? at]) =>
+      BackgroundAlerts.recordCheck(at);
+
   /// Call once from `main()` (guarded try/catch there too): inits the
   /// plugin + fires the macOS user-allow prompt on first run when the user
   /// opted in. No-op off desktop / when opted out; never throws.

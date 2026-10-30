@@ -118,4 +118,24 @@ void main() {
       expect(t.evaluate(0.95), AlertSeverity.critical);
     });
   });
+
+  group('DesktopAlerts staleness stamp (shared with mobile)', () {
+    test('recordCheck writes the shared last-check stamp', () async {
+      SharedPreferences.setMockInitialValues({});
+      expect(await BackgroundAlerts.readLastCheck(), isNull);
+      final at = DateTime(2026, 10, 30, 12, 0);
+      await DesktopAlerts.recordCheck(at);
+      expect(await BackgroundAlerts.readLastCheck(), at);
+    });
+
+    test('recorded check feeds the alerts-surface stale line', () async {
+      SharedPreferences.setMockInitialValues({});
+      final now = DateTime(2026, 10, 30, 12, 16);
+      await DesktopAlerts.recordCheck(now.subtract(const Duration(minutes: 16)));
+      expect(
+        await BackgroundAlerts.lastCheckedLabel(now: now),
+        'last checked 16 min ago',
+      );
+    });
+  });
 }

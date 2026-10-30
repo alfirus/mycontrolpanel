@@ -43,6 +43,7 @@ import '../services/alert_notifications.dart';
 import 'server_details_screen.dart';
 import '../widgets/pitch_card.dart';
 import '../widgets/state_view.dart';
+import '../widgets/alerts_staleness_line.dart';
 import '../widgets/run_detail_sheet.dart';
 import 'audit_screen.dart';
 import 'settings_screen.dart';
@@ -130,6 +131,10 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
   Map<String, List<AlertEntry>> _serverAlerts = {}; // server id -> harvested alerts
   Set<String> _alertLoading = {};
   String? _alertError;
+  // Background-rail staleness (beta.1): last completed background check, read
+  // from `background_alerts_last_check_ms`. Shown on the alerts card footer so
+  // background staleness is honest, never silent. Null until first read.
+  String? _bgStaleLabel;
   List<AlertEntry> get _realAlerts => _serverAlerts.values.expand((e) => e).toList();
   // AI provider state (Settings → Integrations)
   bool _aiConfigured = false;
@@ -395,6 +400,14 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
       if (!mounted) return;
       setState(() => _alertBadge = keys.length);
       await AlertWatch.markSeen(keys);
+      // Desktop beta.1 rail: the in-app diff tick IS the check — record it
+      // against the shared staleness stamp on every tick (even with zero
+      // fresh titles) so the alerts-surface "last checked …" line stays
+      // honest while the app runs. Mobile keeps the WorkManager stamp only.
+      if (DesktopAlerts.isSupportedPlatform &&
+          await DesktopAlerts.isEnabled()) {
+        unawaited(DesktopAlerts.recordCheck());
+      }
       if (fresh.isNotEmpty && mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('⚠ ${fresh.first}${fresh.length > 1 ? ' (+${fresh.length - 1} more)' : ''}'), backgroundColor: AppColors.critical, duration: const Duration(seconds: 4)),
@@ -493,6 +506,15 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
         });
       }
     }
+    _refreshBgStaleLabel();
+  }
+
+  /// Re-read the background-rail staleness line (cheap prefs read; the stamp
+  /// itself is written by the background worker, never by the foreground).
+  Future<void> _refreshBgStaleLabel() async {
+    final label = await BackgroundAlerts.lastCheckedLabel();
+    if (!mounted) return;
+    setState(() => _bgStaleLabel = label);
   }
 
   /// Discover apps on all saved servers (best-effort, silent on failure).
@@ -1239,6 +1261,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
   void initState() {
     super.initState();
     _loadSavedServers().then((_) => _maybeAutoCheckUpdates());
+    _refreshBgStaleLabel(); // background-rail staleness line for alerts card
     _startAutoRefresh();
     _logTimer = Timer.periodic(const Duration(seconds: 3), (_) {
       if (!mounted) return;
@@ -3118,9 +3141,30 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
               if (compact && all.length > display.length)
                 Center(child: Text('+ ${all.length - display.length} more • tap VIEW ALL', style: const TextStyle(fontSize: 10, color: AppColors.textMuted, fontWeight: FontWeight.w600))),
             ]),
-      footer: compact
-          ? null
-          : const Row(children: [Icon(Icons.check_circle, size: 12, color: AppColors.success), SizedBox(width: 6), Expanded(child: Text('Live: failed units • disk • SSH brute force • load • kernel • uptime', style: TextStyle(fontSize: 10, color: AppColors.textMuted)))]),
+      footer: _alertsCardFooter(compact: compact),
+    );
+  }
+
+  /// Alerts-card footer: foreground live-scope line (full card only) plus the
+  /// background-rail staleness line (both modes — staleness is never silent).
+  /// The stale line appears once the first prefs read lands; compact layout
+  /// is untouched until then (null footer, as before).
+  Widget? _alertsCardFooter({required bool compact}) {
+    final stale = _bgStaleLabel;
+    if (compact) {
+      if (stale == null) return null;
+      return AlertsStalenessLine(label: stale);
+    }
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Row(children: [Icon(Icons.check_circle, size: 12, color: AppColors.success), SizedBox(width: 6), Expanded(child: Text('Live: failed units • disk • SSH brute force • load • kernel • uptime', style: TextStyle(fontSize: 10, color: AppColors.textMuted)))]),
+        if (stale != null) ...[
+          const SizedBox(height: 4),
+          AlertsStalenessLine(label: stale),
+        ],
+      ],
     );
   }
 

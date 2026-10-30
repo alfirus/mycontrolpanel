@@ -212,7 +212,7 @@ Tracked under milestones
 
 ### v2-next — platform depth
 
-- [ ] Background alert polling + push notifications (alert on new firing signals / failed CI runs while the app is closed; design: [docs/design/05-background-alerting.md](docs/design/05-background-alerting.md))
+- [x] Background alert polling (beta.1: mobile WorkManager / BGAppRefresh + local notifications; desktop in-app timer toasts — both behind the shared Settings opt-in toggle, default OFF; closed-app deferred to tray mode, no remote push — design: [docs/design/05-background-alerting.md](docs/design/05-background-alerting.md))
 - [x] Sentry opt-in crash reporting (Settings → Integrations; explicit toggle default OFF, DSN in OS keychain, test-event verifies delivery) — Datadog sink still future
 
 <details>
