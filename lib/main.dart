@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'services/app_lock.dart';
 import 'services/background_alerts.dart';
+import 'services/desktop_alerts.dart';
 import 'services/error_reporting.dart';
 import 'theme/app_theme.dart';
 import 'screens/control_center_screen.dart';
@@ -18,6 +19,14 @@ Future<void> main() async {
   // (guarded inside); failures never block launch.
   try {
     await BackgroundAlerts.ensureInitialized();
+  } catch (_) {}
+  // Desktop local notifications (beta.1): init the win_toast /
+  // notify-send / Darwin plugin paths + macOS user-allow prompt when the
+  // user opted in via the SHARED background-alerts toggle. Mobile no-ops
+  // (guarded inside); failures never block launch. Closed-app delivery
+  // stays deferred to tray-mode work (see DesktopAlerts.closedAppNote).
+  try {
+    await DesktopAlerts.ensureInitialized();
   } catch (_) {}
   runApp(const MyControlPanelApp());
 }

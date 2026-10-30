@@ -94,3 +94,25 @@ Background plugins GREEN-LIT for ALL platforms. Constraints:
   mobile `BackgroundAlerts.showFresh`, background tick). No FCM/APNs
   remote push. Stale-tolerant "last checked Xm ago" UI in Settings
   (`formatLastChecked` / `lastCheckedLabel`).
+
+## 7. Desktop beta.1 slice — SHIPPED (in-app timer only)
+
+Implemented in `DesktopAlerts` (`lib/services/desktop_alerts.dart`), driven
+by the existing in-app timer while the app runs (control-center fan-out):
+
+- `NotificationHook.build` output → `flutter_local_notifications` show
+  calls on Windows (win_toast path via `AppUserModelId` + stable GUID),
+  Linux (notify-send path via `defaultActionName`) and macOS (Darwin
+  settings; user-allow prompt on first fire).
+- Same consent toggle + default OFF as mobile: the shared
+  `background_alerts` pref / `BackgroundAlertConsentTile` row — no second
+  desktop pref. When consent is ON the desktop toast goes through this
+  rail; otherwise the legacy `local_notifier` foreground rail
+  (`AlertNotifications`, `notifications` pref) remains — exactly one
+  desktop toast per fresh batch, never both.
+- Reuses `PollPolicy`/`Thresholds` verbatim; no new payload formats.
+- Closed-app delivery (Windows Task Scheduler / systemd user timer /
+  macOS LaunchAgent headless CLI entry-point) is DEFERRED to tray-mode
+  work — no scheduler wiring in beta.1; the single stub entry-point note
+  is `DesktopAlerts.closedAppNote`. macOS closed-app specifically needs a
+  menu-bar/tray helper outside Flutter (no LaunchAgent helper in beta.1).

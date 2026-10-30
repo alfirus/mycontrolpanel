@@ -455,9 +455,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
               _sliderTile('Refresh interval', '${_refreshInterval.toInt()}s', _refreshInterval, 5, 60, (v){ setState(()=> _refreshInterval=v); _savePrefs(); }),
               _switchTile('Notifications', 'OS alert on critical incidents', _notifications, (v){ setState(()=> _notifications=v); _savePrefs(); }),
               _switchTile('Biometrics', 'Face ID / fingerprint / device PIN on launch + resume', _biometrics, (v){ setState(()=> _biometrics=v); _savePrefs(); }),
-              // Background alerting (beta.1, mobile only): default OFF with
-              // explicit consent copy. Desktop shows the toggle but enabling
-              // schedules nothing (guarded in BackgroundAlerts).
+              // Background alerting (beta.1, mobile + desktop): default OFF with
+              // explicit consent copy (owner ruling 2026-10-30). One shared
+              // row — desktop shows the same toggle (no second pref): when
+              // ON, desktop toasts go through DesktopAlerts
+              // (flutter_local_notifications); when OFF, the legacy
+              // local_notifier rail stays. Closed-app delivery is tray-mode
+              // future work, not beta.1.
               BackgroundAlertConsentTile(
                 value: _backgroundAlerts,
                 onChanged: _setBackgroundAlerts,
