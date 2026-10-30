@@ -68,10 +68,29 @@ wake-up + notify plumbing:
 - v2-next "Background alert polling + push" stays unchecked and now points
   here — it is designed, not shipped.
 
-## 6. Owner decision needed
+## 6. Owner decision — RULED 2026-10-30 (binding, implemented in beta.1)
 
-Adding the two plugins triggers store-review permission text (background
-modes on iOS, battery-optimisation prompt on Android) and a headless CLI
-entry-point for desktop closed-app mode. Team recommends mobile-first
-slice (§3) for beta.1; desktop closed-app waits for tray mode. Owner: say
-go/no-go on the two plugins — no code lands until then.
+Background plugins GREEN-LIT for ALL platforms. Constraints:
+
+- Default stays OFF with explicit consent copy: "Polls your servers every
+  ~15 min in the background." (`BackgroundAlerts.consentCopy`,
+  `background_alerts` pref, default false).
+- Desktop headless closed-app (Task Scheduler / systemd user-timer CLI
+  entry-point) DEFERRED to tray-mode work — desktop keeps the in-app timer
+  path only (§3 item 3 unchanged).
+- Shipped mobile slice: `flutter_local_notifications` +
+  `workmanager` periodic task (`BackgroundAlerts.uniqueName`, ≥15 min OS
+  minimum, `NetworkType.connected`, exponential backoff); iOS via
+  BGTaskScheduler periodic task (`BackgroundAlerts.taskName` ==
+  `BGTaskSchedulerPermittedIdentifiers` == AppDelegate
+  `registerPeriodicTask` hint) + `registerLaunchHandlers()` (UIScene app);
+  Android battery-optimisation via one-shot in-app guidance — the app
+  deliberately does NOT declare `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`
+  (unused special permission = store-review red flag) and needs no
+  `RECEIVE_BOOT_COMPLETED` (WorkManager reschedules with its own merged
+  receivers). Only `POST_NOTIFICATIONS` is declared.
+- No new payload formats: every notification goes through
+  `NotificationHook.build` verbatim (foreground `AlertNotifications`,
+  mobile `BackgroundAlerts.showFresh`, background tick). No FCM/APNs
+  remote push. Stale-tolerant "last checked Xm ago" UI in Settings
+  (`formatLastChecked` / `lastCheckedLabel`).

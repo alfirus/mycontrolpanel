@@ -11,6 +11,11 @@ android {
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
+        // Required by flutter_local_notifications (beta.1 background
+        // alerting): its AAR metadata demands core library desugaring for
+        // :app whenever the dependency is present. See
+        // https://developer.android.com/studio/write/java8-support.html
+        isCoreLibraryDesugaringEnabled = true
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
@@ -43,4 +48,10 @@ android {
 
 flutter {
     source = "../.."
+}
+
+dependencies {
+    // Pairs with isCoreLibraryDesugaringEnabled above
+    // (flutter_local_notifications, beta.1 background alerting).
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
 }

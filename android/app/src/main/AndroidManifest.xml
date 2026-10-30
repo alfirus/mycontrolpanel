@@ -1,6 +1,16 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <!-- Biometric app lock (local_auth): OS-backed auth, incl. device PIN fallback. -->
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+    <!-- Background alerting (beta.1, owner green-lit 2026-10-30): WorkManager
+         periodic poll (>=15 min OS minimum) + flutter_local_notifications.
+         POST_NOTIFICATIONS is install-time below API 33 and a runtime prompt
+         on 33+ (requested in-app when the background toggle flips on).
+         Deliberately NOT declared: REQUEST_IGNORE_BATTERY_OPTIMIZATIONS
+         (unused special permission = Play-review red flag; the user exempts
+         manually via the in-app Settings guidance instead) and
+         RECEIVE_BOOT_COMPLETED (WorkManager persists + reschedules periodic
+         work with its own merged receivers — no app declaration needed). -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <application
         android:label="my_control_panel"
         android:name="${applicationName}"
