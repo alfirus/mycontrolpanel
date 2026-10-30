@@ -116,3 +116,8 @@ by the existing in-app timer while the app runs (control-center fan-out):
   work — no scheduler wiring in beta.1; the single stub entry-point note
   is `DesktopAlerts.closedAppNote`. macOS closed-app specifically needs a
   menu-bar/tray helper outside Flutter (no LaunchAgent helper in beta.1).
+- Staleness stamp is shared with mobile: every in-app fan-out tick calls
+  `DesktopAlerts.recordCheck()` → the same `background_alerts_last_check_ms`
+  pref, so the alerts-surface "last checked …" line (`AlertsStalenessLine`,
+  copy via `BackgroundAlerts.lastCheckedLabel`) stays honest on desktop
+  while the app runs.
