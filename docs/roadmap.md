@@ -105,6 +105,12 @@ install with vault-only credentials (Alya review closed); `flutter
 analyze` + `flutter test` green; assets Burhanah-verified; beta.2 tag cut
 via `release.yml`.
 
+Tracking (Shiela, TM-8): epic #119, children #121 (TM-2 Windows), #122
+(TM-2 Linux), #123 (TM-1 headless CLI), #124 (TM-3/TM-4 tray + menu-bar),
+#125 (TM-2 packaging half + release assets). WBS/RACI owned by Rina —
+this file follows `docs/project/tray-mode-plan.md` verbatim on owners,
+flag contract (`--poll-headless`), and gate.
+
 ### Phase 3 — Release hardening (milestone: `v1.0.0`)
 
 1. **Sentry / Datadog integration** — placeholder row in Settings becomes a
