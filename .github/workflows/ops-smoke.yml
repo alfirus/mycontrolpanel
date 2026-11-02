@@ -82,6 +82,72 @@ jobs:
           schtasks /Create /TN '\MyControlPanel\shape-probe' /SC ONLOGON /TR 'C:\Windows\System32\cmd.exe /c exit 0' /F
           schtasks /Query /TN '\MyControlPanel\shape-probe' /XML
           schtasks /Delete /TN '\MyControlPanel\shape-probe' /F
+          # TEMPORARY variant bisect (deleted before merge): which
+          # Settings shape does this parser accept?
+          $probeBase = @'
+          <?xml version="1.0" encoding="UTF-16"?>
+          <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+            <RegistrationInfo>
+              <Description>probe</Description>
+            </RegistrationInfo>
+            <Triggers>
+              <LogonTrigger>
+                <Enabled>true</Enabled>
+                <Repetition>
+                  <Interval>PT15M</Interval>
+                  <Duration>P1D</Duration>
+                  <StopAtDurationEnd>false</StopAtDurationEnd>
+                </Repetition>
+              </LogonTrigger>
+            </Triggers>
+            <Principals>
+              <Principal id="Author">
+                <LogonType>InteractiveToken</LogonType>
+                <RunLevel>LeastPrivilege</RunLevel>
+              </Principal>
+            </Principals>
+          '@
+          $probeTail = @'
+            <Actions Context="Author">
+              <Exec>
+                <Command>C:\Windows\System32\cmd.exe</Command>
+                <Arguments>/c exit 0</Arguments>
+              </Exec>
+            </Actions>
+          </Task>
+          '@
+          $vNoADS = $probeBase + @'
+            <Settings>
+              <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+              <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+              <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+              <AllowHardTerminate>true</AllowHardTerminate>
+              <StartWhenAvailable>true</StartWhenAvailable>
+              <Enabled>true</Enabled>
+              <Hidden>false</Hidden>
+            </Settings>
+          '@ + $probeTail
+          $vReordered = $probeBase + @'
+            <Settings>
+              <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+              <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+              <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+              <AllowHardTerminate>true</AllowHardTerminate>
+              <StartWhenAvailable>true</StartWhenAvailable>
+              <Enabled>true</Enabled>
+              <Hidden>false</Hidden>
+              <AllowDemandStart>true</AllowDemandStart>
+            </Settings>
+          '@ + $probeTail
+          function Try-Variant($name, $content) {
+            $p = Join-Path $env:RUNNER_TEMP "probe-$name.xml"
+            $content | Out-File -Encoding unicode -FilePath $p
+            schtasks /Create /TN "\MyControlPanel\probe-$name" /XML $p /F 2>&1 | Out-Null
+            if ($LASTEXITCODE -eq 0) { Write-Host "VARIANT $name : REGISTERED" } else { Write-Host "VARIANT $name : REJECTED" }
+            schtasks /Delete /TN "\MyControlPanel\probe-$name" /F 2>&1 | Out-Null
+          }
+          Try-Variant 'no-ADS' $vNoADS
+          Try-Variant 'reordered' $vReordered
           $wrapper = Join-Path $env:RUNNER_TEMP 'mcp-ops/build/bundle/bin/mycontrolpanel_check.exe'
           $sb = Join-Path $env:RUNNER_TEMP 'mcp-ops/schtasks-sb'
           & $wrapper install --install-dir "$env:RUNNER_TEMP/mcp-ops/fake-install" --wrapper $wrapper --sandbox $sb --force --no-reload
