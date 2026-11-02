@@ -124,10 +124,15 @@ jobs:
       - name: Build release
         shell: bash
         run: |
+          # Bake the rollout track into the app for Sentry release-health
+          # (ErrorReporting.resolveEnvironment): beta tags -> beta,
+          # clean tags -> stable, PR/local builds -> no define -> development.
+          TAG="${{ steps.ver.outputs.version }}"; TRACK=stable
+          if [[ "$TAG" == *-* ]]; then TRACK=beta; fi
           if [ "${{ matrix.os }}" = "android" ]; then
-            flutter build apk --release
+            flutter build apk --release --dart-define=SENTRY_ENVIRONMENT=$TRACK
           else
-            flutter build ${{ matrix.os }} --release
+            flutter build ${{ matrix.os }} --release --dart-define=SENTRY_ENVIRONMENT=$TRACK
           fi
 
       - name: Sign Windows binaries (Authenticode, when enrolled)
@@ -267,6 +272,10 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    # The resolved tag is exposed for the staged-rollout environment
+    # selection in the publish job below.
+    outputs:
+      tag: ${{ steps.ver.outputs.tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -370,6 +379,16 @@ jobs:
   release:
     name: publish release
     needs: [build, verify-gate, sbom]
+    # Staged rollout (Aisyah, DevOps): pre-release tags (`v*-alpha.*`,
+    # `v*-beta.*`) publish through the `release-beta` environment
+    # (no approvals — continuous beta), while clean `vX.Y.Z` tags go through
+    # `release-stable`, where the owner adds required reviewers in repo
+    # Settings → Environments (docs/runbooks/rollout.md). Until the owner
+    # configures protection, both behave as automatic — the wiring is what
+    # makes stable gated the moment reviewers are added, with zero workflow
+    # change. `environment:` accepts one expression; the ternary below
+    # resolves it from the tag shape.
+    environment: ${{ contains(needs.verify-gate.outputs.tag, '-') && 'release-beta' || 'release-stable' }}
     runs-on: ubuntu-latest
     steps:
       - name: Resolve version from tag
@@ -379,6 +398,7 @@ jobs:
           if [ -n "${{ inputs.tag }}" ]; then TAG="${{ inputs.tag }}"; else TAG="${GITHUB_REF_NAME}"; fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          if [[ "$TAG" == *-* ]]; then echo "track=beta" >> "$GITHUB_OUTPUT"; else echo "track=stable" >> "$GITHUB_OUTPUT"; fi
 
       - name: Download artifacts
         uses: actions/download-artifact@v4
@@ -403,11 +423,36 @@ jobs:
           sha256sum mycontrolpanel-* *.cyclonedx.json build-info-*.json > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
+      - name: Record Sentry release (best-effort)
+        # Deploy observability (Aisyah, DevOps): registers the tag with
+        # Sentry so release-health (crash-free sessions/users, adoption)
+        # starts tracking the moment the GitHub Release publishes. Skips
+        # silently until the owner adds SENTRY_AUTH_TOKEN + SENTRY_ORG
+        # (repo or release-beta/release-stable environment secrets — see
+        # docs/observability-dashboards.md), and never fails the train
+        # (continue-on-error) when Sentry is unreachable.
+        continue-on-error: true
+        shell: bash
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
+        run: |
+          if [ -z "$SENTRY_AUTH_TOKEN" ] || [ -z "$SENTRY_ORG" ]; then
+            echo "No Sentry credentials — skipping release record (see docs/observability-dashboards.md)."
+            exit 0
+          fi
+          curl -sS --fail-with-body -X POST \
+            "https://sentry.io/api/0/organizations/$SENTRY_ORG/releases/" \
+            -H "Authorization: Bearer $SENTRY_AUTH_TOKEN" \
+            -H 'Content-Type: application/json' \
+            -d "{\"version\": \"${{ steps.ver.outputs.tag }}\", \"projects\": [\"mycontrolpanel\"]}" \
+          && echo "Sentry release recorded for ${{ steps.ver.outputs.tag }}."
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.ver.outputs.tag }}
-          name: MyControlPanel ${{ steps.ver.outputs.tag }}
+          name: MyControlPanel ${{ steps.ver.outputs.tag }} (${{ steps.ver.outputs.track }})
           prerelease: ${{ contains(steps.ver.outputs.tag, '-') }}
           generate_release_notes: true
           files: |
