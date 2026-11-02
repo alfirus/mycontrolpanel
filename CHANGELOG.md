@@ -19,9 +19,16 @@ releases are cut as Git tags `v<name>` via `.github/workflows/release.yml`
   healing headless); scheduler templates + manual install/uninstall scripts
   per OS (`scripts/headless/`); `dart run my_control_panel:headless_check
   --self-test` harness; `test/headless_*_test.dart` (pipeline, state, frozen-contract,
-  adapter); CI `headless.yml` job (Windows + Linux); ADR-004, frozen
+  adapter); CI `headless.yml` job (Windows + Linux); ADR-005, frozen
   contract (`docs/specs/headless-cli-contract.md`), manual install runbook.
   Downstream (Zara/Elizabeth/Lisa) builds on this contract.
+- Beta exit + GTM readiness (Sofia, docs/decision only — no behavior
+  change): `docs/beta-done-checklist.md` (beta.1 DONE list, Burhanah
+  sign-off block), decision `004-tray-build-vs-defer.md` (owner call:
+  build Beta.2 per Rina's plan vs defer), `docs/store/` (listing copy,
+  screenshot checklist, privacy/permission disclosures for Play, App
+  Store, Snap, Microsoft Store), `docs/sales-kit-review.md` (Syafiqah +
+  Naura conditional-GO review with pre-call fixes).
 - Tray-mode delivery program (Beta.2 plan, docs only — no behavior
   change): `docs/project/tray-mode-plan.md` (WBS TM-1…TM-8, critical
   path, RACI, top-5 risks), roadmap Phase 2b exit gate (`v1.0.0-beta.2`),

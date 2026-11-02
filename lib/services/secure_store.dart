@@ -112,7 +112,7 @@ class SecureStore {
     await migrateIfNeeded();
   }
 
-  /// Read-only raw server-list JSON (headless-tick seam, ADR-003/004).
+  /// Read-only raw server-list JSON (headless-tick seam, ADR-003/005).
   ///
   /// Returns the persisted `server_connections` string WITHOUT decoding,
   /// healing, or migrating. The headless tick (`lib/headless.dart`) decodes

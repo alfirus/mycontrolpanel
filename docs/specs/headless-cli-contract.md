@@ -6,7 +6,7 @@ Lisa. The machine-readable half of this freeze lives in
 `test/headless_contract_test.dart` — a failing contract test means the
 freeze moved, not that the test is stale.
 
-Architecture rationale: `docs/decisions/004-headless-cli-architecture.md`.
+Architecture rationale: `docs/decisions/005-headless-cli-architecture.md`.
 Security boundary: `docs/decisions/003-tray-headless-security.md` (binding,
 unchanged).
 

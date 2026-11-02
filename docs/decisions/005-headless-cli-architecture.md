@@ -1,4 +1,4 @@
-# ADR-004: Headless CLI architecture + TM-1 frozen contract
+# ADR-005: Headless CLI architecture + TM-1 frozen contract
 
 Status: **accepted** — Lina (tech lead / TM-1 owner), 2026-11-02.
 Binding on TM-2/TM-3 (Zara, Elizabeth), TM-5 (Farah), TM-6 (Balqis).

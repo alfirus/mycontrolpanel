@@ -135,6 +135,11 @@ artifacts attached to the GitHub Release.
 - Backlog with acceptance criteria: `docs/BACKLOG.md` (GitHub issues mirror it).
 - Dependency + risk register: `docs/RISKS.md`.
 - Release + status cadence: `docs/STATUS.md`.
+- Maintainer operating budget: `docs/finance/BUDGET-beta.md` (+ workbook
+  `assets/templates/beta-operating-budget.xlsx`). Budget gate: no paid infra,
+  relay, cert, or store spend lands without Finance sign-off against that
+  file; Phase 2b (push relay) and Phase 3 (Sentry/Datadog opt-in) each
+  re-check the burn + guardrails before their milestone exits.
 - Release bar for any `v*` tag: no MOCK-tab ships as live — unwired tabs
   carry an explicit demo-mode banner. Full gate: `docs/release-gate.md`.
 
