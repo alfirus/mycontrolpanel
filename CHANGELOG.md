@@ -8,6 +8,15 @@ releases are cut as Git tags `v<name>` via `.github/workflows/release.yml`
 ## [Unreleased]
 
 ### Added
+- Staged rollout, phase 2 (Aisyah — DevOps): beta/stable tracks in the
+  release train — `release-beta` auto-publishes pre-release tags while
+  clean `vX.Y.Z` tags pause at the `release-stable` environment for owner
+  approval (zero workflow change to arm it); release names carry the
+  track; in-app `UpdateChannel` (stable default, opt-in beta) with
+  `fetchLatest(includePrerelease)` + `pickLatestForChannel` and
+  `test/update_channel_test.dart`; `tool/rollback_release.py` (dry-run by
+  default, never moves tags) + `docs/runbooks/rollout.md` (cut, promote,
+  rollback, owner setup).
 - Alert reliability harness + SLOs (Nadia, Beta.2 instrumentation, #138):
   `lib/services/alert_reliability.dart` (pure-Dart lifecycle tracking
   scheduled/executed/notified/dismissed, latency, drops, agent CPU/mem
