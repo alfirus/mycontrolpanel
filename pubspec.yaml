@@ -92,6 +92,7 @@ dev_dependencies:
 # is the Beta.2 operability companion (SLO report + log rotation; Nadia).
 executables:
   headless_check: headless_check
+  mycontrolpanel-check: mycontrolpanel_check
   agent_check: agent_check
 
 # For information on the generic Dart part of this file, see the
