@@ -8,6 +8,15 @@ releases are cut as Git tags `v<name>` via `.github/workflows/release.yml`
 ## [Unreleased]
 
 ### Added
+- User docs + store-copy pack (Ain — background-alerting user guide):
+  new `docs/user/background-alerting.md` (cadence, battery limits,
+  consent default-OFF, stale banners, thresholds, troubleshooting —
+  every claim traced to shipped code); store listings refreshed
+  (`docs/store/listing-copy.md`: per-store descriptions within Play /
+  App Store limits, support field, captions; `privacy-permissions.md`:
+  code-derived disclosures, Alya Security review requested before
+  first submission); sales one-pager synced to the Beta.2 honesty
+  line (background opt-in, no push relay, desktop closed-app planned).
 - Headless poll CLI architecture + core (TM-1, Lina — Beta.2 contract
   freeze): single shared headless check pipeline
   (`lib/background/headless_check.dart` + `lib/background/headless_state.dart`,
