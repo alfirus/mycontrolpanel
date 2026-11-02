@@ -8,6 +8,10 @@ releases are cut as Git tags `v<name>` via `.github/workflows/release.yml`
 ## [Unreleased]
 
 ### Added
+- Tray-mode delivery program (Beta.2 plan, docs only — no behavior
+  change): `docs/project/tray-mode-plan.md` (WBS TM-1…TM-8, critical
+  path, RACI, top-5 risks), roadmap Phase 2b exit gate (`v1.0.0-beta.2`),
+  closed-app architecture (§8 of `docs/design/05-background-alerting.md`).
 - README real-vs-roadmap status matrix (live vs UI-ready per capability).
 - Launch landing copy draft (`docs/launch.md`): hero, features, pricing tiers.
 - Sales one-pager (`docs/sales-one-pager.md`): use cases + objection handling.

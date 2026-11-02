@@ -121,3 +121,56 @@ by the existing in-app timer while the app runs (control-center fan-out):
   pref, so the alerts-surface "last checked …" line (`AlertsStalenessLine`,
   copy via `BackgroundAlerts.lastCheckedLabel`) stays honest on desktop
   while the app runs.
+
+## 8. Closed-app architecture — tray mode (Beta.2, `v1.0.0-beta.2`)
+
+Program plan: `docs/project/tray-mode-plan.md` (WBS TM-1…TM-8, RACI,
+critical path). Decision owner for this section's contract: Lina
+(headless-CLI architecture, binding); Zara implements scheduler wiring;
+Alya reviews scheduler security; Kira designs tray UX.
+
+### 8.1 Shape: one headless poll, three schedulers, one tray shell
+
+- **Headless poll CLI (TM-1).** A single entry-point, e.g.
+  `mycontrolpanel --poll-headless`, that runs one poll tick with no
+  window: read servers + thresholds from the existing store, reuse
+  `PollPolicy`/`Thresholds` verbatim, diff against the shared last-seen
+  set, and emit `NotificationHook.build` output (`{title, body}`, max 3 +
+  "…and N more") into the OS notification rail. Suggested contract
+  (Lina to freeze by 2026-11-21): exit `0` = tick ok (alerts or not),
+  `2` = tick skipped (consent OFF / no network / backoff active), `1` =
+  error; stdout is machine-readable JSON of the built notification or
+  empty; never prints secrets.
+- **OS schedulers (TM-2/TM-3).** Windows Task Scheduler (logon + repeat
+  trigger, per-user task, no elevation) and Linux systemd user timer
+  (same CLI — one design covers both, as §2 anticipated) invoke the
+  headless CLI at the user's `refresh_interval`, floored at ~15 min.
+  macOS gets a menu-bar/tray helper instead of a bare LaunchAgent: the
+  helper owns the icon + menu and invokes the same headless tick.
+- **Tray shell (TM-4).** Icon states (ok / firing / stale), menu
+  (Open / mute-until / Quit), deep link into Settings consent row. The
+  tray shell never polls by itself — it surfaces headless-tick results.
+
+### 8.2 Invariants (carried over from beta.1, non-negotiable)
+
+- Same payload end to end: `NotificationHook.build` verbatim on every
+  rail — snack bar today, OS toast tomorrow, headless tick next.
+- Same consent: the shared `background_alerts` pref (default OFF) gates
+  the headless path; no second desktop pref.
+- Same honesty: every headless tick calls `DesktopAlerts.recordCheck()`
+  → `background_alerts_last_check_ms`, so "last checked Xm ago" stays
+  true with the window closed.
+- Exactly-once across rails: in-app timer and headless tick share one
+  last-seen set — exactly one toast per fresh batch, never both (TM-5
+  gate, TM-6 proof for open + closed cases).
+- Vault-only credentials: the headless process reads secrets from the OS
+  vault; scheduler args carry no token, key path, or passphrase (Alya
+  review, TM-2).
+
+### 8.3 What stays out (Beta.2 non-goals)
+
+- Remote push (FCM/APNs relay) — still local notifications only.
+- Exact-time guarantees — schedulers are best-effort; staleness copy
+  absorbs drift.
+- Multi-window management beyond the tray shell; Android
+  background-service limits stay Post-1.0.

@@ -76,6 +76,35 @@ updated to reflect reality, alpha.2 tag cut via `release.yml`.
 Milestone exit: beta.1 tag, notifications verified on at least desktop + one
 mobile OS, lock enforced on cold start and resume.
 
+### Phase 2b — Tray mode / closed-app delivery (milestone: `v1.0.0-beta.2`)
+
+Promotes the Post-1.0 tray-mode one-liner to a gated phase. Program plan
+(WBS, dates, owners, critical path, RACI, risks):
+`docs/project/tray-mode-plan.md`. Architecture: §8 of
+`docs/design/05-background-alerting.md`.
+
+1. **Headless poll CLI** — `--poll-headless` entry-point reusing
+   `PollPolicy`/`Thresholds`/`NotificationHook.build` verbatim (Lina:
+   architecture; Lisa: implementation).
+2. **OS scheduler wiring** — Windows Task Scheduler + Linux systemd user
+   timer, per-user scope, no elevation (Zara; Alya: security review;
+   Aisyah: packaging).
+3. **macOS menu-bar/tray helper** — tray shell UX: icon states, menu,
+   Settings + consent linkage (Kira: design; Nurul/Elizabeth: impl).
+4. **Alert-quality gate** — quiet-hours, dedupe/no-double-toast with the
+   in-app rail (Farah; Nadia consulted). QA matrices per OS × install
+   path (Balqis); release-asset verification (Burhanah); runbooks + beta
+   comms (Ain, Naura); tracking/milestone (Shiela), day-to-day delivery
+   (Maisarah).
+
+Milestone exit (Beta.2 gate): closed-window firing signal (failed unit +
+disk ≥80%) reaches the OS rail on Windows + Linux + macOS; exactly-once
+delivery across rails; headless runs only under the shared opt-in
+(default OFF) with honest "last checked …" staleness; no-elevation
+install with vault-only credentials (Alya review closed); `flutter
+analyze` + `flutter test` green; assets Burhanah-verified; beta.2 tag cut
+via `release.yml`.
+
 ### Phase 3 — Release hardening (milestone: `v1.0.0`)
 
 1. **Sentry / Datadog integration** — placeholder row in Settings becomes a
@@ -90,7 +119,8 @@ artifacts attached to the GitHub Release.
 
 ### Post-1.0 (backlog, no milestone yet)
 
-- Multi-window / tray mode for desktop; Android background-service limits.
+- Android background-service limits (WorkManager-first; no persistent
+  foreground service unless the user opts in).
 - GitLab parity (a `gitlab_service.dart` stub exists — promote or delete).
 - Offline-first cache of last-known server state.
 
