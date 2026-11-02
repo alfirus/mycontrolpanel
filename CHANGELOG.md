@@ -8,6 +8,15 @@ releases are cut as Git tags `v<name>` via `.github/workflows/release.yml`
 ## [Unreleased]
 
 ### Added
+- Staged rollout, phase 2 (Aisyah — DevOps): beta/stable tracks in the
+  release train — `release-beta` auto-publishes pre-release tags while
+  clean `vX.Y.Z` tags pause at the `release-stable` environment for owner
+  approval (zero workflow change to arm it); release names carry the
+  track; in-app `UpdateChannel` (stable default, opt-in beta) with
+  `fetchLatest(includePrerelease)` + `pickLatestForChannel` and
+  `test/update_channel_test.dart`; `tool/rollback_release.py` (dry-run by
+  default, never moves tags) + `docs/runbooks/rollout.md` (cut, promote,
+  rollback, owner setup).
 - Alert reliability harness + SLOs (Nadia, Beta.2 instrumentation, #138):
   `lib/services/alert_reliability.dart` (pure-Dart lifecycle tracking
   scheduled/executed/notified/dismissed, latency, drops, agent CPU/mem
@@ -106,6 +115,16 @@ releases are cut as Git tags `v<name>` via `.github/workflows/release.yml`
 - Biometric app lock: `local_auth` + lock screen on cold start and
   resume-from-background when the Settings toggle is on, with device
   PIN/passcode fallback and clear messaging where nothing is available.
+- Headless slice verdict parity (Elizabeth — closed-app slice, no
+  contract change): failed CI runs now ride the `--poll-headless` tick
+  (`lib/services/headless_slice.dart` mapping to `HeadlessSignal(kind:
+  'ci')` + `fetchRuns` seam in `lib/headless.dart`; production default
+  reads tracked repos + read-only vault tokens, CI sickness never sinks
+  the host tick, exit codes untouched); `test/headless_slice_test.dart`
+  proves headless verdicts == in-app verdicts (alerts + CI, stale +
+  no-data, resolve→re-fire) with two documented degenerate-case
+  divergences; `docs/specs/headless-slice-parity.md` parity table;
+  `headless.yml` covers the new files.
 
 ### Security
 - Credential storage cut over to OS keychain/keystore; quality gates documented
