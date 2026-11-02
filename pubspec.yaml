@@ -72,6 +72,12 @@ dev_dependencies:
   # rules and activating additional ones.
   flutter_lints: ^6.0.0
 
+# Runnable entry-points (`dart run <name>`). `headless_check` is the TM-1
+# CI/dev harness for the shared headless pipeline (pure Dart — must stay
+# runnable under `dart run`; see bin/headless_check.dart).
+executables:
+  headless_check: headless_check
+
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
 

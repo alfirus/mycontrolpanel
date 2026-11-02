@@ -112,6 +112,23 @@ class SecureStore {
     await migrateIfNeeded();
   }
 
+  /// Read-only raw server-list JSON (headless-tick seam, ADR-003/005).
+  ///
+  /// Returns the persisted `server_connections` string WITHOUT decoding,
+  /// healing, or migrating. The headless tick (`lib/headless.dart`) decodes
+  /// it with `ServerConnection.decodeList` and resolves `secure:` markers
+  /// via `HeadlessSecurity.resolveCredential` + [readSecret] — healing
+  /// stays interactive-only (`readServers`), so this accessor must never
+  /// gain a write path. Best-effort, never throws (null = no list).
+  static Future<String?> readRawServerListJson() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      return prefs.getString('server_connections');
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// Load servers, resolving `secure:` credential markers from the keychain.
   /// Owner-mandated full migration (Option A, 2026-10-28): raw prefs
   /// credentials are never surfaced from disk — any legacy plaintext found
