@@ -1,0 +1,49 @@
+name: link-check
+
+# PR-time Markdown link check (supports the docs/roadmap sync rule:
+# every mock-to-live flip updates README + backlog + roadmap in the same PR,
+# and all three link to each other plus live GitHub issues).
+#
+# Fails the PR on broken http(s) links in shipped Markdown. lychee defaults
+# already exclude loopback, mailto and unsupported schemes; no sudo, no
+# deploys, read-only.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '**/*.md'
+  workflow_dispatch:
+
+# Least privilege: link checking reads the tree, nothing is published.
+permissions:
+  contents: read
+
+concurrency:
+  group: link-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lychee:
+    name: markdown links
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Check Markdown links
+        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
+        with:
+          fail: true
+          args: >-
+            --no-progress
+            --max-retries 2
+            -- './README.md'
+            './CHANGELOG.md'
+            './CONTRIBUTING.md'
+            './docs/**/*.md'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
