@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Mock data for all 10 segments - pitch black control center
 import 'package:flutter/material.dart';
 import '../theme/app_theme.dart';

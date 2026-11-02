@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 /// Predictive disk/load alerting — trend + p95 forecasts for 80/90% disk
 /// usage and load spikes (Metrics & Uptime + Alerts).
 ///

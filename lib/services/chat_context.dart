@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 /// Grounded AI Chatbox pipeline — server-context builder + lightweight
 /// retrieval over status/logs/alerts + offline eval set.
 ///

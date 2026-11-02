@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import '../models/mock_data.dart';
 
 /// Which write action a CI/CD timeline run supports.

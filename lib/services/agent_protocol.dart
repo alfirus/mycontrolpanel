@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 /// Agent Protocol v1 — versioned contract for the MyControlPanel metrics
 /// agent served by the Python systemd unit on TCP 9108.
 ///

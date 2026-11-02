@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 /// Agent-output alert evaluation (no SSH).
 ///
 /// [AlertRules.evaluate] maps one [HostSignals] snapshot — harvested from

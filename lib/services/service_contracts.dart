@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 /// Service contracts — interfaces + dependency injection for the
 /// MyControlPanel service layer.
 ///

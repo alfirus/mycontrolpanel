@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 /// Dependency injection for the service layer. Screens and pollers take
 /// their dependencies from [Services.current], which resolves to
 /// [MockServices] when `--dart-define=MCP_MOCKS=true` and to the live

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 /// APM-lite: top process + per-port connection snapshot from agent v2 (/procstats).
 class AppProc {
   final int pid;
