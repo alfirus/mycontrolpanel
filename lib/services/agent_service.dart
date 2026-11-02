@@ -10,6 +10,7 @@ import '../models/app_proc.dart';
 import '../models/cron_entry.dart';
 import '../models/server_connection.dart';
 import 'agent_protocol.dart';
+import 'anomaly_scoring.dart';
 import 'cron_run_tracker.dart';
 import 'secure_store.dart';
 import 'ssh_host_keys.dart';
@@ -1190,6 +1191,39 @@ WantedBy=multi-user.target
       final body = await resp.transform(utf8.decoder).join();
       hc.close();
       return jsonDecode(body) as Map<String, dynamic>;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// GET http://host:9108/anomaly?metric=&value=&hour=&sensitivity= ->
+  /// [AnomalyScore] or null (agent v6+ only). Null covers unreachable /
+  /// timeout / non-200 / pre-v6 (404) / bad shape — callers fall back to
+  /// the local detectors (`AnomalyBaseline`, static rules) so the rail
+  /// never depends on the agent version. Token resolution matches [fetch].
+  Future<AnomalyScore?> fetchAnomaly(
+    String host, {
+    String metric = 'cpu',
+    required double value,
+    int? hour,
+    AnomalySensitivity sensitivity = AnomalySensitivity.medium,
+    String? agentToken,
+    String? serverId,
+  }) async {
+    try {
+      agentToken = await _resolveAgentToken(agentToken, serverId);
+      final hc = HttpClient()..connectionTimeout = const Duration(seconds: 5);
+      final m = Uri.encodeQueryComponent(metric);
+      final h = hour == null ? '' : '&hour=${hour % 24}';
+      final req = await hc.get(host, agentPort,
+          '$kAnomalyPath?metric=$m&value=$value$h&sensitivity=${sensitivity.queryValue}');
+      _applyAgentToken(req, agentToken);
+      final resp = await req.close().timeout(const Duration(seconds: 8));
+      if (resp.statusCode != 200) return null;
+      final body = await resp.transform(utf8.decoder).join();
+      hc.close();
+      return AnomalyScore.parse(
+          jsonDecode(body) as Map<String, dynamic>);
     } catch (_) {
       return null;
     }

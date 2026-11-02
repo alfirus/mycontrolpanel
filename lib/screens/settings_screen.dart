@@ -10,6 +10,7 @@ import 'package:uuid/uuid.dart';
 import '../theme/app_theme.dart';
 import '../models/server_connection.dart';
 import '../services/ai_service.dart';
+import '../services/anomaly_scoring.dart';
 import '../services/error_reporting.dart';
 import '../services/background_alerts.dart';
 import '../services/github_service.dart';
@@ -70,6 +71,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   // Default OFF with explicit consent copy (owner ruling 2026-10-30).
   bool _backgroundAlerts = false;
   String? _backgroundLastChecked;
+  // Adaptive anomaly scoring (Farah — ML): shared Low/Med/High picker.
+  // Default Medium; persists to AnomalyScoringPrefs.prefKey.
+  AnomalySensitivity _anomalySensitivity = AnomalySensitivity.medium;
   String _selectedTheme = 'Pitch Black';
   // GitHub integration
   String _githubToken = '';
@@ -121,6 +125,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     await SecureStore.migrateIfNeeded();
     final prefs = await SharedPreferences.getInstance();
     final servers = await SecureStore.readServers();
+    final anomalySensitivity = await AnomalyScoringPrefs.load();
     setState(() {
       _servers = servers;
       _autoRefresh = prefs.getBool('auto_refresh') ?? true;
@@ -129,6 +134,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _biometrics = prefs.getBool('biometrics') ?? false;
       _backgroundAlerts =
           prefs.getBool(BackgroundAlerts.prefEnabledKey) ?? false;
+      _anomalySensitivity = anomalySensitivity;
       _githubRepos = (prefs.getStringList('github_repos') ?? []).toList();
       _gitlabProjects = (prefs.getStringList('gitlab_projects') ?? []).toList();
       _loading = false;
@@ -242,6 +248,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final label = await BackgroundAlerts.lastCheckedLabel();
     if (!mounted) return;
     setState(() => _backgroundLastChecked = label);
+  }
+
+  /// Anomaly sensitivity picker: persist the shared pref (default Medium).
+  /// Failures are silent — the picker still reflects the selection.
+  Future<void> _setAnomalySensitivity(AnomalySensitivity v) async {
+    setState(() => _anomalySensitivity = v);
+    await AnomalyScoringPrefs.save(v);
   }
 
   @override
@@ -469,6 +482,57 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 lastCheckedLabel: _backgroundLastChecked,
                 showBatteryTip: _isAndroid,
                 showIosTip: _isIOS,
+              ),
+              // Adaptive anomaly scoring (Farah — ML): shared Low/Med/High
+              // picker. One pref read by every rail (mobile #116, desktop
+              // #117); the why-this-alerted copy names the active tier so
+              // the picker visibly does something. Fully on-device.
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
+                child: Row(children: [
+                  const Expanded(
+                    child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text('Alert sensitivity',
+                              style: TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
+                                  color: AppColors.textPrimary)),
+                          SizedBox(height: 2),
+                          Text(
+                              'How jumpy anomaly alerts are. Medium suits most servers.',
+                              style: TextStyle(
+                                  fontSize: 11,
+                                  color: AppColors.textSecondary)),
+                        ]),
+                  ),
+                  SegmentedButton<AnomalySensitivity>(
+                    segments: const [
+                      ButtonSegment(
+                          value: AnomalySensitivity.low, label: Text('LOW')),
+                      ButtonSegment(
+                          value: AnomalySensitivity.medium,
+                          label: Text('MED')),
+                      ButtonSegment(
+                          value: AnomalySensitivity.high, label: Text('HIGH')),
+                    ],
+                    selected: {_anomalySensitivity},
+                    onSelectionChanged: (s) =>
+                        _setAnomalySensitivity(s.first),
+                    style: SegmentedButton.styleFrom(
+                      visualDensity: VisualDensity.compact,
+                      textStyle: const TextStyle(
+                          fontSize: 11, fontWeight: FontWeight.w700),
+                    ),
+                  ),
+                ]),
+              ),
+              const Padding(
+                padding: EdgeInsets.fromLTRB(16, 4, 16, 4),
+                child: Text(anomalyPrivacyNote,
+                    style:
+                        TextStyle(fontSize: 10, color: AppColors.textMuted)),
               ),
               const SizedBox(height: 4),
               Container(

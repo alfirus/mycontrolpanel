@@ -88,6 +88,36 @@ Measurement notes:
 - `ports`: parsed from `/proc/net/tcp` and `/proc/net/tcp6`
   (`0A` = listening, `01` = established).
 
+## GET /anomaly (agent v6+ only)
+
+On-device adaptive anomaly score for one sample (Farah — ML): EWMA +
+rolling variance with time-of-day buckets, stdlib only. Pre-v6 agents
+answer 404 — clients fall back to local detectors.
+
+```bash
+curl -s "http://192.168.1.10:9108/anomaly?metric=cpu&value=0.42&hour=14&sensitivity=medium"
+```
+
+```json
+{"version": 6, "metric": "cpu", "value": 0.42, "sensitivity": "medium",
+ "hour": 14, "score": 78.0, "reason": "0.87 vs usual 0.31 at 14:00 (score 78)",
+ "firing": true, "z": 4.4, "baseline": 0.31}
+```
+
+| Field         | Type   | Rule                                                        |
+|---------------|--------|-------------------------------------------------------------|
+| `metric`      | string | Scored metric name (default `cpu`; one baseline per name)   |
+| `value`       | number | Sample to score, 0–1 (required; bad/missing → HTTP 400)     |
+| `sensitivity` | string | `low`/`medium`/`high` gate (default `medium`; unknown → `medium`) |
+| `hour`        | int    | Optional 0–23 hour for the time-of-day bucket; omit for the global path |
+| `score`       | number | Sensitivity-independent 0–100 deviation magnitude           |
+| `reason`      | string | Why-this-alerted copy shown in the alert rail               |
+| `firing`      | bool   | Whether the sample trips the sensitivity gate               |
+
+Baselines live in agent process memory only (no disk, no network); the
+first 15 samples per metric return `learning baseline` with `firing:
+false`. Full spec: `docs/specs/anomaly-scoring.md`.
+
 Any other path returns **404** with an empty body.
 
 ## Version negotiation
