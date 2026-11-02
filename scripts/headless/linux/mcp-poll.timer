@@ -1,0 +1,15 @@
+# MyControlPanel headless poll — systemd user timer template (TM-1, Lina).
+#
+# Fires the companion mcp-poll.service every 15 min (best-effort; staleness
+# copy absorbs drift — no exact-time guarantees, §8.5).
+[Unit]
+Description=MyControlPanel headless alert poll (every 15 min)
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

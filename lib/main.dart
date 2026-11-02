@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: MIT
+import 'dart:io' show exit;
+
 import 'package:flutter/material.dart';
 import 'services/app_lock.dart';
 import 'services/background_alerts.dart';
 import 'services/desktop_alerts.dart';
 import 'services/error_reporting.dart';
+import 'headless.dart';
 import 'theme/app_theme.dart';
 import 'screens/control_center_screen.dart';
 import 'widgets/app_lock_screen.dart';
@@ -12,8 +15,14 @@ import 'widgets/app_lock_screen.dart';
 /// ([ErrorReporting.initIfOptedIn] is fully guarded — any failure falls
 /// through to a plain runApp, so reporting can never break app launch
 /// or a CI build that never opts in).
-Future<void> main() async {
+Future<void> main([List<String> args = const []]) async {
   WidgetsFlutterBinding.ensureInitialized();
+  // Tray-mode headless tick (TM-1): `--poll-headless` runs one poll with
+  // NO window and exits. This check sits before every other init so the
+  // headless path can never boot UI, and normal launch (no flag) is
+  // untouched. Contract: docs/specs/headless-cli-contract.md.
+  final headlessExit = await runHeadlessIfRequested(args);
+  if (headlessExit != null) exit(headlessExit);
   await ErrorReporting.initIfOptedIn();
   // Mobile background alerting (beta.1): re-register the WorkManager
   // dispatcher + periodic task when the user opted in. Desktop no-ops
