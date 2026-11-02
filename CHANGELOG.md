@@ -8,6 +8,20 @@ releases are cut as Git tags `v<name>` via `.github/workflows/release.yml`
 ## [Unreleased]
 
 ### Added
+- Headless poll CLI architecture + core (TM-1, Lina — Beta.2 contract
+  freeze): single shared headless check pipeline
+  (`lib/background/headless_check.dart` + `lib/background/headless_state.dart`,
+  pure Dart) reusing `PollPolicy`/`AlertRules`/`Thresholds`/
+  `NotificationHook.build` verbatim with transition-only notify, persisted
+  seen-set + 6 h resend cooldown, file-lock single-flight, and versioned
+  JSON stdout; Flutter adapter (`lib/headless.dart`, `--poll-headless`
+  gate in `main()` before any UI boots, read-only vault resolution, no
+  healing headless); scheduler templates + manual install/uninstall scripts
+  per OS (`scripts/headless/`); `dart run my_control_panel:headless_check
+  --self-test` harness; `test/headless_*_test.dart` (pipeline, state, frozen-contract,
+  adapter); CI `headless.yml` job (Windows + Linux); ADR-004, frozen
+  contract (`docs/specs/headless-cli-contract.md`), manual install runbook.
+  Downstream (Zara/Elizabeth/Lisa) builds on this contract.
 - Tray-mode delivery program (Beta.2 plan, docs only — no behavior
   change): `docs/project/tray-mode-plan.md` (WBS TM-1…TM-8, critical
   path, RACI, top-5 risks), roadmap Phase 2b exit gate (`v1.0.0-beta.2`),
