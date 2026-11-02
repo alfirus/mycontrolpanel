@@ -53,6 +53,5 @@ jobs:
             --max-retries 2
             -- './README.md'
             './docs/store/visual-pack-manifest.md'
-            './docs/sales-kit/one-pager.md'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
