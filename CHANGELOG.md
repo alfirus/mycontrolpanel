@@ -8,13 +8,20 @@ releases are cut as Git tags `v<name>` via `.github/workflows/release.yml`
 ## [Unreleased]
 
 ### Added
-- Alert reliability harness + SLOs (Nadia, Beta.2 instrumentation):
+- Alert reliability harness + SLOs (Nadia, Beta.2 instrumentation, #138):
   `lib/services/alert_reliability.dart` (pure-Dart lifecycle tracking
   scheduled/executed/notified/dismissed, latency, drops, agent CPU/mem
   samples, frozen SLOs: 99% within 5 min, <1% drops, p95 <2 s tick,
   p95 <50 MB agent) with `test/alert_reliability_test.dart` and
   `docs/specs/alert-reliability-slos.md`. No behavior change to the
   shipping tick; no new dependencies.
+- Headless-agent operability (Nadia, Beta.2, #140): `bin/agent_check.dart`
+  (`--check --json` SLO report with headless-mirrored exit codes,
+  `--rotate` log rotation), pure-Dart builders
+  (`agent_operability.dart`, `alert_log_rotation.dart`: 512 KiB × 3
+  generations) with tests, hardened scheduler templates with
+  restart/backoff (`scripts/reliability/`), local-only opt-in SLO
+  dashboard spec. No new dependencies.
 - User docs + store-copy pack (Ain — background-alerting user guide):
   new `docs/user/background-alerting.md` (cadence, battery limits,
   consent default-OFF, stale banners, thresholds, troubleshooting —
@@ -24,6 +31,16 @@ releases are cut as Git tags `v<name>` via `.github/workflows/release.yml`
   code-derived disclosures, Alya Security review requested before
   first submission); sales one-pager synced to the Beta.2 honesty
   line (background opt-in, no push relay, desktop closed-app planned).
+- Release-train hardening, phase 1 (Aisyah — DevOps): pinned toolchains
+  (`flutter-version: 3.47.9` in all six workflows, Python 3.12, Temurin 17;
+  bump procedure in `docs/release-process.md`), CycloneDX 1.5 SBOM
+  (`tool/sbom.py`, stdlib-only; PR-gated via `build-matrix`, published +
+  checksummed on tags), per-OS `build-info-<os>.json` toolchain receipts,
+  Android APK published on tags, conditional code signing (Authenticode /
+  Developer ID / Play keystore via the `release-signing` environment —
+  unenrolled builds ship unsigned as before; see
+  `docs/release-signing.md`), and per-builder digest sidecars so Burhanah's
+  C2 gate checks builder-produced hashes without an owner waiver.
 - Adaptive anomaly scoring (Farah — ML, on-device): agent v6 additive
   `GET /anomaly` (stdlib-only EWMA + rolling variance with time-of-day
   buckets; score 0–100 + reason; Low/Med/High gate), offline eval harness

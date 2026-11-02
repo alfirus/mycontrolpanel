@@ -88,9 +88,11 @@ dev_dependencies:
 
 # Runnable entry-points (`dart run <name>`). `headless_check` is the TM-1
 # CI/dev harness for the shared headless pipeline (pure Dart — must stay
-# runnable under `dart run`; see bin/headless_check.dart).
+# runnable under `dart run`; see bin/headless_check.dart). `agent_check`
+# is the Beta.2 operability companion (SLO report + log rotation; Nadia).
 executables:
   headless_check: headless_check
+  agent_check: agent_check
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
