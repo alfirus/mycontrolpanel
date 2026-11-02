@@ -2332,7 +2332,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen>
         _kpiDivider(),
         _kpiCell('ALERTS', '2 FIRING', AppColors.warning, Icons.warning_amber),
         _kpiDivider(),
-        _kpiCell('DEPOYS', '4 /24H', AppColors.accentCyan, Icons.rocket_launch),
+        _kpiCell('DEPLOYS', '4 /24H', AppColors.accentCyan, Icons.rocket_launch),
         _kpiDivider(),
         _kpiCell('SECURITY', '2 CRIT', AppColors.critical, Icons.shield),
       ]),
