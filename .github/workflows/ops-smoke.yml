@@ -77,6 +77,11 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          # TEMPORARY shape probe (deleted before merge): canonical XML
+          # from a natively created task.
+          schtasks /Create /TN '\MyControlPanel\shape-probe' /SC ONLOGON /TR 'C:\Windows\System32\cmd.exe /c exit 0' /F
+          schtasks /Query /TN '\MyControlPanel\shape-probe' /XML
+          schtasks /Delete /TN '\MyControlPanel\shape-probe' /F
           $wrapper = Join-Path $env:RUNNER_TEMP 'mcp-ops/build/bundle/bin/mycontrolpanel_check.exe'
           $sb = Join-Path $env:RUNNER_TEMP 'mcp-ops/schtasks-sb'
           & $wrapper install --install-dir "$env:RUNNER_TEMP/mcp-ops/fake-install" --wrapper $wrapper --sandbox $sb --force --no-reload
