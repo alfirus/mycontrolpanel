@@ -8,11 +8,14 @@ releases are cut as Git tags `v<name>` via `.github/workflows/release.yml`
 ## [Unreleased]
 
 ### Added
-- Desktop closed-app tray-mode tracking for `v1.0.0-beta.2` (epic #119 +
-  children #121–#125): milestone, `epic`/`tray-mode` labels, roadmap Phase 2b,
-  backlog index, PR Markdown link-check workflow, weekly stale-triage pings.
-  No app code; WBS/RACI owned by Rina, wording reconciles with her tray-mode
-  plan when it merges.
+- Tray-mode delivery program (Beta.2 plan, docs only — no behavior
+  change): `docs/project/tray-mode-plan.md` (WBS TM-1…TM-8, critical
+  path, RACI, top-5 risks), roadmap Phase 2b exit gate (`v1.0.0-beta.2`),
+  closed-app architecture (§8 of `docs/design/05-background-alerting.md`).
+- Beta.2 tracking (Shiela, TM-8): milestone `v1.0.0-beta.2`, epic #119 +
+  children #121–#125, backlog index, PR Markdown link-check workflow,
+  weekly stale-triage pings. Wording reconciled with Rina's tray-mode plan
+  (`--poll-headless` contract, WBS owners, Beta.2 gate). No app code.
 - README real-vs-roadmap status matrix (live vs UI-ready per capability).
 - Launch landing copy draft (`docs/launch.md`): hero, features, pricing tiers.
 - Sales one-pager (`docs/sales-one-pager.md`): use cases + objection handling.

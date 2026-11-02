@@ -76,34 +76,40 @@ updated to reflect reality, alpha.2 tag cut via `release.yml`.
 Milestone exit: beta.1 tag, notifications verified on at least desktop + one
 mobile OS, lock enforced on cold start and resume.
 
-### Phase 2b — Desktop closed-app tray mode (milestone: `v1.0.0-beta.2`)
+### Phase 2b — Tray mode / closed-app delivery (milestone: `v1.0.0-beta.2`)
 
-Closed-app delivery on desktop: a tray/menu-bar resident plus OS-scheduled
-headless polls. Builds on the beta.1 rails (`NotificationHook.build` payload,
-`PollPolicy`/`Thresholds`, shared `background_alerts` consent default OFF,
-`background_alerts_last_check_ms` stale stamp — see
-`docs/design/05-background-alerting.md` §6–7). Tracking epic #119.
+Promotes the Post-1.0 tray-mode one-liner to a gated phase. Program plan
+(WBS, dates, owners, critical path, RACI, risks):
+`docs/project/tray-mode-plan.md`. Architecture: §8 of
+`docs/design/05-background-alerting.md`.
 
-1. **Headless CLI entry-point** (#123) — one `--poll-once` path shared by
-   both schedulers; consent hard gate, scheduler-friendly exit codes.
-2. **Windows Task Scheduler install/uninstall** (#121) — per-user task,
-   no elevation, removed on consent revoke/uninstall.
-3. **Linux systemd user unit + timer** (#122) — `--user` scope only, no sudo.
-4. **Tray icon + consent/stale reuse** (#124) — tray while armed, verbatim
-   consent tile + single-toast rail + "last checked" stamp; macOS closed-app
-   needs a menu-bar helper outside Flutter (design-first: ship
-   tray-while-running + documented path, no fake parity).
-5. **Packaging + signing path** (#125) — headless/scheduler assets in
-   `release.yml` with contract names + checksums; signing stays manual
-   owner-held steps (`need-owner-decision`).
+1. **Headless poll CLI** — `--poll-headless` entry-point reusing
+   `PollPolicy`/`Thresholds`/`NotificationHook.build` verbatim (Lina:
+   architecture; Lisa: implementation).
+2. **OS scheduler wiring** — Windows Task Scheduler + Linux systemd user
+   timer, per-user scope, no elevation (Zara; Alya: security review;
+   Aisyah: packaging).
+3. **macOS menu-bar/tray helper** — tray shell UX: icon states, menu,
+   Settings + consent linkage (Kira: design; Nurul/Elizabeth: impl).
+4. **Alert-quality gate** — quiet-hours, dedupe/no-double-toast with the
+   in-app rail (Farah; Nadia consulted). QA matrices per OS × install
+   path (Balqis); release-asset verification (Burhanah); runbooks + beta
+   comms (Ain, Naura); tracking/milestone (Shiela), day-to-day delivery
+   (Maisarah).
 
-Milestone exit: beta.2 tag; cold-start drill green on Windows + Linux
-(quit → scheduled tick → toast → stamp advances); consent ON/OFF matrix
-verified (no task/unit when OFF, none orphaned after revoke); README matrix
-updated to reflect per-OS closed-app reality.
+Milestone exit (Beta.2 gate): closed-window firing signal (failed unit +
+disk ≥80%) reaches the OS rail on Windows + Linux + macOS; exactly-once
+delivery across rails; headless runs only under the shared opt-in
+(default OFF) with honest "last checked …" staleness; no-elevation
+install with vault-only credentials (Alya review closed); `flutter
+analyze` + `flutter test` green; assets Burhanah-verified; beta.2 tag cut
+via `release.yml`.
 
-WBS/RACI owned by Rina (PM): wording above is drafted from this file and
-reconciles with her tray-mode plan when it merges.
+Tracking (Shiela, TM-8): epic #119, children #121 (TM-2 Windows), #122
+(TM-2 Linux), #123 (TM-1 headless CLI), #124 (TM-3/TM-4 tray + menu-bar),
+#125 (TM-2 packaging half + release assets). WBS/RACI owned by Rina —
+this file follows `docs/project/tray-mode-plan.md` verbatim on owners,
+flag contract (`--poll-headless`), and gate.
 
 ### Phase 3 — Release hardening (milestone: `v1.0.0`)
 
@@ -119,8 +125,8 @@ artifacts attached to the GitHub Release.
 
 ### Post-1.0 (backlog, no milestone yet)
 
-- macOS closed-app LaunchAgent helper (menu-bar); multi-window mode for
-  desktop; Android background-service limits.
+- Android background-service limits (WorkManager-first; no persistent
+  foreground service unless the user opts in).
 - GitLab parity (a `gitlab_service.dart` stub exists — promote or delete).
 - Offline-first cache of last-known server state.
 
