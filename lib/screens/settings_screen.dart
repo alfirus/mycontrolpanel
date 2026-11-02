@@ -12,14 +12,13 @@ import '../models/server_connection.dart';
 import '../services/ai_service.dart';
 import '../services/anomaly_scoring.dart';
 import '../services/error_reporting.dart';
-import '../services/background_alerts.dart';
 import '../services/github_service.dart';
 import '../services/gitlab_service.dart';
 import '../services/secure_store.dart';
 import '../services/ssh_host_keys.dart';
 import '../services/ssh_key_loader.dart';
 import '../services/update_service.dart';
-import '../widgets/background_consent_tile.dart';
+import '../widgets/alert_settings_section.dart';
 import '../widgets/pitch_card.dart';
 
 class SettingsScreen extends StatefulWidget {
@@ -67,10 +66,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
   double _refreshInterval = 15;
   bool _notifications = true;
   bool _biometrics = false;
-  // Background alerting (beta.1): mobile WorkManager + local notifications.
-  // Default OFF with explicit consent copy (owner ruling 2026-10-30).
-  bool _backgroundAlerts = false;
-  String? _backgroundLastChecked;
   // Adaptive anomaly scoring (Farah — ML): shared Low/Med/High picker.
   // Default Medium; persists to AnomalyScoringPrefs.prefKey.
   AnomalySensitivity _anomalySensitivity = AnomalySensitivity.medium;
@@ -132,8 +127,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _refreshInterval = prefs.getDouble('refresh_interval') ?? 15;
       _notifications = prefs.getBool('notifications') ?? true;
       _biometrics = prefs.getBool('biometrics') ?? false;
-      _backgroundAlerts =
-          prefs.getBool(BackgroundAlerts.prefEnabledKey) ?? false;
       _anomalySensitivity = anomalySensitivity;
       _githubRepos = (prefs.getStringList('github_repos') ?? []).toList();
       _gitlabProjects = (prefs.getStringList('gitlab_projects') ?? []).toList();
@@ -170,10 +163,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _sentryOptIn = sentry.optedIn;
       _sentryHasDsn = sentry.hasDsn;
     });
-    // Background rail status line (stale-tolerant "last checked" copy).
-    final bgLabel = await BackgroundAlerts.lastCheckedLabel();
-    if (!mounted) return;
-    setState(() => _backgroundLastChecked = bgLabel);
   }
 
   Future<void> _saveServers() async {
@@ -186,68 +175,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     await prefs.setDouble('refresh_interval', _refreshInterval);
     await prefs.setBool('notifications', _notifications);
     await prefs.setBool('biometrics', _biometrics);
-  }
-
-  static bool get _isAndroid {
-    try {
-      return !const bool.fromEnvironment('dart.library.js_util') &&
-          Platform.isAndroid;
-    } catch (_) {
-      return false;
-    }
-  }
-
-  static bool get _isIOS {
-    try {
-      return !const bool.fromEnvironment('dart.library.js_util') &&
-          Platform.isIOS;
-    } catch (_) {
-      return false;
-    }
-  }
-
-  /// Background-alerts toggle: persist (default OFF), schedule/cancel the
-  /// WorkManager periodic task, and show the one-shot battery explainer on
-  /// Android. Failures are silent — the toggle still reflects the pref.
-  Future<void> _setBackgroundAlerts(bool v) async {
-    setState(() => _backgroundAlerts = v);
-    await BackgroundAlerts.setEnabled(v);
-    if (!mounted) return;
-    if (v && _isAndroid) {
-      final prefs = await SharedPreferences.getInstance();
-      final prompted =
-          prefs.getBool(BackgroundAlerts.prefBatteryPromptKey) ?? false;
-      if (!prompted) {
-        await prefs.setBool(BackgroundAlerts.prefBatteryPromptKey, true);
-        if (!mounted) return;
-        await showDialog<void>(
-          context: context,
-          builder: (_) => AlertDialog(
-            backgroundColor: AppColors.surface1,
-            title: const Text(BackgroundAlerts.batteryPromptTitle,
-                style: TextStyle(
-                    color: AppColors.textPrimary,
-                    fontSize: 14,
-                    fontWeight: FontWeight.w700)),
-            content: const Text(BackgroundAlerts.batteryPromptBody,
-                style:
-                    TextStyle(color: AppColors.textSecondary, fontSize: 12)),
-            actions: [
-              FilledButton(
-                onPressed: () => Navigator.pop(context),
-                style: FilledButton.styleFrom(
-                    backgroundColor: AppColors.accentCyan),
-                child: const Text('GOT IT',
-                    style: TextStyle(color: Colors.black)),
-              ),
-            ],
-          ),
-        );
-      }
-    }
-    final label = await BackgroundAlerts.lastCheckedLabel();
-    if (!mounted) return;
-    setState(() => _backgroundLastChecked = label);
   }
 
   /// Anomaly sensitivity picker: persist the shared pref (default Medium).
@@ -469,20 +396,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
               _sliderTile('Refresh interval', '${_refreshInterval.toInt()}s', _refreshInterval, 5, 60, (v){ setState(()=> _refreshInterval=v); _savePrefs(); }),
               _switchTile('Notifications', 'OS alert on critical incidents', _notifications, (v){ setState(()=> _notifications=v); _savePrefs(); }),
               _switchTile('Biometrics', 'Face ID / fingerprint / device PIN on launch + resume', _biometrics, (v){ setState(()=> _biometrics=v); _savePrefs(); }),
-              // Background alerting (beta.1, mobile + desktop): default OFF with
-              // explicit consent copy (owner ruling 2026-10-30). One shared
-              // row — desktop shows the same toggle (no second pref): when
-              // ON, desktop toasts go through DesktopAlerts
-              // (flutter_local_notifications); when OFF, the legacy
-              // local_notifier rail stays. Closed-app delivery is tray-mode
-              // future work, not beta.1.
-              BackgroundAlertConsentTile(
-                value: _backgroundAlerts,
-                onChanged: _setBackgroundAlerts,
-                lastCheckedLabel: _backgroundLastChecked,
-                showBatteryTip: _isAndroid,
-                showIosTip: _isIOS,
-              ),
+              // Alert preferences (consent, severities, quiet hours,
+              // thresholds) live in the ALERTS section below (spec 06 §8).
               // Adaptive anomaly scoring (Farah — ML): shared Low/Med/High
               // picker. One pref read by every rail (mobile #116, desktop
               // #117); the why-this-alerted copy names the active tier so
@@ -567,6 +482,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
           }
           return Column(children: [prefsCard, integrationsCard]);
         }),
+        // Alerts (Nurul, t_7ba899fe): consent + severities + quiet hours +
+        // per-metric thresholds in Kira's IA order (spec 06 §8).
+        const AlertSettingsSection(),
         _updatesCard(),
         // Danger zone
         PitchCard(
