@@ -2,7 +2,8 @@
 
 Internal support doc, not customer-facing. Screen references point at
 `lib/screens/` so demos always show real UI, never mockups.
-Last synced: 2026-10-28 (main at PR #68).
+Last synced: 2026-11-02 (main + `docs/user/background-alerting.md`;
+background beta.1 shipped, tray-mode desktop closed-app Beta.2-planned).
 
 ## 30-second pitch
 
@@ -18,7 +19,7 @@ phone, so the datacenter fits in your pocket."
 | 1 | Freelancer with 5–20 VPS boxes | 12 SSH tabs, missed cron failures | Overview grid → Server Details → Cronjobs tab (`control_center_screen.dart`, `server_details_screen.dart`): rescan crontabs live, open per-job log |
 | 2 | Homelab / self-hoster | Wants Grafana insight without the stack | Metrics segment → metrics agent one-click install → live p95 chart (`agent_service.dart` + Metrics segment) |
 | 3 | Small dev team | Deploys + infra in different tools | Deploys timeline + GitLab issues/MRs next to server health (Deploys + GitLab segments — note: deploys still demo data, GitLab live) |
-| 4 | On-call / after-hours | 3 a.m. "disk full" pages | Alerts segment: disk ≥80/90%, failed units, brute-force SSH; foreground watcher badge + snack |
+| 4 | On-call / after-hours | 3 a.m. "disk full" pages | Alerts segment: disk ≥80/90%, failed units, brute-force SSH; badge + snack while the app is open; background local notifications are an explicit opt-in (default OFF, ~15 min cadence, on-device only, no push relay — full limits in `docs/user/background-alerting.md`); desktop closed-app delivery is Beta.2-planned, never demo it as shipped |
 | 5 | Security-conscious SME | Credentials scattered in notes | Settings screen: servers/keys/PATs in OS keychain (`flutter_secure_storage`), keys pasted or picker-imported, passphrase-per-visit |
 
 ## Objection handling
@@ -31,10 +32,12 @@ phone, so the datacenter fits in your pocket."
 | "Does it work on my phone?" | Same codebase ships iOS + Android. Phone demo in README (`hero-phone.png`). | Phone screenshot / `flutter run -d ios` |
 | "What does it cost?" | MIT-licensed app, local-first, no per-seat server costs on our side. Commercial tiers (Pro/Team) are undecided — quote nothing until Sofia + Finance sign `docs/launch.md` pricing. | `docs/launch.md` pricing table (TBD) |
 | "GitHub / CI-CD / Security look finished — are they?" | Honest answer: UI-ready, API wiring on the roadmap. GitLab equivalent IS live. Never demo GitHub/CI-CD/Security as live. | README status matrix |
+| "Will it wake me at 3 a.m.?" | Only if you opt in: Settings → Background alerts (default OFF, "~15 min in the background", on-device local notifications, honest "last checked …" staleness — never silent). No push relay, no exact-time guarantees; iOS may deliver hours apart. Desktop wakes with the window closed only after tray mode lands (Beta.2). | Settings toggle + staleness line |
 
 ## What never to promise
 
-- Background polling / push while the app is closed (roadmap, not built).
+- Remote push (FCM/APNs), "real-time" or exact-time alert delivery.
+- Desktop closed-app alerts before tray mode ships (Beta.2 gate).
 - Biometric app lock enforcement (toggle exists; enforcement needs `local_auth`).
 - Sentry/Datadog integrations (placeholder row only).
 - Specific prices or SLAs (owner decision pending).
@@ -62,7 +65,7 @@ screens AND say "UI-ready, wiring on roadmap" in the same breath.
 1. Freelancer: "Twelve tabs become one glance — and missed cron failures page you first."
 2. Homelab: "Grafana insight with none of the stack — one click installs the agent."
 3. Small team: "Deploys and infra health in the same window your GitLab already lives in."
-4. On-call: "The 3 a.m. disk-full finds you at 11 p.m. instead."
+4. On-call: "Opt into background alerts and the 3 a.m. disk-full finds you at 11 p.m. instead."
 5. Security-conscious SME: "Every credential leaves your notes for the OS keychain."
 
 ## Break-even note (Finance, 2026-11-02)
