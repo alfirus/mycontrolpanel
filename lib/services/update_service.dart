@@ -6,13 +6,35 @@ import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
 import 'package:package_info_plus/package_info_plus.dart';
 
-/// In-app updates from GitHub Releases (desktop: Windows / Linux / macOS).
+/// In-app updates from GitHub Releases (desktop + Android).
 ///
-/// Release asset naming convention (user uploads manually):
+/// Release asset naming convention (published by release.yml):
 ///   mycontrolpanel-macos-<version>.zip      (contains MyControlPanel.app)
 ///   mycontrolpanel-windows-<version>.zip    (portable build output)
-///   mycontrolpanel-linux-<version>.tar.gz  (bundle dir, or .zip)
+///   mycontrolpanel-linux-<version>.tar.gz  (bundle dir)
+///   mycontrolpanel-android-<version>.apk    (sideload / store track)
 ///   SHA256SUMS.txt  (optional `sha  filename` lines — verified when present)
+///
+/// Release track for staged rollout (Aisyah, DevOps).
+///
+/// Tag convention (see docs/runbooks/rollout.md): tags carrying `-`
+/// (`v1.0.0-alpha.1`, `v1.0.0-beta.1`) are the beta track; clean `vX.Y.Z`
+/// tags are the stable track. The app defaults to stable: the updater only
+/// offers a pre-release when the user explicitly opts into the beta track
+/// in Settings (default OFF — same consent posture as crash reporting).
+enum UpdateChannel {
+  stable,
+  beta;
+
+  /// Beta iff the tag carries a pre-release suffix.
+  /// Pure — unit-tested (test/update_channel_test.dart).
+  static UpdateChannel fromTag(String tag) =>
+      tag.contains('-') ? UpdateChannel.beta : UpdateChannel.stable;
+
+  /// Whether the updater may offer pre-releases on this channel.
+  bool get includePrerelease => this == UpdateChannel.beta;
+}
+
 class ReleaseAsset {
   final String name;
   final String url;
@@ -28,6 +50,9 @@ class ReleaseInfo {
   const ReleaseInfo({required this.tag, required this.name, required this.notes, required this.assets});
 
   String get version => tag.startsWith('v') ? tag.substring(1) : tag;
+
+  /// Beta track iff the tag carries a pre-release suffix.
+  bool get isPrerelease => UpdateChannel.fromTag(tag) == UpdateChannel.beta;
 }
 
 class UpdateService {
@@ -39,10 +64,11 @@ class UpdateService {
     return info.version;
   }
 
-  Future<ReleaseInfo> fetchLatest() async {
-    final r = await http.get(Uri.parse(_api), headers: {'Accept': 'application/vnd.github+json'});
-    if (r.statusCode != 200) throw Exception('GitHub releases: HTTP ${r.statusCode}');
-    final j = jsonDecode(r.body) as Map;
+  static const _apiList = 'https://api.github.com/repos/$repo/releases';
+
+  /// Parses one GitHub release JSON object into [ReleaseInfo].
+  /// Pure — unit-tested (test/update_channel_test.dart).
+  static ReleaseInfo releaseFromJson(Map j) {
     final assets = ((j['assets'] as List?) ?? []).map((a) {
       final m = a as Map;
       return ReleaseAsset(
@@ -57,6 +83,44 @@ class UpdateService {
       notes: ((j['body'] ?? '')).toString(),
       assets: assets,
     );
+  }
+
+  /// Picks the newest release for [channel] from an already-fetched
+  /// `/releases` list (newest first, drafts excluded upstream).
+  /// Stable skips pre-releases; beta takes the newest of either track.
+  /// Pure — unit-tested (test/update_channel_test.dart).
+  static ReleaseInfo? pickLatestForChannel(
+      List<ReleaseInfo> releases, UpdateChannel channel) {
+    for (final rel in releases) {
+      if (rel.tag.isEmpty) continue;
+      if (channel == UpdateChannel.stable && rel.isPrerelease) continue;
+      return rel;
+    }
+    return null;
+  }
+
+  /// Fetches the latest release the given channel may be offered.
+  ///
+  /// Stable (default) hits `/releases/latest`, which GitHub resolves to the
+  /// newest non-prerelease — unchanged behavior. Beta lists `/releases`
+  /// (newest first) and takes the first non-draft entry of either track.
+  /// Throws on HTTP errors, exactly as before.
+  Future<ReleaseInfo> fetchLatest({bool includePrerelease = false}) async {
+    if (!includePrerelease) {
+      final r = await http.get(Uri.parse(_api), headers: {'Accept': 'application/vnd.github+json'});
+      if (r.statusCode != 200) throw Exception('GitHub releases: HTTP ${r.statusCode}');
+      return releaseFromJson(jsonDecode(r.body) as Map);
+    }
+    final r = await http.get(Uri.parse(_apiList), headers: {'Accept': 'application/vnd.github+json'});
+    if (r.statusCode != 200) throw Exception('GitHub releases: HTTP ${r.statusCode}');
+    final list = (jsonDecode(r.body) as List).whereType<Map>().toList();
+    final releases = list
+        .where((j) => ((j['draft'] ?? false) as bool) != true)
+        .map(releaseFromJson)
+        .toList();
+    final pick = pickLatestForChannel(releases, UpdateChannel.beta);
+    if (pick == null) throw Exception('GitHub releases: no published releases');
+    return pick;
   }
 
   /// -1 current<latest, 0 equal, 1 current>latest. Non-numeric tolerant.
