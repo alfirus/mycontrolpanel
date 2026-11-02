@@ -1,0 +1,91 @@
+name: ops-smoke
+
+# TM-2 ops gate (Zara): proves the managed scheduler lifecycle on
+# Windows + Linux without touching a live scheduler. Complements
+# (never duplicates) the existing gates:
+#   ci.yml         owns `flutter test` (full suite, required check)
+#   headless.yml   owns the headless contract (Lina)
+# This workflow owns the ops slice: ops unit tests + the compiled
+# `mycontrolpanel-check` binary running install → fire twice → assert
+# payload + ledger → status → verify → uninstall against a sandbox,
+# plus a live schtasks register/query/delete round-trip of the filled
+# XML on Windows (the real OS parser is the final judge of the
+# managed task XML).
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'lib/ops/**'
+      - 'bin/mycontrolpanel_check.dart'
+      - 'test/ops_*_test.dart'
+      - 'test/ops_support/**'
+      - 'tool/ops_smoke.dart'
+      - 'scripts/headless/**'
+      - '.github/workflows/ops-smoke.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'lib/ops/**'
+      - 'bin/mycontrolpanel_check.dart'
+      - 'test/ops_*_test.dart'
+      - 'test/ops_support/**'
+      - 'tool/ops_smoke.dart'
+      - 'scripts/headless/**'
+      - '.github/workflows/ops-smoke.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ops-smoke:
+    name: ops smoke (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            exe_suffix: ''
+          - os: windows-latest
+            exe_suffix: .exe
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Setup Flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+      - name: Install dependencies
+        run: flutter pub get
+      - name: Analyze ops slice
+        run: flutter analyze --no-fatal-infos --no-fatal-warnings lib/ops bin/mycontrolpanel_check.dart test/ops_ledger_test.dart test/ops_check_test.dart test/ops_lifecycle_test.dart test/ops_support/fake_tick.dart test/ops_support/fake_provider.dart tool/ops_smoke.dart
+      - name: Ops unit tests
+        run: flutter test test/ops_ledger_test.dart test/ops_check_test.dart test/ops_lifecycle_test.dart
+      - name: Compile mycontrolpanel-check
+        run: dart build cli -t bin/mycontrolpanel_check.dart -o ${{ runner.temp }}/mcp-ops/build
+      - name: Sandbox smoke (install → fire ×2 → status → verify → uninstall)
+        run: dart tool/ops_smoke.dart --wrapper "${{ runner.temp }}/mcp-ops/build/bundle/bin/mycontrolpanel_check${{ matrix.exe_suffix }}" --sandbox "${{ runner.temp }}/mcp-ops/sandbox" --state-dir "${{ runner.temp }}/mcp-ops/state"
+      - name: Live schtasks round-trip (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $task = "\MyControlPanel\ops-smoke-$env:GITHUB_RUN_ID"
+          $xml = Join-Path $env:RUNNER_TEMP 'mcp-ops/sandbox/mcp-poll-task.xml'
+          if (-not (Test-Path $xml)) { throw "sandbox XML missing: $xml" }
+          try {
+            schtasks /Create /TN $task /XML $xml /F
+            if ($LASTEXITCODE -ne 0) { throw "schtasks /Create failed" }
+            schtasks /Query /TN $task
+            if ($LASTEXITCODE -ne 0) { throw "schtasks /Query failed" }
+            Write-Host "schtasks round-trip green for $task"
+          } finally {
+            schtasks /Delete /TN $task /F
+          }

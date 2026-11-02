@@ -46,6 +46,16 @@ releases are cut as Git tags `v<name>` via `.github/workflows/release.yml`
   adapter); CI `headless.yml` job (Windows + Linux); ADR-005, frozen
   contract (`docs/specs/headless-cli-contract.md`), manual install runbook.
   Downstream (Zara/Elizabeth/Lisa) builds on this contract.
+- Managed scheduler lifecycle + run ledger (TM-2, Zara): `mycontrolpanel-check`
+  CLI (supervised tick wrapper + JSONL `headless_runs.jsonl` run record,
+  pure Dart) with consent-gated `install`, template-fidelity `verify`,
+  `uninstall`, and stale-run/missed-heartbeat `status` over the Task
+  Scheduler XML + systemd user timer (Lina's templates preserved; only the
+  Exec action routes through the wrapper, poll argv stays exactly
+  `--poll-headless`); `test/ops_*_test.dart` + fixtures; CI `ops-smoke.yml`
+  (Windows + Linux sandbox smoke + live schtasks round-trip);
+  `tool/ops_smoke.dart` local repro; ops runbook
+  (`docs/runbooks/background-alerting-ops.md`).
 - Beta exit + GTM readiness (Sofia, docs/decision only — no behavior
   change): `docs/beta-done-checklist.md` (beta.1 DONE list, Burhanah
   sign-off block), decision `004-tray-build-vs-defer.md` (owner call:
