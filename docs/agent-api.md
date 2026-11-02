@@ -118,6 +118,40 @@ Baselines live in agent process memory only (no disk, no network); the
 first 15 samples per metric return `learning baseline` with `firing:
 false`. Full spec: `docs/specs/anomaly-scoring.md`.
 
+## GET /alerts/snapshot (agent v6 additive)
+
+One cheap fetch for the alert rails (Lisa): the pre-computed
+`AlertRules` trigger inputs the agent can see without shell — no 0.5s
+CPU sample, no subprocess, single instant `/proc` scan. The app's
+`pollHostAlerts` tries this first, then falls back to the
+`/metrics` + `/sysstats` pair on 404 (pre-snapshot agents); the SSH
+sweep still owns what the agent cannot see (failed units, brute force,
+kernel lines, fine-grained mounts).
+
+```bash
+curl -s http://192.168.1.10:9108/alerts/snapshot
+```
+
+```json
+{"version": 6, "snapshot": {"disk": 0.41, "load1": 0.5, "load5": 0.4,
+ "load15": 0.3, "nproc": 4, "uptime_s": 12345, "boot_epoch_s": 1793000000,
+ "mem_total_mb": 3920, "mem_avail_mb": 1500, "agent_uptime_s": 3600}}
+```
+
+| Field            | Type   | Rule                                                        |
+|------------------|--------|-------------------------------------------------------------|
+| `version`        | int    | Agent software version, **required**                        |
+| `snapshot`       | object | Trigger inputs (missing keys = unknown, never healthy)      |
+| `snapshot.disk`  | number | Root-filesystem utilisation ratio, 0–1 (client clamps)      |
+| `snapshot.load1` | number | 1-minute load average, ≥ 0                                  |
+| `snapshot.nproc` | int    | CPU count (≤ 0 = unknown, load rule skipped)                |
+| `snapshot.uptime_s` | int | Host uptime in seconds, ≥ 0 (reboot tripwire input)         |
+| `snapshot.boot_epoch_s` | int | Unix epoch of last boot (reboot detection without SSH) |
+
+Dart: `AgentService.fetchAlertSnapshot` (null on any failure, 404
+included) + `parseAlertSnapshot` validator + `HostSignals.fromSnapshot`
+mapping in `lib/services/alert_rules.dart`.
+
 Any other path returns **404** with an empty body.
 
 ## Version negotiation
