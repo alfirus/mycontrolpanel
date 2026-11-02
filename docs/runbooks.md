@@ -4,6 +4,9 @@ Start here when something is red. Area deep-dives live in
 [`docs/runbooks/`](runbooks/): `agent-lifecycle.md` (install/upgrade),
 `agent-reliability.md` (failure modes), `observability.md` (polling,
 log tail, SLOs), `secrets-hardening.md` (tokens, keychain).
+Release-train deep-dives: `rollout.md` (beta/stable tracks, promotion,
+rollback), `release.md` (cut → bake → promote rhythm), `incident.md`
+(incident response). Deploy dashboards: `docs/observability-dashboards.md`.
 
 Conventions: the agent is stdlib-only Python at
 `/opt/mcp-agent/agent.py`, run by `systemd` as `mcp-agent.service`,
