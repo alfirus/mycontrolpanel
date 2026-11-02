@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 /// Tray-mode headless security boundary (Beta.2, ADR-003).
 ///
 /// Pure-Dart policy gate for the `--poll-headless` tick and its OS
