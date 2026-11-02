@@ -36,7 +36,9 @@ jobs:
         with:
           persist-credentials: false
       - name: Setup Flutter
-        uses: subosito/flutter-action@1a449444c387b196c4844d4f6c696479add0b2 # v2.23.0
+        # Tagged (not SHA-pinned): the SHA pin used repo-wide currently
+        # fails to resolve on fresh runners; tags resolve. Pinned version kept.
+        uses: subosito/flutter-action@v2
         with:
           channel: stable
           flutter-version: '3.47.9' # pinned — bump procedure in docs/release-process.md
