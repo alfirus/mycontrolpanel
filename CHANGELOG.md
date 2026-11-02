@@ -15,6 +15,20 @@ releases are cut as Git tags `v<name>` via `.github/workflows/release.yml`
   p95 <50 MB agent) with `test/alert_reliability_test.dart` and
   `docs/specs/alert-reliability-slos.md`. No behavior change to the
   shipping tick; no new dependencies.
+- Headless poll CLI architecture + core (TM-1, Lina — Beta.2 contract
+  freeze): single shared headless check pipeline
+  (`lib/background/headless_check.dart` + `lib/background/headless_state.dart`,
+  pure Dart) reusing `PollPolicy`/`AlertRules`/`Thresholds`/
+  `NotificationHook.build` verbatim with transition-only notify, persisted
+  seen-set + 6 h resend cooldown, file-lock single-flight, and versioned
+  JSON stdout; Flutter adapter (`lib/headless.dart`, `--poll-headless`
+  gate in `main()` before any UI boots, read-only vault resolution, no
+  healing headless); scheduler templates + manual install/uninstall scripts
+  per OS (`scripts/headless/`); `dart run my_control_panel:headless_check
+  --self-test` harness; `test/headless_*_test.dart` (pipeline, state, frozen-contract,
+  adapter); CI `headless.yml` job (Windows + Linux); ADR-005, frozen
+  contract (`docs/specs/headless-cli-contract.md`), manual install runbook.
+  Downstream (Zara/Elizabeth/Lisa) builds on this contract.
 - Beta exit + GTM readiness (Sofia, docs/decision only — no behavior
   change): `docs/beta-done-checklist.md` (beta.1 DONE list, Burhanah
   sign-off block), decision `004-tray-build-vs-defer.md` (owner call:

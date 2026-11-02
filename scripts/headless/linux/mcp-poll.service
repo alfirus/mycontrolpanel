@@ -1,0 +1,21 @@
+# MyControlPanel headless poll — systemd user service template (TM-1, Lina).
+#
+# Per-user unit (~/.config/systemd/user/), NO system unit, NO secret-bearing
+# environment entries (vault-only reads inside the process, ADR-003).
+# Managed lifecycle (verify/status/ledger): Zara owns (t_13eee02b).
+#
+# Install: scripts/headless/install-linux.sh (manual path).
+# Replace @INSTALL_DIR@ at install time (e.g. /opt/mycontrolpanel or
+# ~/.local/share/mycontrolpanel).
+[Unit]
+Description=MyControlPanel headless alert poll
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=@INSTALL_DIR@/mycontrolpanel --poll-headless
+Nice=10
+
+[Install]
+WantedBy=default.target
