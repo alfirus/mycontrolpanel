@@ -35,6 +35,13 @@ jobs:
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
+      - name: Install Linux system deps
+        # `dart run` resolves the app package config, whose native-asset build
+        # hooks need GTK/X11 (same set as release.yml) — without these the job
+        # fails before the lint itself runs.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang cmake ninja-build pkg-config libgtk-3-dev libx11-dev libxi-dev liblzma-dev libstdc++-12-dev libsecret-1-dev libnotify-dev libcurl4-openssl-dev
       - name: Setup Flutter
         # Tagged (not SHA-pinned): the SHA pin used repo-wide currently
         # fails to resolve on fresh runners; tags resolve. Pinned version kept.
