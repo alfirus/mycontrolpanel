@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import '../models/mock_data.dart';
 import '../models/server_connection.dart';
 import 'agent_protocol.dart';

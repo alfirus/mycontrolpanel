@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 /// Background alert polling job (no new plugins).
 ///
 /// Owns the *schedule + transport + dedup* half of alert polling so the

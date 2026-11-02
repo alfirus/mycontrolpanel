@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 /// Mobile background alerting (beta.1, owner green-lit 2026-10-30).
 ///
 /// This file owns the *mobile half* of docs/design/05-background-alerting.md

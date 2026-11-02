@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import 'package:flutter/material.dart';
 import '../models/cron_entry.dart';
 import '../models/server_connection.dart';

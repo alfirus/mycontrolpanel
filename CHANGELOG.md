@@ -16,6 +16,15 @@ releases are cut as Git tags `v<name>` via `.github/workflows/release.yml`
   children #121–#125, backlog index, PR Markdown link-check workflow,
   weekly stale-triage pings. Wording reconciled with Rina's tray-mode plan
   (`--poll-headless` contract, WBS owners, Beta.2 gate). No app code.
+- Beta verifiable release gate (Burhanah): stdlib-only
+  `tool/verify_release.py` (version==CHANGELOG==tag, 3 fresh platform
+  assets + SHA256SUMS, flutter test + agent pytest re-run, consent/Sentry
+  default-off pins, MIT headers) emitting `release-proof.json`; required
+  `verify-gate` job in `release.yml` blocks publish on HOLD; gate + waiver
+  rules in `docs/release-gates.md` (owner waiver via Sofia only).
+- Agent install-contract pytest suite (`agent/tests/`): port :9108, unit
+  markers, installer defaults, app/payload endpoints.
+- SPDX-MIT headers on all `lib/**/*.dart` (pinned by gate C6).
 - README real-vs-roadmap status matrix (live vs UI-ready per capability).
 - Launch landing copy draft (`docs/launch.md`): hero, features, pricing tiers.
 - Sales one-pager (`docs/sales-one-pager.md`): use cases + objection handling.

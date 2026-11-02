@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 /// Desktop local notifications (beta.1, owner ruling 2026-10-30).
 ///
 /// This file owns the *desktop third* of docs/design/05-background-alerting.md

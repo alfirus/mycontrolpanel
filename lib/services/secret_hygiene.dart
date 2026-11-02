@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 /// Secrets-hygiene helpers (pure Dart, no plugins).
 ///
 /// The credential store of record is `SecureStore` (flutter_secure_storage

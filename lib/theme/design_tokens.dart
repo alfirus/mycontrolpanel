@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import 'package:flutter/material.dart';
 
 /// Canonical design tokens for the MyControlPanel pitch-black theme.

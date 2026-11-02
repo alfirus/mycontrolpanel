@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 

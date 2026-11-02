@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 /// Background alerting policy + SLO helpers (pure Dart, no plugins).
 ///
 /// Complements the foreground-only helpers that already exist:

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 /// Cron last-run parsing over SSH log tails.
 ///
 /// `AgentService.fetchCronLogs` greps journal + syslog for a job's program

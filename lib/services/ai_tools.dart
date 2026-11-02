@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import '../models/alert_entry.dart';
 import '../models/app_entry.dart';
 import '../models/cron_entry.dart';

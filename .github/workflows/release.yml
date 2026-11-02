@@ -18,6 +18,10 @@ on:
         description: 'Tag to (re)build, e.g. v1.0.0-alpha.1'
         required: false
         default: ''
+      waiver:
+        description: 'Owner waiver file in-repo (Sofia approval only), e.g. docs/waivers/v1.0.0-beta.1.md'
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -99,9 +103,64 @@ jobs:
           name: mycontrolpanel-${{ matrix.os }}-${{ steps.ver.outputs.version }}
           path: ${{ runner.temp }}/mycontrolpanel-${{ matrix.os }}-${{ steps.ver.outputs.version }}.*
 
+  verify-gate:
+    name: beta release gate (Burhanah)
+    # Binding gate: the publish job below needs this job. A HOLD verdict
+    # (non-zero exit) blocks the GitHub Release. Only an owner waiver
+    # (Sofia, CEO — see docs/release-gates.md) can clear a HOLD.
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Resolve version from tag
+        id: ver
+        shell: bash
+        run: |
+          if [ -n "${{ inputs.tag }}" ]; then TAG="${{ inputs.tag }}"; else TAG="${GITHUB_REF_NAME}"; fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Python (verifier is stdlib-only, no deps to install)
+        uses: actions/setup-python@a26af69be951a213d495a44c3e91c03a2152674f5 # v5
+        with:
+          python-version: '3.12'
+
+      - name: Setup Flutter (gate re-runs `flutter test` itself)
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Download CI-built artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Run beta release gate
+        shell: bash
+        run: |
+          WAIVER=""
+          if [ -n "${{ inputs.waiver }}" ]; then WAIVER="--waiver-file ${{ inputs.waiver }}"; fi
+          python3 tool/verify_release.py --tag "${{ steps.ver.outputs.tag }}" \
+            --dist dist --proof-out release-proof.json $WAIVER
+
+      - name: Upload proof bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-proof-${{ steps.ver.outputs.tag }}
+          path: release-proof.json
+          retention-days: 90
+
   release:
     name: publish release
-    needs: build
+    needs: [build, verify-gate]
     runs-on: ubuntu-latest
     steps:
       - name: Resolve version from tag
@@ -117,6 +176,8 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+          # release-proof-* (gate verdict) lands here too via merge-multiple;
+          # it is published below as the audit receipt, never checksummed.
 
       - name: Checksums
         shell: bash
@@ -135,3 +196,4 @@ jobs:
           files: |
             dist/mycontrolpanel-*
             dist/SHA256SUMS.txt
+            dist/release-proof.json

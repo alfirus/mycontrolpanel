@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 /// A real alert harvested from a server via SSH.
 class AlertEntry {
   final String title;
