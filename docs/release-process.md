@@ -65,6 +65,18 @@ toolchains (privileged, sudo). Per repo policy there are no sudo steps in
 PR CI, so PR coverage for Linux is analyze+test and the real Linux build
 runs tag-gated in `release.yml`. Do not add `sudo apt-get` to PR workflows.
 
+## Staged rollout (beta / stable tracks)
+
+Full runbook: `docs/runbooks/rollout.md`. Summary: tags with `-`
+(`v1.0.0-beta.N`) publish through the `release-beta` environment
+(automatic); clean `vX.Y.Z` tags pause at `release-stable` for owner
+approval (configure required reviewers in repo Settings → Environments).
+The in-app updater defaults to stable and only offers pre-releases on
+the opt-in beta channel (`UpdateChannel` in
+`lib/services/update_service.dart`). Rollback never moves tags:
+`tool/rollback_release.py` drafts the bad release so the track endpoint
+resolves to last-good, then cut a new tag with the fix.
+
 ## Tagged-release checklist
 
 1. Bump `version:` in `pubspec.yaml`, commit to main via PR (gates must be green).

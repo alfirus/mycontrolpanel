@@ -38,7 +38,8 @@ git tag v1.0.0-alpha.2 && git push origin v1.0.0-alpha.2
       `mycontrolpanel-windows-<version>.zip`,
       `mycontrolpanel-linux-<version>.tar.gz`, plus `SHA256SUMS.txt`.
 - [ ] In-app update path spot-checked (Windows/Linux/macOS against the
-      new GitHub Release).
+      new GitHub Release; stable track. Beta tags additionally checked
+      with the beta-track opt-in per `docs/runbooks/rollout.md`).
 - [ ] GitHub Release notes pasted from the `CHANGELOG.md` entry.
 
 ## 4. After
