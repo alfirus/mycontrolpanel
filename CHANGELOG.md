@@ -12,6 +12,10 @@ releases are cut as Git tags `v<name>` via `.github/workflows/release.yml`
   change): `docs/project/tray-mode-plan.md` (WBS TM-1…TM-8, critical
   path, RACI, top-5 risks), roadmap Phase 2b exit gate (`v1.0.0-beta.2`),
   closed-app architecture (§8 of `docs/design/05-background-alerting.md`).
+- Beta.2 tracking (Shiela, TM-8): milestone `v1.0.0-beta.2`, epic #119 +
+  children #121–#125, backlog index, PR Markdown link-check workflow,
+  weekly stale-triage pings. Wording reconciled with Rina's tray-mode plan
+  (`--poll-headless` contract, WBS owners, Beta.2 gate). No app code.
 - Beta verifiable release gate (Burhanah): stdlib-only
   `tool/verify_release.py` (version==CHANGELOG==tag, 3 fresh platform
   assets + SHA256SUMS, flutter test + agent pytest re-run, consent/Sentry
