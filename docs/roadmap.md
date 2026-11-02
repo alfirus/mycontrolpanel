@@ -130,6 +130,13 @@ artifacts attached to the GitHub Release.
 - GitLab parity (a `gitlab_service.dart` stub exists — promote or delete).
 - Offline-first cache of last-known server state.
 
+## Go-to-market
+
+- [x] Sales Kit v1 go-live (Syafiqah): `docs/sales/` — value prop, ICP,
+  3-tier pilot pricing (MIT self-hosted positioning), 10-min demo script,
+  proposal/follow-up templates, objection sheet (consent + stale-state)
+  + ROI vs RMM.
+
 ## Link map
 
 - Backlog with acceptance criteria: `docs/BACKLOG.md` (GitHub issues mirror it).
