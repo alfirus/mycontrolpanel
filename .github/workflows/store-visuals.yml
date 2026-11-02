@@ -1,0 +1,56 @@
+name: store-visuals
+
+# Image lint for Hana's store-ready visual pack (t_c8b233d4):
+# every PNG in assets/store/ keeps its exact store dimensions,
+# the one-pager PDF exists, and Markdown links still resolve.
+# Read-only, no deploys, no secrets.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'assets/store/**'
+      - 'docs/store/**'
+      - 'docs/sales-kit/**'
+      - 'fastlane/**'
+      - 'tool/check_store_assets.dart'
+      - '.github/workflows/store-visuals.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: store-visuals-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: store asset lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Setup Flutter
+        uses: subosito/flutter-action@1a449444c387b196c4844d4f6c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+          flutter-version: '3.47.9' # pinned — bump procedure in docs/release-process.md
+      - name: Check store asset dimensions
+        run: dart run tool/check_store_assets.dart
+      - name: Markdown links (touched docs)
+        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
+        with:
+          fail: true
+          args: >-
+            --no-progress
+            --max-retries 2
+            -- './README.md'
+            './docs/store/visual-pack-manifest.md'
+            './docs/sales-kit/one-pager.md'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
