@@ -182,4 +182,34 @@ abstract class DesktopAlerts {
       return false;
     }
   }
+
+  /// Show one OS notification from an already-built [NotificationHook]
+  /// payload. Headless-tick sink (`lib/headless.dart`): the shared pipeline
+  /// builds the payload verbatim, this rail only delivers it — no second
+  /// payload format. Same guards as [showFresh]; returns true when shown.
+  static Future<bool> showFreshPayload(String title, String body) async {
+    if (!isSupportedPlatform) return false;
+    if (!await isEnabled()) return false;
+    if (body.trim().isEmpty) return false;
+    try {
+      await initNotifications();
+      if (!_pluginReady) return false;
+      const details = NotificationDetails(
+        macOS: DarwinNotificationDetails(),
+        linux: LinuxNotificationDetails(),
+        windows: WindowsNotificationDetails(),
+      );
+      final id =
+          DateTime.now().millisecondsSinceEpoch % 0x7fffffff;
+      await _plugin.show(
+        id: id,
+        title: title,
+        body: body,
+        notificationDetails: details,
+      );
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
 }
