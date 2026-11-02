@@ -167,7 +167,26 @@ Alya reviews scheduler security; Kira designs tray UX.
   vault; scheduler args carry no token, key path, or passphrase (Alya
   review, TM-2).
 
-### 8.3 What stays out (Beta.2 non-goals)
+### 8.4 Security boundary — ADR-003 (binding on TM-1/TM-2/TM-3)
+
+Alya's review is frozen in `docs/decisions/003-tray-headless-security.md`
+(STRIDE table T1–T8) + privacy companion
+`docs/specs/tray-headless-privacy.md`. Lina builds to it, Zara wires
+schedulers inside it, Balqis proves it in TM-6. Non-negotiables:
+
+- Read-only biometric-gated vault; locked vault denies background reads
+  (fail closed, exit 2, no headless prompt).
+- No plaintext fallback: non-`secure:` markers never reach the poller.
+- OS-ACL-scoped storage (per-user paths only, mode 0600 where files).
+- Least-privilege scheduler artifacts: per-user, no elevation, argv
+  carries no token/key path/passphrase (`HeadlessSecurity` enforces +
+  tests `test/headless_security_test.dart`: locked-vault-denies,
+  tampered-artifact).
+- Consent honored headless: shared `background_alerts` pref (default
+  OFF) gates every tick. Privacy: on-device only, no new retained state
+  beyond the existing last-check stamp + last-seen set.
+
+### 8.5 What stays out (Beta.2 non-goals)
 
 - Remote push (FCM/APNs relay) — still local notifications only.
 - Exact-time guarantees — schedulers are best-effort; staleness copy
