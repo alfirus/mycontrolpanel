@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 /// Background alert-anomaly pipeline hooks for the Alerts engine.
 ///
 /// [DiskForecaster], [LoadSpikeForecaster] and [AnomalyBaseline] already

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 /// A crontab entry discovered on a real server via SSH.
 class CronEntry {
   final String schedule; // e.g. "0 * * * *" or "@daily"

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 /// Metrics anomaly detection — unsupervised baselines for
 /// cpu/ram/disk/load/latency to replace static thresholds.
 ///

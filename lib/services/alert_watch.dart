@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/alert_entry.dart';
 import '../models/mock_data.dart';

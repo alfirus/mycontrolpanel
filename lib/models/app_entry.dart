@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 /// An app/service discovered on a real server via SSH.
 class AppEntry {
   final String name;

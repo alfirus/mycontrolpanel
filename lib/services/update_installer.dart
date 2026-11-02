@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import 'dart:io';
 
 /// Platform install step. Windows/Linux: swap files + relaunch automatically.

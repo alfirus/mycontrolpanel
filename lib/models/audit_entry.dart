@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import 'dart:convert';
 
 /// One AI tool execution record: who approved what, when, and the outcome.
