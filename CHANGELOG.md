@@ -8,6 +8,14 @@ releases are cut as Git tags `v<name>` via `.github/workflows/release.yml`
 ## [Unreleased]
 
 ### Added
+- Adaptive anomaly scoring (Farah — ML, on-device): agent v6 additive
+  `GET /anomaly` (stdlib-only EWMA + rolling variance with time-of-day
+  buckets; score 0–100 + reason; Low/Med/High gate), offline eval harness
+  (`python -m pytest agent/tests -q`: precision 0.95, 0 idle-day false
+  alerts, ~0.006 ms/sample), Flutter sensitivity picker with why-this-
+  alerted copy reusing the #116/#117/#118 rails, `AgentService.fetchAnomaly`
+  with pre-v6 fallback, privacy note (fully on-device), handoff spec
+  `docs/specs/anomaly-scoring.md`.
 - Beta exit + GTM readiness (Sofia, docs/decision only — no behavior
   change): `docs/beta-done-checklist.md` (beta.1 DONE list, Burhanah
   sign-off block), decision `004-tray-build-vs-defer.md` (owner call:
