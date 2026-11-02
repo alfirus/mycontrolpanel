@@ -42,6 +42,11 @@ const List<String> kAgentLogSources = ['journal', 'syslog'];
 /// `/var/log/mcp-cronruns.log`; feeds Zara's last-run tracker.
 const String kCronRunsPath = '/cronruns';
 
+/// v6+ adaptive anomaly score (`GET /anomaly?metric=&value=&hour=&
+/// sensitivity=`). Returns `AnomalyScore` (score 0..100 + reason);
+/// pre-v6 agents answer 404 and callers fall back to local detectors.
+const String kAnomalyPath = '/anomaly';
+
 /// Client timeouts: connect 5s, /metrics read 6s, /procstats read 8s.
 /// Install-verify polls reuse the /metrics budget per attempt.
 const Duration kAgentConnectTimeout = Duration(seconds: 5);

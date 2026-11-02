@@ -2,13 +2,19 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:my_control_panel/services/agent_service.dart';
 
 void main() {
-  group('agent v4 health+auth contract', () {
-    test('agentVersion is 5', () {
-      expect(AgentService.agentVersion, 5);
+  group('agent v6 anomaly contract', () {
+    test('agentVersion is 6', () {
+      expect(AgentService.agentVersion, 6);
     });
 
-    test('script declares AGENT_VERSION = 5', () {
-      expect(AgentService.agentScript.contains('AGENT_VERSION = 5'), isTrue);
+    test('script declares AGENT_VERSION = 6', () {
+      expect(AgentService.agentScript.contains('AGENT_VERSION = 6'), isTrue);
+    });
+
+    test('script serves /anomaly with score + reason + sensitivity gate', () {
+      expect(AgentService.agentScript.contains("'/anomaly'"), isTrue);
+      expect(AgentService.agentScript.contains('score_sample'), isTrue);
+      expect(AgentService.agentScript.contains('SENSITIVITIES'), isTrue);
     });
 
     test('v2/v3 endpoints preserved (backward compatible)', () {

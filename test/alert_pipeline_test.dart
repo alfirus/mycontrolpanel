@@ -87,5 +87,21 @@ void main() {
       );
       expect(later.where((a) => a.source == 'ml-pipeline/disk'), isNotEmpty);
     });
+
+    test('cpu anomaly title carries why-copy + sensitivity label', () {
+      final p = pipeline();
+      for (var i = 0; i < 6; i++) {
+        p.evaluate(
+            diskHistory: flatDisk(), load1: 0.5, cpuSample: 0.2, nowMs: i);
+      }
+      final out = p.evaluate(
+          diskHistory: flatDisk(), load1: 0.5, cpuSample: 0.95, nowMs: 6);
+      final cpu =
+          out.where((a) => a.source == 'ml-pipeline/cpu').toList();
+      expect(cpu, hasLength(1));
+      expect(cpu.single.title, contains('CPU anomaly on prod-core-01'));
+      expect(cpu.single.title, contains('95% vs usual'));
+      expect(cpu.single.title, contains('(Medium)'));
+    });
   });
 }
