@@ -1,0 +1,18 @@
+# MyControlPanel headless poll — systemd user timer template, HARDENED (Nadia, operability).
+#
+# Companion to mcp-poll.hardened.service: fires every 15 min (best-effort;
+# staleness copy absorbs drift — no exact-time guarantees). Persistent=true
+# catches up one missed tick after suspend; AccuracySec=1min lets systemd
+# batch wakeups (battery-friendly). Same cadence as the TM-1 minimal
+# timer — the hardening lives in the service (restart/backoff), not here.
+[Unit]
+Description=MyControlPanel headless alert poll, hardened (every 15 min)
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

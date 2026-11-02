@@ -1,0 +1,40 @@
+# MyControlPanel headless poll — systemd user service template, HARDENED (Nadia, operability).
+#
+# Layers restart/backoff + log routing on top of the TM-1 minimal template
+# (scripts/headless/linux/mcp-poll.service, Lina owns the argv contract).
+# Managed lifecycle (verify/status/ledger): Zara owns (t_13eee02b).
+#
+# Install: copy to ~/.config/systemd/user/mcp-poll.service, replace
+# @INSTALL_DIR@ (e.g. /opt/mycontrolpanel or ~/.local/share/mycontrolpanel),
+# then `systemctl --user daemon-reload && systemctl --user enable --now
+# mcp-poll.timer`.
+#
+# Hardening vs the minimal template (Alya reviews):
+# - Restart=on-failure + RestartSec=60: a crashed tick (exit 1) retries
+#   with backoff; clean exits (0 tick ok, 2 skipped-per-contract) never
+#   restart — SuccessExitStatus pins both as clean.
+# - StartLimitIntervalSec/StartLimitBurst: a persistently failing tick
+#   stops after 3 attempts per 15 min instead of hot-looping.
+# - StandardOutput/Error append to the per-user tick log; size-capped by
+#   `agent_check --rotate` (alert_log_rotation policy: 512 KiB x 3 gens).
+# - Per-user unit, no elevation, no secret-bearing Environment= entries
+#   (vault-only reads inside the process, ADR-003 — unchanged).
+[Unit]
+Description=MyControlPanel headless alert poll (hardened)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=@INSTALL_DIR@/mycontrolpanel --poll-headless
+SuccessExitStatus=0 2
+Restart=on-failure
+RestartSec=60
+StartLimitIntervalSec=900
+StartLimitBurst=3
+Nice=10
+StandardOutput=append:%h/.local/share/mycontrolpanel/headless-tick.log
+StandardError=append:%h/.local/share/mycontrolpanel/headless-tick.log
+
+[Install]
+WantedBy=default.target
