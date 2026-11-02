@@ -78,7 +78,15 @@ class ErrorReporting {
   /// Sentry init for app startup. Fully guarded: any failure (or a
   /// disabled gate) falls through silently so reporting can never break
   /// app launch — or a CI build that never opts in.
-  static Future<void> initIfOptedIn() async {
+  ///
+  /// [release] / [environment] feed Sentry release-health (see
+  /// docs/observability-dashboards.md): crash-free sessions are sliced by
+  /// release (`<package>@<version>+<build>`) and environment
+  /// (tag beta builds report `beta`, stable tags `production`, everything
+  /// else `development`). Empty values fall back to Sentry's own defaults
+  /// so old call sites keep working.
+  static Future<void> initIfOptedIn(
+      {String release = '', String environment = ''}) async {
     try {
       final prefs = await SharedPreferences.getInstance();
       if (prefs.getBool(consentKey) != true) return;
@@ -86,10 +94,38 @@ class ErrorReporting {
       if (dsn.isEmpty) return;
       await SentryFlutter.init((o) {
         o.dsn = dsn;
+        if (release.isNotEmpty) o.release = release;
+        o.environment = resolveEnvironment(environment);
       });
     } catch (_) {
       // Reporting must never break startup.
     }
+  }
+
+  /// Builds a Sentry release string from package metadata.
+  /// Pure — unit-tested (test/release_health_test.dart).
+  static String buildRelease({
+    required String packageName,
+    required String version,
+    String buildNumber = '',
+  }) {
+    final v = buildNumber.trim().isEmpty
+        ? version.trim()
+        : '${version.trim()}+${buildNumber.trim()}';
+    return '${packageName.trim()}@$v';
+  }
+
+  /// Maps a raw environment name to the Sentry environment. Tag-track
+  /// builds pass `beta`/`stable` via `--dart-define=SENTRY_ENVIRONMENT`
+  /// (release.yml): beta stays `beta`, stable releases are `production`,
+  /// and anything else (local, PR, store sideloads) is `development` so
+  /// dev noise never pollutes the crash-free SLO.
+  /// Pure — unit-tested (test/release_health_test.dart).
+  static String resolveEnvironment(String raw) {
+    final s = raw.trim().toLowerCase();
+    if (s == 'beta') return 'beta';
+    if (s == 'stable') return 'production';
+    return 'development';
   }
 
   /// Arms Sentry on demand (Settings test-event path, when the user opts
