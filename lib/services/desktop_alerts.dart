@@ -35,6 +35,7 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
 import 'background_alerts.dart';
 import 'polling_alerts.dart';
+import '../tray/quiet_hours.dart';
 
 /// Desktop `flutter_local_notifications` rail (Windows/Linux/macOS).
 abstract class DesktopAlerts {
@@ -156,9 +157,16 @@ abstract class DesktopAlerts {
   /// Show one OS notification for [freshTitles], driven by the existing
   /// in-app timer while the app runs. Gated on the shared consent toggle
   /// (default OFF); returns true when a notification was shown.
+  ///
+  /// Quiet-hours suppression (tray slice, Kira §5 — enforced at the
+  /// notify layer, never in the tick): while the quiet window or the
+  /// one-shot "mute until morning" is active, toasts are dropped and the
+  /// call returns false. Defaults (quiet OFF, no mute) preserve the old
+  /// behavior exactly.
   static Future<bool> showFresh(List<String> freshTitles) async {
     if (!isSupportedPlatform) return false;
     if (!await isEnabled()) return false;
+    if (await TrayQuietHours.suppressedNow()) return false;
     final payload = buildLocalPayload('MyControlPanel alert', freshTitles);
     if ((payload['body'] ?? '').isEmpty) return false;
     try {
@@ -186,10 +194,12 @@ abstract class DesktopAlerts {
   /// Show one OS notification from an already-built [NotificationHook]
   /// payload. Headless-tick sink (`lib/headless.dart`): the shared pipeline
   /// builds the payload verbatim, this rail only delivers it — no second
-  /// payload format. Same guards as [showFresh]; returns true when shown.
+  /// payload format. Same guards as [showFresh] (incl. quiet-hours
+  /// suppression); returns true when shown.
   static Future<bool> showFreshPayload(String title, String body) async {
     if (!isSupportedPlatform) return false;
     if (!await isEnabled()) return false;
+    if (await TrayQuietHours.suppressedNow()) return false;
     if (body.trim().isEmpty) return false;
     try {
       await initNotifications();
