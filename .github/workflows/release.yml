@@ -135,6 +135,38 @@ jobs:
             flutter build ${{ matrix.os }} --release --dart-define=SENTRY_ENVIRONMENT=$TRACK
           fi
 
+      - name: Build + stage mycontrolpanel-check (desktop)
+        # TM-2 headless CLI (Zara): compile the pure-Dart wrapper and
+        # stage it next to the app binary BEFORE signing/packaging so
+        # the published archives carry it. Android excluded (APK leg).
+        # Staging points are the exact dirs the Package steps archive:
+        # Windows Release/, Linux bundle/, macOS .app/Contents/MacOS/.
+        # Signing auto-covers the new binary (Windows *.exe glob,
+        # macOS --deep). Asset names are unchanged, so Burhanah's
+        # verify-gate C2 (pins 3 desktop assets) stays green; SBOM is
+        # lockfile-only and unaffected.
+        if: matrix.os != 'android'
+        shell: bash
+        run: |
+          dart build cli -t bin/mycontrolpanel_check.dart -o "$RUNNER_TEMP/mcp-check-build"
+          SRC="$RUNNER_TEMP/mcp-check-build/bundle/bin/mycontrolpanel_check"
+          case "${{ matrix.os }}" in
+            windows)
+              cp "$SRC.exe" build/windows/x64/runner/Release/mycontrolpanel-check.exe
+              ls -la build/windows/x64/runner/Release/mycontrolpanel-check.exe
+              ;;
+            linux)
+              cp "$SRC" build/linux/x64/release/bundle/mycontrolpanel-check
+              chmod +x build/linux/x64/release/bundle/mycontrolpanel-check
+              ls -la build/linux/x64/release/bundle/mycontrolpanel-check
+              ;;
+            macos)
+              cp "$SRC" build/macos/Build/Products/Release/my_control_panel.app/Contents/MacOS/mycontrolpanel-check
+              chmod +x build/macos/Build/Products/Release/my_control_panel.app/Contents/MacOS/mycontrolpanel-check
+              ls -la build/macos/Build/Products/Release/my_control_panel.app/Contents/MacOS/mycontrolpanel-check
+              ;;
+          esac
+
       - name: Sign Windows binaries (Authenticode, when enrolled)
         # Owner-enrolled only (docs/release-signing.md): signs the runner
         # output BEFORE packaging so the published zip carries signatures.
