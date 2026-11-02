@@ -168,10 +168,21 @@ abstract class HeadlessCheckStateVersion {
 ///
 /// Usage: `final lock = await HeadlessLock.tryAcquire(file); if (lock ==
 /// null) skip(exit 2); try { tick } finally { await lock.release(); }`
+///
+/// Two layers (both must agree):
+/// - OS file lock (exclusive): dedups across scheduler *processes*.
+/// - In-process held-set: POSIX record locks are per-process, so the same
+///   process re-acquiring its own lock would succeed at the OS layer on
+///   Linux — the held-set closes that hole (and covers accidental
+///   in-process double-runs on every OS).
 class HeadlessLock {
-  HeadlessLock._(this._raf);
+  HeadlessLock._(this._raf, this._key);
 
   final RandomAccessFile _raf;
+  final String _key;
+  bool _released = false;
+
+  static final Set<String> _held = {};
 
   /// Try to take the exclusive lock, waiting at most [timeout]. Returns
   /// null when another tick holds it (caller must skip, exit 2).
@@ -179,6 +190,8 @@ class HeadlessLock {
     File lockFile, {
     Duration timeout = const Duration(seconds: 10),
   }) async {
+    final key = lockFile.absolute.path;
+    if (_held.contains(key)) return null;
     try {
       lockFile.parent.createSync(recursive: true);
       final raf = lockFile.openSync(mode: FileMode.write);
@@ -190,13 +203,28 @@ class HeadlessLock {
         } catch (_) {}
         return null;
       }
-      return HeadlessLock._(raf);
+      // Re-check under the OS lock: a concurrent in-process acquire may
+      // have landed while we were blocked.
+      if (_held.contains(key)) {
+        try {
+          await raf.unlock();
+        } catch (_) {}
+        try {
+          raf.closeSync();
+        } catch (_) {}
+        return null;
+      }
+      _held.add(key);
+      return HeadlessLock._(raf, key);
     } catch (_) {
       return null;
     }
   }
 
   Future<void> release() async {
+    if (_released) return;
+    _released = true;
+    _held.remove(_key);
     try {
       await _raf.unlock();
     } catch (_) {}
