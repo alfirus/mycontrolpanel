@@ -77,9 +77,13 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $task = "\MyControlPanel\ops-smoke-$env:GITHUB_RUN_ID"
-          $xml = Join-Path $env:RUNNER_TEMP 'mcp-ops/sandbox/mcp-poll-task.xml'
+          $wrapper = Join-Path $env:RUNNER_TEMP 'mcp-ops/build/bundle/bin/mycontrolpanel_check.exe'
+          $sb = Join-Path $env:RUNNER_TEMP 'mcp-ops/schtasks-sb'
+          & $wrapper install --install-dir "$env:RUNNER_TEMP/mcp-ops/fake-install" --wrapper $wrapper --sandbox $sb --force --no-reload
+          if ($LASTEXITCODE -ne 0) { throw "sandbox install for schtasks failed" }
+          $xml = Join-Path $sb 'mcp-poll-task.xml'
           if (-not (Test-Path $xml)) { throw "sandbox XML missing: $xml" }
+          $task = "\MyControlPanel\ops-smoke-$env:GITHUB_RUN_ID"
           try {
             schtasks /Create /TN $task /XML $xml /F
             if ($LASTEXITCODE -ne 0) { throw "schtasks /Create failed" }
@@ -89,3 +93,5 @@ jobs:
           } finally {
             schtasks /Delete /TN $task /F
           }
+          & $wrapper uninstall --sandbox $sb --no-reload
+          if ($LASTEXITCODE -ne 0) { throw "sandbox uninstall failed" }
