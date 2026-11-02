@@ -2,9 +2,10 @@
 
 Owner: Sofia (CEO) · Verifier: Burhanah (Release Verifier — verdicts binding,
 only the owner can waive) · Date: 2026-11-02
-Companions: `docs/release-gate.md` (v1 bar), `docs/qa/release-gates.md`
-(Burhanah lanes), `docs/qa/go-hold-checklist.md` (Balqis input),
-`docs/STATUS.md` (tag checklist), `docs/roadmap.md` Phase 2.
+Companions: `docs/release-gate.md` (v1 bar), `docs/release-gates.md`
+(Burhanah executable gate C1–C6 + proof bundle, merged #128),
+`docs/qa/release-gates.md` (Burhanah lanes), `docs/qa/go-hold-checklist.md`
+(Balqis input), `docs/STATUS.md` (tag checklist), `docs/roadmap.md` Phase 2.
 
 Scope: beta.1 = foreground alert rail + mobile background slice + biometric
 lock enforcement + metrics history. Closed-app tray delivery is Beta.2
