@@ -143,6 +143,19 @@ releases are cut as Git tags `v<name>` via `.github/workflows/release.yml`
   no-data, resolve→re-fire) with two documented degenerate-case
   divergences; `docs/specs/headless-slice-parity.md` parity table;
   `headless.yml` covers the new files.
+- Tray shell + launch-at-login (Elizabeth — closed-app slice): `lib/tray/`
+  (`tray_shell.dart` icon states/menu/close-box policy over `tray_manager`
+  + `window_manager` with plugin-free test seams; `quiet_hours.dart`
+  one-shot mute + prefs shell converging on Kira's `QuietHours`;
+  `app_instance.dart` single-instance guard; `launch_login.dart`
+  per-user login items — HKCU Run, freedesktop autostart, LaunchAgent —
+  following shared consent, no elevation, no secrets); quiet-hours
+  enforcement at the desktop notify funnel (`DesktopAlerts.showFresh` /
+  `showFreshPayload`); single-instance + tray init wired in `main()`
+  after the headless gate; `assets/tray/` state icons
+  (`scripts/tray/gen_icons.dart`); MSIX packaging config (`msix_config`,
+  per-user); `docs/specs/tray-shell.md` behavior spec +
+  `docs/specs/tray-launchd-scope.md` TM-3 LaunchAgent-scope decision.
 
 ### Security
 - Credential storage cut over to OS keychain/keystore; quality gates documented

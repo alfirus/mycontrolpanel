@@ -7,10 +7,15 @@ import 'services/app_lock.dart';
 import 'services/background_alerts.dart';
 import 'services/desktop_alerts.dart';
 import 'services/error_reporting.dart';
+import 'background/headless_state.dart';
 import 'services/release_health.dart';
 import 'headless.dart';
 import 'theme/app_theme.dart';
 import 'screens/control_center_screen.dart';
+import 'tray/app_instance.dart';
+import 'tray/launch_login.dart';
+import 'tray/quiet_hours.dart';
+import 'tray/tray_shell.dart';
 import 'widgets/app_lock_screen.dart';
 
 /// Sentry is armed here ONLY when the user opted in AND a DSN is stored
@@ -25,6 +30,19 @@ Future<void> main([List<String> args = const []]) async {
   // untouched. Contract: docs/specs/headless-cli-contract.md.
   final headlessExit = await runHeadlessIfRequested(args);
   if (headlessExit != null) exit(headlessExit);
+  // Tray-mode single-instance guard (slice): runs AFTER the headless gate
+  // so scheduled ticks are never blocked by it. A second launch signals
+  // the running instance to restore its window, then exits — exactly one
+  // window, ever (Kira §7.4).
+  AppInstanceGuard? instanceGuard;
+  try {
+    final (outcome, guard) = await AppInstanceGuard.tryAcquire(
+      directory: HeadlessPaths.stateDir(),
+      onRestoreRequested: () => TrayShell.live?.restoreWindow(),
+    );
+    if (outcome == AppInstanceOutcome.secondarySignaled) exit(0);
+    instanceGuard = guard;
+  } catch (_) {}
   // Sentry release-health (Aisyah, DevOps): tag builds bake the track in
   // via --dart-define=SENTRY_ENVIRONMENT (release.yml); everything else
   // resolves to `development`. Guarded inside — never blocks launch.
@@ -64,6 +82,62 @@ Future<void> main([List<String> args = const []]) async {
   // stays deferred to tray-mode work (see DesktopAlerts.closedAppNote).
   try {
     await DesktopAlerts.ensureInitialized();
+  } catch (_) {}
+  // Tray shell (desktop only, slice): minimize-to-tray icon + menu,
+  // close-box policy, launch-at-login following the shared consent.
+  // Never blocks launch; failures stay silent.
+  try {
+    if (DesktopAlerts.isSupportedPlatform) {
+      final consent = await BackgroundAlerts.isEnabled();
+      final shell = TrayShell(
+        tray: TrayManagerOps(),
+        window: WindowManagerOps(),
+        callbacks: TrayCallbacks(
+          onOpen: () async => TrayShell.live?.restoreWindow(),
+          onCheckNow: () async => TrayShell.live?.restoreWindow(),
+          onToggleMute: () async {
+            final live = TrayShell.live;
+            if (live == null) return;
+            final q = await TrayQuietHours.read();
+            final now = DateTime.now();
+            if (TrayQuietHours.isMutedAt(
+                now: now, mutedUntilMs: q.mutedUntil)) {
+              await TrayQuietHours.clearMute();
+            } else {
+              await TrayQuietHours.muteUntilMorning(now: now);
+            }
+            final after = await TrayQuietHours.read();
+            await live.refresh(
+              firingCount: 0,
+              consecutiveFailures: 0,
+              quietActive: TrayQuietHours.isQuietAt(
+                now: now,
+                enabled: after.enabled,
+                startMinutes: after.start,
+                endMinutes: after.end,
+              ),
+              quietUntil: '',
+              staleDetail: await BackgroundAlerts.lastCheckedLabel(),
+              muted: TrayQuietHours.isMutedAt(
+                  now: DateTime.now(),
+                  mutedUntilMs: after.mutedUntil),
+              consentOn: await BackgroundAlerts.isEnabled(),
+            );
+          },
+          onOpenSettings: () async =>
+              TrayShell.live?.restoreWindow(),
+          onQuit: () async {
+            try {
+              await instanceGuard?.release();
+            } catch (_) {}
+            exit(0);
+          },
+        ),
+      );
+      await shell.init(consentOn: consent);
+      await LoginItemManager(LoginItemDeps.platform())
+          .syncWithConsent(consent);
+    }
   } catch (_) {}
   runApp(const MyControlPanelApp());
 }

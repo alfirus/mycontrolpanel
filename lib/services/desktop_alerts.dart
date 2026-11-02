@@ -37,6 +37,7 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'alert_inbox_store.dart';
 import 'background_alerts.dart';
 import 'polling_alerts.dart';
+import '../tray/quiet_hours.dart';
 
 /// Desktop `flutter_local_notifications` rail (Windows/Linux/macOS).
 abstract class DesktopAlerts {
@@ -166,6 +167,12 @@ abstract class DesktopAlerts {
   /// in-app timer while the app runs. Gated on the shared consent toggle
   /// (default OFF); returns true when a notification was shown.
   ///
+  /// Quiet-hours suppression (tray slice, Kira §5 — enforced at the
+  /// notify layer, never in the tick): while the quiet window or the
+  /// one-shot "mute until morning" is active, toasts are dropped and the
+  /// call returns false. Defaults (quiet OFF, no mute) preserve the old
+  /// behavior exactly.
+  ///
   /// [payload] is the tap deep link (`AlertDeepLink.build`, `mcp://inbox…`);
   /// the response callback stashes it for the inbox to consume. Optional —
   /// existing callers without a link keep working.
@@ -173,6 +180,7 @@ abstract class DesktopAlerts {
       {String? payload}) async {
     if (!isSupportedPlatform) return false;
     if (!await isEnabled()) return false;
+    if (await TrayQuietHours.suppressedNow()) return false;
     final built = buildLocalPayload('MyControlPanel alert', freshTitles);
     if ((built['body'] ?? '').isEmpty) return false;
     try {
@@ -201,7 +209,8 @@ abstract class DesktopAlerts {
   /// Show one OS notification from an already-built [NotificationHook]
   /// payload. Headless-tick sink (`lib/headless.dart`): the shared pipeline
   /// builds the payload verbatim, this rail only delivers it — no second
-  /// payload format. Same guards as [showFresh]; returns true when shown.
+  /// payload format. Same guards as [showFresh] (incl. quiet-hours
+  /// suppression); returns true when shown.
   ///
   /// [payload] is the optional tap deep link (`AlertDeepLink.build`) for
   /// Lisa's headless tick to thread once the tray helper owns the closed-app
@@ -210,6 +219,7 @@ abstract class DesktopAlerts {
       {String? payload}) async {
     if (!isSupportedPlatform) return false;
     if (!await isEnabled()) return false;
+    if (await TrayQuietHours.suppressedNow()) return false;
     if (body.trim().isEmpty) return false;
     try {
       await initNotifications();
