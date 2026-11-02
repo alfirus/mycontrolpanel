@@ -72,11 +72,14 @@ dev_dependencies:
   # rules and activating additional ones.
   flutter_lints: ^6.0.0
 
-# Runnable entry-points (`dart run <name>`). `headless_check` is the TM-1
+# Runnable entry-points. `headless_check` is the TM-1
 # CI/dev harness for the shared headless pipeline (pure Dart — must stay
-# runnable under `dart run`; see bin/headless_check.dart).
+# runnable under `dart run`; see bin/headless_check.dart). `mcpoll` is the
+# TM-1 follow-up operator poller CLI (Lisa): real agent-HTTP fetch against
+# :9108, same frozen pipeline, no UI/vault/prefs (see bin/mcpoll.dart).
 executables:
   headless_check: headless_check
+  mcpoll: mcpoll
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
