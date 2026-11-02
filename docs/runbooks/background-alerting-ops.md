@@ -175,19 +175,28 @@ vault, or prefs. Verify removal with `status` (should report `not
 installed`) — `verify` after uninstall exits 1 by design (nothing
 to validate against).
 
-## 7. Known upstream issue: template XML vs schtasks
+## 7. Known upstream template issues vs schtasks
 
-Lina's `scripts/headless/windows/mcp-poll-task.xml` header comment
-contains the literal text `--poll-headless`. A double hyphen is
-illegal inside an XML comment, so schtasks rejects even the pristine
-template with `(11,63): incorrect comment syntax` — reproducible with
-`schtasks /Create` on the unmodified file, which means the manual
-install path (`install-windows.ps1`) hits the same wall. The managed
-`install` works around it by dropping comments from the generated
-artifact (comment-stripped fidelity is pinned by
-`test/ops_lifecycle_test.dart`); the template file itself is Lina's
-to fix (comment reword — follow-up on her card, not edited here
-because `test/headless_contract_test.dart` pins the template text).
+Lina's `scripts/headless/windows/mcp-poll-task.xml` does not register
+as-is on current Windows images — two defects, both reproduced with
+`schtasks /Create` on the unmodified template (which also means the
+manual install path via `install-windows.ps1` hits the same wall):
+
+1. The header comment contains the literal text `--poll-headless`.
+   A double hyphen is illegal inside an XML comment → `(11,63):
+   incorrect comment syntax`.
+2. The `<AllowDemandStart>true</AllowDemandStart>` line in
+   `<Settings>` is rejected outright (`unexpected node`) in any
+   position — bisected on CI with identical artifacts (register
+   without it, fail with it). The element defaults to true when
+   omitted, so demand-start (`schtasks /Run`) keeps working.
+
+The managed `install` works around both by dropping the comment and
+the line from the generated artifact (pinned by
+`test/ops_lifecycle_test.dart`; template fidelity normalizes both
+sides). The template file itself is Lina's to fix (follow-up on her
+card, t_f25d2a50 — not edited here because
+`test/headless_contract_test.dart` pins the template text).
 
 ## 8. CI + packaging notes
 

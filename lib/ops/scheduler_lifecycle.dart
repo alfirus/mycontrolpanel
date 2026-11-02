@@ -245,8 +245,19 @@ abstract class SchedulerLifecycle {
             _windowsCommandAnchor, '<Command>${_xmlEscape(wrapperExe)}</Command>')
         .replaceFirst(
             _windowsArgsAnchor, '<Arguments>$args</Arguments>');
-    return filled;
+    // schtasks on current Windows images rejects <AllowDemandStart>
+    // inside <Settings> outright (bisected on CI: identical artifacts
+    // register without it, fail with it in any position). The element
+    // defaults to true when omitted, so demand-start (`schtasks /Run`)
+    // keeps working; only the explicit line is dropped.
+    return _dropAllowDemandStart(filled);
   }
+
+  static String _dropAllowDemandStart(String xml) =>
+      const LineSplitter()
+          .convert(xml)
+          .where((l) => !l.contains('<AllowDemandStart>'))
+          .join('\n');
 
   static const _linuxExecAnchorPrefix = 'ExecStart=';
 
@@ -611,13 +622,16 @@ abstract class SchedulerLifecycle {
   }
 
   /// Template fidelity for Windows: installed XML must equal the template
-  /// outside the Exec Command/Arguments lines. Comments are normalized
-  /// away on both sides (the managed artifact drops the template's
-  /// header comment — see [fillWindowsTask]).
+  /// outside the Exec Command/Arguments lines. Normalized away on both
+  /// sides (see [fillWindowsTask]): the template's header comment (its
+  /// `--poll-headless` text is illegal inside an XML comment) and the
+  /// `<AllowDemandStart>` line (rejected by current schtasks parsers;
+  /// defaults to true when omitted).
   static bool windowsMatchesTemplateExceptExec(
       String installed, String template) {
     String strip(String xml) => const LineSplitter()
-        .convert(_stripXmlComments(xml))
+        .convert(
+            _dropAllowDemandStart(_stripXmlComments(xml)))
         .where((l) =>
             !l.contains('<Command>') && !l.contains('<Arguments>'))
         .join('\n');

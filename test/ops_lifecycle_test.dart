@@ -30,8 +30,11 @@ void main() {
       expect(filled.contains('mycontrolpanel-check.exe'), isTrue);
       expect(filled.contains('--poll-headless'), isTrue);
       expect(filled.contains(r'C:\App\mycontrolpanel.exe'), isTrue);
+      // <AllowDemandStart> is dropped: current schtasks parsers reject
+      // it outright (bisected on CI); it defaults to true when omitted.
+      expect(filled.contains('AllowDemandStart'), isFalse);
       // Non-Exec template body preserved (modulo the dropped
-      // header comment).
+      // header comment + AllowDemandStart line).
       expect(
           SchedulerLifecycle.windowsMatchesTemplateExceptExec(
               filled, template),
