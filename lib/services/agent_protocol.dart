@@ -47,6 +47,13 @@ const String kCronRunsPath = '/cronruns';
 /// pre-v6 agents answer 404 and callers fall back to local detectors.
 const String kAnomalyPath = '/anomaly';
 
+/// v6 additive alert trigger snapshot (`GET /alerts/snapshot`, Lisa).
+/// One cheap fetch for the alert rails: pre-computed `AlertRules`
+/// trigger inputs the agent can see without shell (disk, load vs
+/// nproc, reboot tripwire). Pre-snapshot agents answer 404 — callers
+/// fall back to the `/metrics` + `/sysstats` pair.
+const String kAlertSnapshotPath = '/alerts/snapshot';
+
 /// Client timeouts: connect 5s, /metrics read 6s, /procstats read 8s.
 /// Install-verify polls reuse the /metrics budget per attempt.
 const Duration kAgentConnectTimeout = Duration(seconds: 5);
@@ -189,6 +196,86 @@ AgentMetrics parseAgentMetrics(Map<String, dynamic> json) {
     ram: ratio('ram'),
     disk: ratio('disk'),
     uptimeDays: uptime.toInt(),
+    agentVersion: version.toInt(),
+  );
+}
+
+/// Validated /alerts/snapshot payload (v6 additive).
+///
+/// Carries only what the agent can see without shell; everything else
+/// (failed units, brute force, kernel lines) stays on the SSH sweep.
+/// Unknown/absent trigger inputs stay unknown (0 / empty) so the
+/// corresponding [AlertRules] branch skips instead of firing.
+class AlertSnapshot {
+  final double disk;
+  final double load1;
+  final int nproc;
+  final int uptimeS;
+  final int bootEpochS;
+  final int agentVersion;
+
+  const AlertSnapshot({
+    required this.disk,
+    required this.load1,
+    required this.nproc,
+    required this.uptimeS,
+    required this.bootEpochS,
+    required this.agentVersion,
+  });
+}
+
+/// Validates a decoded /alerts/snapshot body. Throws [AgentProtocolException].
+AlertSnapshot parseAlertSnapshot(Map<String, dynamic> json) {
+  final version = json['version'];
+  if (version is! num) {
+    throw const AgentProtocolException(
+        AgentErrorCode.staleAgent, 'agent reports no version (v1 payload)');
+  }
+  if (version.toInt() < kMinAgentVersion) {
+    throw AgentProtocolException(AgentErrorCode.staleAgent,
+        'agent v${version.toInt()} < minimum v$kMinAgentVersion — reinstall');
+  }
+  final snap = json['snapshot'];
+  if (snap is! Map) {
+    throw const AgentProtocolException(AgentErrorCode.badPayload,
+        '"/alerts/snapshot.snapshot" missing or not an object');
+  }
+  double ratio(String key) {
+    final v = snap[key];
+    if (v == null) return 0.0;
+    if (v is! num) {
+      throw AgentProtocolException(AgentErrorCode.badPayload,
+          '"/alerts/snapshot.$key" not numeric');
+    }
+    return v.toDouble().clamp(0.0, 1.0);
+  }
+
+  double nonNegative(String key) {
+    final v = snap[key];
+    if (v == null) return 0.0;
+    if (v is! num) {
+      throw AgentProtocolException(AgentErrorCode.badPayload,
+          '"/alerts/snapshot.$key" not numeric');
+    }
+    return v.toDouble() < 0 ? 0.0 : v.toDouble();
+  }
+
+  int nonNegativeInt(String key) {
+    final v = snap[key];
+    if (v == null) return 0;
+    if (v is! num) {
+      throw AgentProtocolException(AgentErrorCode.badPayload,
+          '"/alerts/snapshot.$key" not numeric');
+    }
+    return v.toInt() < 0 ? 0 : v.toInt();
+  }
+
+  return AlertSnapshot(
+    disk: ratio('disk'),
+    load1: nonNegative('load1'),
+    nproc: nonNegativeInt('nproc'),
+    uptimeS: nonNegativeInt('uptime_s'),
+    bootEpochS: nonNegativeInt('boot_epoch_s'),
     agentVersion: version.toInt(),
   );
 }
