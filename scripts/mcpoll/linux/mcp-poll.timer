@@ -1,0 +1,15 @@
+# mcpoll headless poll — systemd user timer template (Lisa, TM-1 follow-up).
+#
+# Fires the companion mcpoll.service every 15 min (best-effort; the state
+# file absorbs drift — no exact-time guarantees).
+[Unit]
+Description=mcpoll agent poll (every 15 min)
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

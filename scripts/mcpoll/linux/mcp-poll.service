@@ -1,0 +1,22 @@
+# mcpoll headless poll — systemd user service template (Lisa, TM-1 follow-up).
+#
+# Operator example for the standalone poller CLI (bin/mcpoll.dart) against
+# agent hosts that need no per-host token. Per-user unit
+# (~/.config/systemd/user/), NO system unit, NO secret-bearing environment
+# entries (open agents on the scheduled path; interactive runs needing a
+# token pass it via the process environment — see scripts/mcpoll/README.md).
+#
+# Install: scripts/mcpoll/install-linux.sh (manual path).
+# Replace @INSTALL_DIR@ at install time (e.g. ~/.local/share/mycontrolpanel).
+[Unit]
+Description=mcpoll agent poll
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=@INSTALL_DIR@/mcpoll --consent --servers @INSTALL_DIR@/servers.json
+Nice=10
+
+[Install]
+WantedBy=default.target
