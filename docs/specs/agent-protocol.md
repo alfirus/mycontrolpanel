@@ -114,6 +114,36 @@ older setups without the logging convention simply show no history).
 Pre-v5 agents answer **404** → the app falls back to its last-good cache.
 Token-gated like every other endpoint when `MCP_AGENT_TOKEN` is set.
 
+### GET /alerts/snapshot → 200 application/json (agent v6 additive, Lisa)
+
+One cheap fetch for the alert rails: pre-computed `AlertRules` trigger
+inputs the agent can see without shell (disk, load vs nproc, reboot
+tripwire) in a single instant `/proc` scan — no 0.5s CPU sample, no
+subprocess.
+
+```json
+{"version": 6, "snapshot": {"disk": 0.41, "load1": 0.5, "load5": 0.4,
+ "load15": 0.3, "nproc": 4, "uptime_s": 12345,
+ "boot_epoch_s": 1793000000, "mem_total_mb": 3920,
+ "mem_avail_mb": 1500, "agent_uptime_s": 3600}}
+```
+
+| field | type | rule |
+|---|---|---|
+| `snapshot` | object | trigger inputs; missing keys = unknown, never healthy |
+| `snapshot.disk` | number | root-filesystem utilisation ratio 0..1 (client clamps) |
+| `snapshot.load1` | number | 1-minute load average, ≥ 0 |
+| `snapshot.nproc` | int | CPU count; ≤ 0 = unknown → the load rule is skipped |
+| `snapshot.uptime_s` | int | host uptime in **seconds**, ≥ 0 (reboot-tripwire input) |
+| `snapshot.boot_epoch_s` | int | unix epoch of last boot (reboot detection without SSH) |
+| `version` | int | agent software version; **required** |
+
+Pre-snapshot agents answer **404** → the app falls back to the
+`/metrics` + `/sysstats` pair. What the agent cannot see (failed
+systemd units, brute-force counts, kernel lines, fine-grained mounts)
+stays on the SSH sweep (`AgentService.fetchAlerts`). Token-gated like
+every other endpoint when `MCP_AGENT_TOKEN` is set.
+
 ## 3. Version negotiation
 
 - App implements protocol v1 (`kAgentProtocolVersion = 1`).

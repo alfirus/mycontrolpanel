@@ -63,6 +63,39 @@ class HostSignals {
     this.kernelLines = const [],
     this.uptimeSecs,
   });
+
+  /// Trigger inputs from a validated `/alerts/snapshot` map (Lisa).
+  ///
+  /// Pure companion to `buildAgentHostSignals` (which lives next to the
+  /// transport in `alert_poller.dart` and cannot be shared with the pure
+  /// `dart run` poller CLI): disk → `/` mount, load1 + nproc, uptime_s →
+  /// reboot tripwire input. Absent/non-numeric fields stay unknown so the
+  /// corresponding [AlertRules] branch skips instead of firing. Never
+  /// throws on hostile input.
+  factory HostSignals.fromSnapshot(Map snapshot) {
+    var diskByMount = const <String, double>{};
+    final disk = snapshot['disk'];
+    if (disk is num && disk.isFinite) {
+      diskByMount = {'/': disk.toDouble().clamp(0.0, 1.0).toDouble()};
+    }
+    var load1 = 0.0;
+    final rawLoad = snapshot['load1'];
+    if (rawLoad is num && rawLoad.isFinite && rawLoad >= 0) {
+      load1 = rawLoad.toDouble();
+    }
+    var nproc = 0;
+    final rawNproc = snapshot['nproc'];
+    if (rawNproc is num && rawNproc.toInt() > 0) nproc = rawNproc.toInt();
+    int? uptimeSecs;
+    final rawUp = snapshot['uptime_s'];
+    if (rawUp is num && rawUp.toInt() >= 0) uptimeSecs = rawUp.toInt();
+    return HostSignals(
+      diskByMount: diskByMount,
+      load1: load1,
+      nproc: nproc,
+      uptimeSecs: uptimeSecs,
+    );
+  }
 }
 
 class AlertRules {

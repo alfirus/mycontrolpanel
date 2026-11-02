@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-16"?>
+<!--
+  MyControlPanel headless poll — Windows Task Scheduler template, HARDENED (Nadia, operability).
+  Layers restart/backoff on top of the TM-1 minimal template
+  (scripts/headless/windows/mcp-poll-task.xml, Lina owns the argv contract).
+  Managed lifecycle (verify/status/ledger): Zara owns (t_13eee02b).
+
+  Install: replace INSTALL_DIR (e.g. %LOCALAPPDATA%\MyControlPanel), then
+  `schtasks /create /tn "\MyControlPanel\PollHardened" /xml mcp-poll-task.hardened.xml`.
+  Or import via the manual install script path (dogfood).
+
+  Hardening vs the minimal template (Alya reviews):
+  - RestartOnFailure (count 3, 5 min interval): a crashed tick (exit 1)
+    retries with backoff; clean exits (0 ok, 2 skipped) never restart.
+  - ExecutionTimeLimit PT5M: a wedged tick is killed instead of piling up
+    behind MultipleInstancesPolicy IgnoreNew.
+  - Per-user task (\MyControlPanel\), InteractiveToken, LeastPrivilege —
+    NO elevation, NO stored password (unchanged from TM-1).
+  - Action argv is EXACTLY "<INSTALL_DIR>\mycontrolpanel.exe" --poll-headless
+    (no credential / key / passphrase args — vault-only reads inside
+    the process).
+-->
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>MyControlPanel headless alert poll, hardened (per-user, no elevation, restart on failure).</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <Repetition>
+        <Interval>PT15M</Interval>
+        <Duration>P1D</Duration>
+        <StopAtDurationEnd>false</StopAtDurationEnd>
+      </Repetition>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfNetworkAvailable>true</RunOnlyIfNetworkAvailable>
+    <ExecutionTimeLimit>PT5M</ExecutionTimeLimit>
+    <RestartOnFailure>
+      <Count>3</Count>
+      <Interval>PT5M</Interval>
+    </RestartOnFailure>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>INSTALL_DIR\mycontrolpanel.exe</Command>
+      <Arguments>--poll-headless</Arguments>
+    </Exec>
+  </Actions>
+</Task>

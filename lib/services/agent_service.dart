@@ -34,6 +34,13 @@ class AgentService {
   ///   "mem":{"total_mb","avail_mb","swap_total_mb","swap_free_mb"},
   ///   "gpu":{"present","count"},"agent_uptime_s":...,
   ///   "nproc":...,"boot_epoch_s":...}
+  /// /alerts/snapshot (v6 additive, Lisa) -> {"version":6,"snapshot":{
+  ///   "disk","load1","load5","load15","nproc","uptime_s","boot_epoch_s",
+  ///   "mem_total_mb","mem_avail_mb","agent_uptime_s"}}. One cheap fetch
+  ///   for the alert rails: the pre-computed AlertRules trigger inputs
+  ///   the agent can see without shell (disk, load vs nproc, reboot
+  ///   tripwire). Pre-snapshot agents answer 404 — callers fall back to
+  ///   the /metrics + /sysstats pair.
   /// /health (v4+) -> {"status":"ok","version":6,"agent_uptime_s":...}
   /// /cronruns (v5+) -> {"version":6,"runs":[{"at","name","exit","dur_s"}]}
   ///   (agent-side run log; missing log file = empty list)
@@ -310,6 +317,34 @@ def read_boot_epoch_s():
     except Exception:
         return 0
 
+def read_snapshot():
+    # One cheap fetch for the alert rails (Lisa, TM-1 follow-up): the
+    # pre-computed trigger inputs AlertRules needs that the agent can see
+    # without shell — disk, load vs nproc, reboot tripwire — in a single
+    # instant /proc scan (no 0.5s cpu sample, no subprocess). Anything the
+    # agent cannot see (failed units, brute force, kernel lines) stays on
+    # the SSH sweep; absent keys mean "unknown", never "healthy".
+    try:
+        la = read_loadavg()
+    except Exception:
+        la = [0.0, 0.0, 0.0]
+    try:
+        with open('/proc/uptime') as f:
+            up_s = int(float(f.read().split()[0]))
+    except Exception:
+        up_s = 0
+    try:
+        mem = read_mem_detail()
+    except Exception:
+        mem = {'total_mb': 0, 'avail_mb': 0}
+    return {'disk': round(read_disk(), 3),
+            'load1': round(la[0], 2), 'load5': round(la[1], 2),
+            'load15': round(la[2], 2), 'nproc': read_nproc(),
+            'uptime_s': up_s, 'boot_epoch_s': read_boot_epoch_s(),
+            'mem_total_mb': mem.get('total_mb', 0),
+            'mem_avail_mb': mem.get('avail_mb', 0),
+            'agent_uptime_s': int(time.time() - START_TIME)}
+
 def _run_tail(argv, timeout=5):
     try:
         p = subprocess.run(argv, capture_output=True, text=True,
@@ -484,6 +519,9 @@ class H(BaseHTTPRequestHandler):
                     'gpu': read_gpu(),
                     'agent_uptime_s': int(time.time() - START_TIME),
                     'nproc': read_nproc(), 'boot_epoch_s': read_boot_epoch_s()}
+        elif path == '/alerts/snapshot':
+            body = {'version': AGENT_VERSION,
+                    'snapshot': read_snapshot()}
         elif path == '/health':
             body = {'status': 'ok', 'version': AGENT_VERSION,
                     'agent_uptime_s': int(time.time() - START_TIME)}
@@ -1191,6 +1229,32 @@ WantedBy=multi-user.target
       final body = await resp.transform(utf8.decoder).join();
       hc.close();
       return jsonDecode(body) as Map<String, dynamic>;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// GET http://host:9108/alerts/snapshot -> pre-computed alert trigger
+  /// inputs (v6 additive, Lisa) or null. Null covers unreachable /
+  /// timeout / non-200 / pre-snapshot-agent 404 — pair with the
+  /// `/metrics` + `/sysstats` fallback when the caller must distinguish
+  /// "agent down" from "agent too old". Token resolution matches [fetch].
+  Future<Map<String, dynamic>?> fetchAlertSnapshot(String host,
+      {String? agentToken, String? serverId}) async {
+    try {
+      agentToken = await _resolveAgentToken(agentToken, serverId);
+      final hc = HttpClient()..connectionTimeout = const Duration(seconds: 5);
+      final req =
+          await hc.get(host, agentPort, kAlertSnapshotPath);
+      _applyAgentToken(req, agentToken);
+      final resp = await req.close().timeout(const Duration(seconds: 8));
+      if (resp.statusCode != 200) return null;
+      final body = await resp.transform(utf8.decoder).join();
+      hc.close();
+      final map = jsonDecode(body);
+      if (map is! Map<String, dynamic>) return null;
+      parseAlertSnapshot(map);
+      return (map['snapshot'] as Map).cast<String, dynamic>();
     } catch (_) {
       return null;
     }
