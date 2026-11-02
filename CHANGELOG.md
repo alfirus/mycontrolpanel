@@ -8,6 +8,13 @@ releases are cut as Git tags `v<name>` via `.github/workflows/release.yml`
 ## [Unreleased]
 
 ### Added
+- Alert reliability harness + SLOs (Nadia, Beta.2 instrumentation):
+  `lib/services/alert_reliability.dart` (pure-Dart lifecycle tracking
+  scheduled/executed/notified/dismissed, latency, drops, agent CPU/mem
+  samples, frozen SLOs: 99% within 5 min, <1% drops, p95 <2 s tick,
+  p95 <50 MB agent) with `test/alert_reliability_test.dart` and
+  `docs/specs/alert-reliability-slos.md`. No behavior change to the
+  shipping tick; no new dependencies.
 - Beta exit + GTM readiness (Sofia, docs/decision only — no behavior
   change): `docs/beta-done-checklist.md` (beta.1 DONE list, Burhanah
   sign-off block), decision `004-tray-build-vs-defer.md` (owner call:
