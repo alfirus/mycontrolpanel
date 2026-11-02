@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 /// Deterministic fakes behind the MCP_MOCKS flag. No network, no secrets,
 /// no plugins — safe for widget tests, UI previews, and screenshots.
 library mock_services;

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 /// Log failure classifier — lightweight model flagging errors, brute-force
 /// SSH attempts, and kernel issues (Log Tail + Security Watch).
 ///

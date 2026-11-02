@@ -53,3 +53,7 @@ ios/Podfile.lock
 # macOS / Xcode user state
 macos/Flutter/ephemeral/
 **/xcuserdata/
+
+# Beta release gate outputs (generated in CI, never committed)
+release-proof.json
+dist/

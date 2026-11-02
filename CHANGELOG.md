@@ -12,6 +12,15 @@ releases are cut as Git tags `v<name>` via `.github/workflows/release.yml`
   change): `docs/project/tray-mode-plan.md` (WBS TM-1…TM-8, critical
   path, RACI, top-5 risks), roadmap Phase 2b exit gate (`v1.0.0-beta.2`),
   closed-app architecture (§8 of `docs/design/05-background-alerting.md`).
+- Beta verifiable release gate (Burhanah): stdlib-only
+  `tool/verify_release.py` (version==CHANGELOG==tag, 3 fresh platform
+  assets + SHA256SUMS, flutter test + agent pytest re-run, consent/Sentry
+  default-off pins, MIT headers) emitting `release-proof.json`; required
+  `verify-gate` job in `release.yml` blocks publish on HOLD; gate + waiver
+  rules in `docs/release-gates.md` (owner waiver via Sofia only).
+- Agent install-contract pytest suite (`agent/tests/`): port :9108, unit
+  markers, installer defaults, app/payload endpoints.
+- SPDX-MIT headers on all `lib/**/*.dart` (pinned by gate C6).
 - README real-vs-roadmap status matrix (live vs UI-ready per capability).
 - Launch landing copy draft (`docs/launch.md`): hero, features, pricing tiers.
 - Sales one-pager (`docs/sales-one-pager.md`): use cases + objection handling.

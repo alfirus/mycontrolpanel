@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import '../models/mock_data.dart';
 
 /// Unified CI/CD timeline: GitHub Actions runs + GitLab pipelines.
