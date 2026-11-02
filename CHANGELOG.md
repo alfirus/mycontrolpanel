@@ -8,6 +8,13 @@ releases are cut as Git tags `v<name>` via `.github/workflows/release.yml`
 ## [Unreleased]
 
 ### Added
+- Alert reliability harness + SLOs (Nadia, Beta.2 instrumentation):
+  `lib/services/alert_reliability.dart` (pure-Dart lifecycle tracking
+  scheduled/executed/notified/dismissed, latency, drops, agent CPU/mem
+  samples, frozen SLOs: 99% within 5 min, <1% drops, p95 <2 s tick,
+  p95 <50 MB agent) with `test/alert_reliability_test.dart` and
+  `docs/specs/alert-reliability-slos.md`. No behavior change to the
+  shipping tick; no new dependencies.
 - User docs + store-copy pack (Ain — background-alerting user guide):
   new `docs/user/background-alerting.md` (cadence, battery limits,
   consent default-OFF, stale banners, thresholds, troubleshooting —
