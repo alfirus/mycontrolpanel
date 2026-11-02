@@ -32,6 +32,28 @@ flutter run -d macos   # or windows / linux
 # open a Server Details screen, screenshot to docs/screenshots/server-details.png
 ```
 
+## Store-ready visual pack v1
+
+Series-conditioned renders for store listings, built from the brand tokens
+in `lib/theme/` and Kira's alert tokens — every honesty label burned in
+(DEMO banners, background opt-in OFF, tray as Beta.2 plan):
+
+| Pack | Preview |
+|---|---|
+| Feature graphic (Play 1024×500) | ![Feature graphic](assets/store/feature-graphic-1024x500.png) |
+| Phone: dashboard dark | ![Dashboard dark](assets/store/phone-01-dashboard-dark-1080x1920.png) |
+| Phone: alerts + consent + staleness | ![Alerts consent](assets/store/phone-04-alerts-consent-stale-1080x1920.png) |
+| Desktop: notification + actions | ![Notification](assets/store/desktop-08-notification-1600x1000.png) |
+
+Full set (6 phone + 2 desktop + hero): [`assets/store/`](assets/store/) ·
+manifest + brand rationale:
+[`docs/store/visual-pack-manifest.md`](docs/store/visual-pack-manifest.md) ·
+1-page sales one-pager: [`docs/sales-kit/one-pager.pdf`](docs/sales-kit/one-pager.pdf)
+· store metadata placeholders: [`fastlane/metadata/`](fastlane/metadata/).
+Renders are synthetic and MUST be re-captured from the release-candidate
+commit with a real connected server before any store submit
+(see `docs/store/screenshot-checklist.md`).
+
 ## What works today vs what's next
 
 | Security findings | ◻️ UI-ready | Screens + models exist; API wiring on roadmap |
