@@ -77,6 +77,7 @@ dev_dependencies:
 # runnable under `dart run`; see bin/headless_check.dart).
 executables:
   headless_check: headless_check
+  mycontrolpanel-check: mycontrolpanel_check
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
