@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  MyControlPanel headless poll — macOS LaunchAgent template (TM-1, Lina).
+  Per-user agent (~/Library/LaunchAgents/), NEVER a system-wide daemon, StartInterval
+  900 s. Managed lifecycle: Zara owns (t_13eee02b); menu-bar helper scope:
+  Elizabeth owns (t_a0fe4895). Install: scripts/headless/install-macos.sh.
+  Replace @INSTALL_DIR@ at install time (e.g. /Applications/MyControlPanel.app/Contents/MacOS).
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.mycontrolpanel.poll</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@INSTALL_DIR@/mycontrolpanel</string>
+    <string>--poll-headless</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>900</integer>
+  <key>RunAtLoad</key>
+  <true/>
+</dict>
+</plist>
