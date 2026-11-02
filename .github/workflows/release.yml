@@ -124,10 +124,15 @@ jobs:
       - name: Build release
         shell: bash
         run: |
+          # Bake the rollout track into the app for Sentry release-health
+          # (ErrorReporting.resolveEnvironment): beta tags -> beta,
+          # clean tags -> stable, PR/local builds -> no define -> development.
+          TAG="${{ steps.ver.outputs.version }}"; TRACK=stable
+          if [[ "$TAG" == *-* ]]; then TRACK=beta; fi
           if [ "${{ matrix.os }}" = "android" ]; then
-            flutter build apk --release
+            flutter build apk --release --dart-define=SENTRY_ENVIRONMENT=$TRACK
           else
-            flutter build ${{ matrix.os }} --release
+            flutter build ${{ matrix.os }} --release --dart-define=SENTRY_ENVIRONMENT=$TRACK
           fi
 
       - name: Sign Windows binaries (Authenticode, when enrolled)
@@ -417,6 +422,31 @@ jobs:
           # the download step).
           sha256sum mycontrolpanel-* *.cyclonedx.json build-info-*.json > SHA256SUMS.txt
           cat SHA256SUMS.txt
+
+      - name: Record Sentry release (best-effort)
+        # Deploy observability (Aisyah, DevOps): registers the tag with
+        # Sentry so release-health (crash-free sessions/users, adoption)
+        # starts tracking the moment the GitHub Release publishes. Skips
+        # silently until the owner adds SENTRY_AUTH_TOKEN + SENTRY_ORG
+        # (repo or release-beta/release-stable environment secrets — see
+        # docs/observability-dashboards.md), and never fails the train
+        # (continue-on-error) when Sentry is unreachable.
+        continue-on-error: true
+        shell: bash
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
+        run: |
+          if [ -z "$SENTRY_AUTH_TOKEN" ] || [ -z "$SENTRY_ORG" ]; then
+            echo "No Sentry credentials — skipping release record (see docs/observability-dashboards.md)."
+            exit 0
+          fi
+          curl -sS --fail-with-body -X POST \
+            "https://sentry.io/api/0/organizations/$SENTRY_ORG/releases/" \
+            -H "Authorization: Bearer $SENTRY_AUTH_TOKEN" \
+            -H 'Content-Type: application/json' \
+            -d "{\"version\": \"${{ steps.ver.outputs.tag }}\", \"projects\": [\"mycontrolpanel\"]}" \
+          && echo "Sentry release recorded for ${{ steps.ver.outputs.tag }}."
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2

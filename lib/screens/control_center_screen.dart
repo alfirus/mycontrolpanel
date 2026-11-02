@@ -41,6 +41,9 @@ import '../services/desktop_alerts.dart';
 import '../services/ci_sync.dart';
 import '../services/cron_run_tracker.dart';
 import '../services/alert_notifications.dart';
+import '../services/alert_inbox_store.dart';
+import '../theme/alert_tokens.dart';
+import '../widgets/alert_inbox.dart';
 import 'server_details_screen.dart';
 import '../widgets/pitch_card.dart';
 import '../widgets/state_view.dart';
@@ -88,7 +91,8 @@ class ControlCenterScreen extends StatefulWidget {
   State<ControlCenterScreen> createState() => _ControlCenterScreenState();
 }
 
-class _ControlCenterScreenState extends State<ControlCenterScreen> {
+class _ControlCenterScreenState extends State<ControlCenterScreen>
+    with WidgetsBindingObserver {
   int _navIndex = 0;
   int _githubTab = 0;
   String _logFilter = 'ALL';
@@ -112,6 +116,13 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
   Map<String, List<double>> _latHistory = {}; // host -> recent latencies
   Map<String, List<double>> _cpuHistory = {}; // host -> recent cpu 0..1
   int _alertBadge = 0;
+  // Alerts Inbox (Nurul, t_7ba899fe): triage state for the nav-6 inbox tab.
+  // Identity stays on the shared `AlertWatch` seen-set — this screen only
+  // caches the union locally per tick plus snooze + highlight state.
+  InboxFilter _inboxFilter = InboxFilter.all;
+  Set<String> _inboxSeen = {};
+  Map<String, int> _inboxSnoozedMs = {};
+  String? _inboxHighlightKey;
   int _pollTotal = 0; // session agent-poll attempts (#62 Errors KPI)
   int _pollErr = 0; // session agent-poll failures
   List<ServerConnection> _savedServers = [];
@@ -421,10 +432,14 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
         // (AlertNotifications, `notifications` pref) — exactly one desktop
         // toast per fresh batch, never both. Closed-app delivery stays
         // deferred to tray-mode work (DesktopAlerts.closedAppNote).
-        unawaited(BackgroundAlerts.showFresh(fresh));
+        // Notification-tap deep link: fresh keys ride as `mcp://inbox`
+        // payload on both rails; taps land on the inbox tab (highlighted).
+        final freshKeys = keys.difference(seen).take(10).toList();
+        final tapPayload = AlertDeepLink.build(keys: freshKeys);
+        unawaited(BackgroundAlerts.showFresh(fresh, payload: tapPayload));
         if (DesktopAlerts.isSupportedPlatform &&
             await DesktopAlerts.isEnabled()) {
-          unawaited(DesktopAlerts.showFresh(fresh));
+          unawaited(DesktopAlerts.showFresh(fresh, payload: tapPayload));
         } else {
           unawaited(AlertNotifications.showFresh(fresh));
         }
@@ -1263,6 +1278,8 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     super.initState();
     _loadSavedServers().then((_) => _maybeAutoCheckUpdates());
     _refreshBgStaleLabel(); // background-rail staleness line for alerts card
+    _loadInboxState(); // snooze map + notification-tap deep link landing
+    WidgetsBinding.instance.addObserver(this);
     _startAutoRefresh();
     _logTimer = Timer.periodic(const Duration(seconds: 3), (_) {
       if (!mounted) return;
@@ -1276,12 +1293,23 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _logTimer?.cancel();
     _autoTimer?.cancel();
     _chatController.dispose();
     _chatScroll.dispose();
     _logScroll.dispose();
     super.dispose();
+  }
+
+  /// Foreground taps on a notification resume the app: consume the stashed
+  /// deep link and land on the inbox tab (cold starts do this once via
+  /// [_loadInboxState]).
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _consumeTapLink();
+    }
   }
 
   /// Real auto-refresh: honors Settings → auto_refresh + refresh_interval.
@@ -2224,7 +2252,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
     if (_navIndex == 3) return SingleChildScrollView(padding: const EdgeInsets.all(12), child: _appsSegment());
     if (_navIndex == 4) return SingleChildScrollView(padding: const EdgeInsets.all(12), child: _githubSegment());
     if (_navIndex == 5) return SingleChildScrollView(padding: const EdgeInsets.all(12), child: _gitlabSegment());
-    if (_navIndex == 6) return SingleChildScrollView(padding: const EdgeInsets.all(12), child: _alertsSegment());
+    if (_navIndex == 6) return _inboxTab();
     if (_navIndex == 7) return SingleChildScrollView(padding: const EdgeInsets.all(12), child: _deploysSegment());
     if (_navIndex == 8) return SingleChildScrollView(padding: const EdgeInsets.all(12), child: _logsSegment());
     if (_navIndex == 9) return SingleChildScrollView(padding: const EdgeInsets.all(12), child: _metricsSegment());
@@ -3025,6 +3053,179 @@ class _ControlCenterScreenState extends State<ControlCenterScreen> {
         if (compact && data.length > display.length)
           Center(child: Text('+ ${data.length - display.length} more • tap VIEW ALL', style: const TextStyle(fontSize: 10, color: AppColors.textMuted, fontWeight: FontWeight.w600))),
       ]),
+    );
+  }
+
+  /// Alerts Inbox tab (nav 6, Nurul t_7ba899fe): filterable history
+  /// (All/Unread/Critical) over live harvested alerts — or the demo set
+  /// when no servers are saved — with swipe ack/snooze, detail sheet, and
+  /// notification-tap landing. Overview cards keep `_alertsSegment`.
+  Future<void> _loadInboxState() async {
+    final snoozed = await AlertSnooze.load();
+    if (!mounted) return;
+    setState(() => _inboxSnoozedMs = snoozed);
+    await _consumeTapLink();
+  }
+
+  /// Consume a stashed notification-tap payload (cold start or resume):
+  /// land on the inbox tab, highlight the tapped alert, and honor
+  /// ack/snooze actions from the notification buttons. No-op when nothing
+  /// was tapped.
+  Future<void> _consumeTapLink() async {
+    String? pending;
+    try {
+      pending = await AlertDeepLink.consumePending();
+    } catch (_) {}
+    final link = AlertDeepLink.parse(pending);
+    if (link == null) return;
+    if (!mounted) return;
+    setState(() {
+      _navIndex = 6;
+      _inboxHighlightKey = link.keys.isEmpty ? null : link.keys.first;
+      if (link.action == AlertNotificationActions.snooze1h &&
+          link.keys.isNotEmpty) {
+        _inboxSnoozedMs = AlertSnooze.snooze(
+          _inboxSnoozedMs,
+          link.keys.toSet(),
+          DateTime.now().millisecondsSinceEpoch,
+        );
+        unawaited(AlertSnooze.save(_inboxSnoozedMs));
+      }
+      if (link.action == AlertNotificationActions.acknowledge &&
+          link.keys.isNotEmpty) {
+        _inboxSeen = {..._inboxSeen, ...link.keys};
+        unawaited(AlertWatch.markSeen(_inboxSeen));
+      }
+    });
+  }
+
+  /// Live harvested alerts, or the demo set mapped onto `AlertEntry` when
+  /// no servers are saved (demo never mixes with real rows).
+  List<AlertEntry> get _inboxSource {
+    if (_useRealServers) return _realAlerts;
+    return mockAlerts.map((a) {
+      final parts = a.source.split('•');
+      final host = parts.length > 1 ? parts.last.trim() : 'demo';
+      return AlertEntry(
+        title: a.title,
+        source: a.source,
+        severity: a.severity,
+        serverId: 'demo',
+        serverName: host.isEmpty ? 'demo' : host,
+        status: a.status,
+      );
+    }).toList();
+  }
+
+  /// Rows are stale when the background rail itself is stale: last check
+  /// older than 2 poll intervals without re-fire (spec §4.4). The
+  /// foreground tick re-fires live rows every poll, so only a dead rail
+  /// sinks the list — never an arbitrary timer.
+  Future<Set<String>> _inboxStaleKeys(List<AlertEntry> source) async {
+    try {
+      final last = await BackgroundAlerts.readLastCheck();
+      if (last == null) return {};
+      final ageMs =
+          DateTime.now().millisecondsSinceEpoch - last.millisecondsSinceEpoch;
+      if (ageMs <=
+          2 * BackgroundAlerts.pollFrequency.inMilliseconds) {
+        return {};
+      }
+      return source
+          .map((a) => AlertWatch.keyFor('alert', a.title, a.serverName))
+          .toSet();
+    } catch (_) {
+      return {};
+    }
+  }
+
+  Widget _inboxTab() {
+    final source = _inboxSource;
+    final loading = _alertLoading.isNotEmpty && source.isEmpty;
+    return FutureBuilder<Set<String>>(
+      future: _inboxStaleKeys(source),
+      builder: (context, snap) {
+        final items = buildInboxItems(
+          alerts: source,
+          seenKeys: _inboxSeen,
+          snoozedMs: _inboxSnoozedMs,
+          staleKeys: snap.data ?? {},
+        );
+        return SingleChildScrollView(
+          padding: const EdgeInsets.all(12),
+          child: AlertsInboxView(
+            items: items,
+            filter: _inboxFilter,
+            onFilterChanged: (f) => setState(() => _inboxFilter = f),
+            loading: loading,
+            error: _alertError,
+            staleLabel: _bgStaleLabel,
+            highlightedKey: _inboxHighlightKey,
+            onAck: _ackInboxItem,
+            onSnooze: _snoozeInboxItem,
+            onOpen: _openInboxItem,
+            onRetry: () async {
+              setState(() {
+                _serverAlerts.clear();
+                _alertError = null;
+              });
+              await _pollAlerts();
+            },
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _ackInboxItem(InboxItem item) async {
+    final out = await AlertAck.ack(_inboxSeen, {item.key});
+    if (!mounted) return;
+    setState(() {
+      _inboxSeen = out;
+      _alertBadge = _alertBadge > 0 ? _alertBadge - 1 : 0;
+    });
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text(AlertCopy.ackConfirm),
+        duration: Duration(seconds: 2),
+      ),
+    );
+  }
+
+  Future<void> _snoozeInboxItem(InboxItem item) async {
+    final out = AlertSnooze.snooze(
+      _inboxSnoozedMs,
+      {item.key},
+      DateTime.now().millisecondsSinceEpoch,
+    );
+    await AlertSnooze.save(out);
+    if (!mounted) return;
+    setState(() => _inboxSnoozedMs = out);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text(AlertCopy.snoozeConfirm),
+        duration: Duration(seconds: 2),
+      ),
+    );
+  }
+
+  void _openInboxItem(InboxItem item) {
+    String? serverId;
+    for (final c in _savedServers) {
+      if (c.name == item.entry.serverName || c.id == item.entry.serverId) {
+        serverId = c.id;
+        break;
+      }
+    }
+    showAlertDetailSheet(
+      context,
+      item: item,
+      staleLabel: _bgStaleLabel,
+      onAck: () => _ackInboxItem(item),
+      onSnooze: () => _snoozeInboxItem(item),
+      onOpenHost: serverId == null ? null : () => _openServerDetails(serverId!),
     );
   }
 
