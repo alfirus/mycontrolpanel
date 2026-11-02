@@ -1,8 +1,8 @@
 # Release Checklist
 
-How to cut a release. Every `v*` tag builds macOS / Windows / Linux
-artifacts via `.github/workflows/release.yml` and must pass this list
-first. The full v1 acceptance bar (no MOCK-tab ships as live, credential
+How to cut a release. Every `v*` tag builds macOS / Windows / Linux /
+Android artifacts via `.github/workflows/release.yml` and must pass this
+list first. The full v1 acceptance bar (no MOCK-tab ships as live, credential
 rules) is the release gate in `docs/release-gate.md` (PR #30, in review)
 — this page is the mechanical runbook; the gate is the quality bar.
 
