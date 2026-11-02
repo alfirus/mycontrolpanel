@@ -40,6 +40,7 @@ jobs:
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         with:
           channel: stable
+          flutter-version: '3.47.9' # pinned — bump procedure in docs/release-process.md
       - name: Install dependencies
         run: flutter pub get
       - name: Static analysis
@@ -49,6 +50,9 @@ jobs:
       - name: Record pubspec version
         shell: bash
         run: grep '^version:' pubspec.yaml
+      - name: SBOM self-check (lockfile parses, no network)
+        shell: bash
+        run: python3 tool/sbom.py --lockfile pubspec.lock --check
 
   windows:
     name: build windows
@@ -65,6 +69,7 @@ jobs:
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         with:
           channel: stable
+          flutter-version: '3.47.9' # pinned — bump procedure in docs/release-process.md
       - name: Install dependencies
         run: flutter pub get
       - name: Build Windows release (unsigned smoke build)
@@ -91,6 +96,7 @@ jobs:
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         with:
           channel: stable
+          flutter-version: '3.47.9' # pinned — bump procedure in docs/release-process.md
       - name: Install dependencies
         run: flutter pub get
       - name: Build macOS release (unsigned, no notarization)
@@ -122,6 +128,7 @@ jobs:
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         with:
           channel: stable
+          flutter-version: '3.47.9' # pinned — bump procedure in docs/release-process.md
       - name: Install dependencies
         run: flutter pub get
       - name: Build Android APK (debug-signed smoke build)
@@ -148,6 +155,7 @@ jobs:
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         with:
           channel: stable
+          flutter-version: '3.47.9' # pinned — bump procedure in docs/release-process.md
       - name: Install dependencies
         run: flutter pub get
       - name: Build iOS release without codesigning
