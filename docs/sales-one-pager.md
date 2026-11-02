@@ -65,6 +65,18 @@ screens AND say "UI-ready, wiring on roadmap" in the same breath.
 4. On-call: "The 3 a.m. disk-full finds you at 11 p.m. instead."
 5. Security-conscious SME: "Every credential leaves your notes for the OS keychain."
 
+## Break-even note (Finance, 2026-11-02)
+
+Inputs: `docs/finance/BUDGET-beta.md` + workbook
+`assets/templates/beta-operating-budget.xlsx`. Per
+`docs/decisions/002-commercial-packaging.md` there are no paid tiers through
+v1-ship, so beta break-even = donations vs amortized launch fees: ~11 USD/mo
+base (136/yr), ~2 USD/mo lean, ~19 USD/mo worst. Monthly burn is 0 while
+free-tier guardrails hold. Quote NO prices or SLAs on calls — log interest
+for post-v1 and point pricing questions at Syafiqah, whose tier math must
+clear the cost floor in `docs/finance/pricing-cost-floor.md` plus this
+amortized share.
+
 ## Handoff
 
 Questions on messaging → Naura (CMO). Anything needing a demo build or
