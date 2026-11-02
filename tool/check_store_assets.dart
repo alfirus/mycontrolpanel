@@ -69,7 +69,11 @@ void main() {
     }
   }
 
-  for (final pdf in ['docs/sales-kit/one-pager.pdf']) {
+  // The one-pager ships in the stacked PR2 (docs/sales-kit/); on trees
+  // without that dir (PR1) the PDF check is skipped, not failed.
+  final salesKit = Directory('docs/sales-kit');
+  final pdfs = salesKit.existsSync() ? ['docs/sales-kit/one-pager.pdf'] : <String>[];
+  for (final pdf in pdfs) {
     final f = File(pdf);
     if (!f.existsSync()) {
       fail('missing $pdf');
