@@ -8,6 +8,14 @@ releases are cut as Git tags `v<name>` via `.github/workflows/release.yml`
 ## [Unreleased]
 
 ### Added
+- Deploy observability, phase 3 (Aisyah — DevOps): Sentry release-health
+  (`ErrorReporting.buildRelease`/`resolveEnvironment` + `release`/
+  `environment` on init; `SENTRY_ENVIRONMENT` baked by tag builds —
+  beta tags report `beta`, stable tags `production`, rest `development`),
+  opt-in 24 h deploy heartbeat (`ReleaseHealth`, `test/release_health_test.dart`),
+  best-effort CI Sentry-release record, `docs/observability-dashboards.md`
+  (crash-free SLO 99.5%, rollout census, alert routing), runbooks
+  `release.md`/`incident.md` (+`rollout.md` index), startup wiring in `main()`.
 - Staged rollout, phase 2 (Aisyah — DevOps): beta/stable tracks in the
   release train — `release-beta` auto-publishes pre-release tags while
   clean `vX.Y.Z` tags pause at the `release-stable` environment for owner

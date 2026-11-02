@@ -2,11 +2,13 @@
 import 'dart:io' show exit;
 
 import 'package:flutter/material.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'services/app_lock.dart';
 import 'services/background_alerts.dart';
 import 'services/desktop_alerts.dart';
 import 'services/error_reporting.dart';
 import 'background/headless_state.dart';
+import 'services/release_health.dart';
 import 'headless.dart';
 import 'theme/app_theme.dart';
 import 'screens/control_center_screen.dart';
@@ -41,7 +43,32 @@ Future<void> main([List<String> args = const []]) async {
     if (outcome == AppInstanceOutcome.secondarySignaled) exit(0);
     instanceGuard = guard;
   } catch (_) {}
-  await ErrorReporting.initIfOptedIn();
+  // Sentry release-health (Aisyah, DevOps): tag builds bake the track in
+  // via --dart-define=SENTRY_ENVIRONMENT (release.yml); everything else
+  // resolves to `development`. Guarded inside — never blocks launch.
+  const sentryEnv = String.fromEnvironment('SENTRY_ENVIRONMENT');
+  var sentryRelease = '';
+  try {
+    final info = await PackageInfo.fromPlatform();
+    sentryRelease = ErrorReporting.buildRelease(
+      packageName: info.packageName,
+      version: info.version,
+      buildNumber: info.buildNumber,
+    );
+  } catch (_) {}
+  await ErrorReporting.initIfOptedIn(
+    release: sentryRelease,
+    environment: sentryEnv,
+  );
+  // Deploy heartbeat: at most one info event per install per 24 h so the
+  // rollout census (docs/observability-dashboards.md) sees live releases.
+  // Opt-in + interval gated inside; failures are silent by design.
+  try {
+    await ReleaseHealth.reportAppStart(
+      release: sentryRelease,
+      environment: ErrorReporting.resolveEnvironment(sentryEnv),
+    );
+  } catch (_) {}
   // Mobile background alerting (beta.1): re-register the WorkManager
   // dispatcher + periodic task when the user opted in. Desktop no-ops
   // (guarded inside); failures never block launch.
