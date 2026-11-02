@@ -77,9 +77,12 @@ dev_dependencies:
 # runnable under `dart run`; see bin/headless_check.dart). `mcpoll` is the
 # TM-1 follow-up operator poller CLI (Lisa): real agent-HTTP fetch against
 # :9108, same frozen pipeline, no UI/vault/prefs (see bin/mcpoll.dart).
+# `agent_check` is the Beta.2 operability companion (SLO report +
+# log rotation; Nadia).
 executables:
   headless_check: headless_check
   mcpoll: mcpoll
+  agent_check: agent_check
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
