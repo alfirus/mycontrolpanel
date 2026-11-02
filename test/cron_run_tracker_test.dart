@@ -152,13 +152,13 @@ void main() {
     });
   });
 
-  group('agent v5 contract', () {
-    test('agentVersion is 5', () {
-      expect(AgentService.agentVersion, 5);
+  group('agent v6 contract (cronruns preserved)', () {
+    test('agentVersion is 6', () {
+      expect(AgentService.agentVersion, 6);
     });
 
-    test('script declares AGENT_VERSION = 5', () {
-      expect(AgentService.agentScript.contains('AGENT_VERSION = 5'), isTrue);
+    test('script declares AGENT_VERSION = 6', () {
+      expect(AgentService.agentScript.contains('AGENT_VERSION = 6'), isTrue);
     });
 
     test('script serves /cronruns from the run log', () {

@@ -1,0 +1,115 @@
+name: device-lab
+
+# Guarded device-lab lane (Balqis QA, Beta.2 TM-6): SSH-live hosts, real OS
+# schedulers, real toasts. Manual only — never runs on PRs or pushes.
+# Fail-closed: without lab secrets the lane stops after the CI-correlate
+# step and reports DRY-RUN; live rows are executed by the matrix in
+# docs/qa/test-plan-beta.md section 3 and recorded in the GO/HOLD pack.
+
+on:
+  workflow_dispatch:
+    inputs:
+      lane:
+        description: 'Matrix lane to execute'
+        required: true
+        default: 'dry-run'
+        type: choice
+        options:
+          - dry-run
+          - mobile-consent
+          - desktop-windows
+          - desktop-linux
+          - desktop-macos
+          - full
+      confirm:
+        description: "Type I-UNDERSTAND-MANUAL to run (human approval gate)"
+        required: true
+        default: ''
+      lab_target:
+        description: 'Lab target host (user@host), live lanes only'
+        required: false
+        default: ''
+
+# Least privilege: the lane reads the tree and runs tests; live SSH uses a
+# dedicated secret that is never echoed (fail-closed when absent).
+permissions:
+  contents: read
+
+concurrency:
+  group: device-lab-${{ inputs.lane }}
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    name: approval gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Require human confirmation
+        shell: bash
+        run: |
+          if [ "${{ inputs.confirm }}" != "I-UNDERSTAND-MANUAL" ]; then
+            echo "::error::device-lab is a manual lane: re-dispatch with confirm=I-UNDERSTAND-MANUAL."
+            exit 1
+          fi
+          echo "Manual lane approved: ${{ inputs.lane }}."
+
+  ci-correlate:
+    name: CI correlate (alerting matrix)
+    needs: guard
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Setup Flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+      - name: Install dependencies
+        run: flutter pub get
+      - name: Run alerting-matrix harness (CI correlate for the lab rows)
+        run: flutter test test/alerting_matrix_test.dart
+
+  live:
+    name: live lane (${{ inputs.lane }})
+    needs: ci-correlate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      LAB_SSH_PRIVATE_KEY: ${{ secrets.LAB_SSH_PRIVATE_KEY }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Fail closed without lab secrets (dry-run receipt)
+        shell: bash
+        run: |
+          if [ "${{ inputs.lane }}" = "dry-run" ]; then
+            echo "DRY-RUN lane: CI correlate green; live rows stay manual per docs/qa/test-plan-beta.md section 3."
+            exit 0
+          fi
+          if [ -z "$LAB_SSH_PRIVATE_KEY" ]; then
+            echo "::notice::No LAB_SSH_PRIVATE_KEY secret: live lane '${{ inputs.lane }}' stops here (fail closed). Record DL rows manually; see docs/qa/test-plan-beta.md section 3 and docs/qa/go-hold-pack-beta.md."
+            exit 0
+          fi
+          if [ -z "${{ inputs.lab_target }}" ]; then
+            echo "::error::Live lane needs lab_target (user@host)."
+            exit 1
+          fi
+      - name: Live probe (lab_target only, secret never echoed)
+        if: ${{ inputs.lane != 'dry-run' && inputs.lab_target != '' }}
+        shell: bash
+        run: |
+          if [ -z "$LAB_SSH_PRIVATE_KEY" ]; then
+            echo "No lab secret configured — skipping live probe (fail closed)."
+            exit 0
+          fi
+          echo "Live lane '${{ inputs.lane }}' against lab target: manual DL rows apply."
+          echo "Execute docs/qa/test-plan-beta.md section 3 for this lane and file receipts in docs/qa/go-hold-pack-beta.md."
