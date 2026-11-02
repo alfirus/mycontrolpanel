@@ -57,3 +57,13 @@ macos/Flutter/ephemeral/
 # Beta release gate outputs (generated in CI, never committed)
 release-proof.json
 dist/
+
+# Release signing material (owner-held; CI materializes these from the
+# `release-signing` GitHub Environment — see docs/release-signing.md).
+# Never commit keystores or passwords; the repo is public.
+android/key.properties
+android/*.jks
+android/*.keystore
+*.p12
+*.pfx
+*.mobileprovision

@@ -8,6 +8,16 @@ releases are cut as Git tags `v<name>` via `.github/workflows/release.yml`
 ## [Unreleased]
 
 ### Added
+- Release-train hardening, phase 1 (Aisyah — DevOps): pinned toolchains
+  (`flutter-version: 3.47.9` in all six workflows, Python 3.12, Temurin 17;
+  bump procedure in `docs/release-process.md`), CycloneDX 1.5 SBOM
+  (`tool/sbom.py`, stdlib-only; PR-gated via `build-matrix`, published +
+  checksummed on tags), per-OS `build-info-<os>.json` toolchain receipts,
+  Android APK published on tags, conditional code signing (Authenticode /
+  Developer ID / Play keystore via the `release-signing` environment —
+  unenrolled builds ship unsigned as before; see
+  `docs/release-signing.md`), and per-builder digest sidecars so Burhanah's
+  C2 gate checks builder-produced hashes without an owner waiver.
 - Adaptive anomaly scoring (Farah — ML, on-device): agent v6 additive
   `GET /anomaly` (stdlib-only EWMA + rolling variance with time-of-day
   buckets; score 0–100 + reason; Low/Med/High gate), offline eval harness

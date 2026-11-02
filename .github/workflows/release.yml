@@ -1,12 +1,18 @@
 name: release
 
-# Alpha/beta/stable desktop releases.
+# Alpha/beta/stable releases (desktop + Android).
 # Cut one with:  git tag v1.0.0-alpha.1 && git push origin v1.0.0-alpha.1
 # Produces the exact asset names the in-app updater looks for:
 #   mycontrolpanel-macos-<version>.zip
 #   mycontrolpanel-windows-<version>.zip
 #   mycontrolpanel-linux-<version>.tar.gz
-#   SHA256SUMS.txt
+#   mycontrolpanel-android-<version>.apk   (extra: sideload / store track)
+#   SHA256SUMS.txt                          (covers every asset above plus
+#   sbom-<version>.cyclonedx.json            the SBOM and build-info receipts)
+#   build-info-<os>.json                    (toolchain provenance per OS)
+# Code signing is conditional: steps run only after the owner enrolls
+# certificates in the `release-signing` GitHub Environment — see
+# docs/release-signing.md. Unenrolled builds ship unsigned, as before.
 
 on:
   push:
@@ -40,6 +46,8 @@ jobs:
             runner: windows-latest
           - os: linux
             runner: ubuntu-latest
+          - os: android
+            runner: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -56,12 +64,42 @@ jobs:
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         with:
           channel: stable
+          flutter-version: '3.47.9' # pinned — bump procedure in docs/release-process.md
 
       - name: Install Linux dependencies
         if: matrix.os == 'linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libstdc++-12-dev libsecret-1-dev libnotify-dev
+
+      - name: Setup Java (Android leg)
+        if: matrix.os == 'android'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Materialize Play keystore (Android, when enrolled)
+        # Runs ONLY after the owner enrolls the keystore in the
+        # `release-signing` environment (docs/release-signing.md). Absent
+        # secrets -> skipped -> android/app/build.gradle.kts falls back to
+        # the debug key, exactly as before.
+        if: matrix.os == 'android' && secrets.ANDROID_KEYSTORE_B64 != ''
+        shell: bash
+        env:
+          ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
+        run: |
+          echo "$ANDROID_KEYSTORE_B64" | base64 -d > "$GITHUB_WORKSPACE/android/release.jks"
+          cat > "$GITHUB_WORKSPACE/android/key.properties" <<EOF
+          storeFile=release.jks
+          storePassword=$ANDROID_STORE_PASSWORD
+          keyAlias=$ANDROID_KEY_ALIAS
+          keyPassword=$ANDROID_KEY_PASSWORD
+          EOF
+          echo "Play keystore materialized; release build will sign with it."
 
       - name: Install dependencies
         run: flutter pub get
@@ -72,8 +110,63 @@ jobs:
       - name: Tests
         run: flutter test
 
+      - name: SBOM self-check (lockfile parses)
+        shell: bash
+        run: python3 tool/sbom.py --lockfile pubspec.lock --check
+
       - name: Build release
-        run: flutter build ${{ matrix.os }} --release
+        shell: bash
+        run: |
+          if [ "${{ matrix.os }}" = "android" ]; then
+            flutter build apk --release
+          else
+            flutter build ${{ matrix.os }} --release
+          fi
+
+      - name: Sign Windows binaries (Authenticode, when enrolled)
+        # Owner-enrolled only (docs/release-signing.md): signs the runner
+        # output BEFORE packaging so the published zip carries signatures.
+        # No WINDOWS_CERT_B64 secret -> skipped, ships unsigned as before.
+        if: matrix.os == 'windows' && secrets.WINDOWS_CERT_B64 != ''
+        shell: pwsh
+        env:
+          WINDOWS_CERT_B64: ${{ secrets.WINDOWS_CERT_B64 }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          $pfx = "$env:RUNNER_TEMP/release-cert.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERT_B64))
+          $sdk = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Directory |
+            Sort-Object Name -Descending | Select-Object -First 1
+          $signtool = Join-Path $sdk.FullName 'x64\signtool.exe'
+          if (-not (Test-Path $signtool)) { throw "signtool not found under $($sdk.FullName)" }
+          Get-ChildItem build/windows/x64/runner/Release -Include *.exe,*.dll -Recurse | ForEach-Object {
+            & $signtool sign /fd SHA256 /f $pfx /p $env:WINDOWS_CERT_PASSWORD /tr http://timestamp.digicert.com /td SHA256 $_.FullName
+          }
+          Remove-Item $pfx -Force
+
+      - name: Sign macOS app (Developer ID, when enrolled)
+        # Owner-enrolled only (docs/release-signing.md): codesign + notarize
+        # BEFORE the ditto packaging step below. Skipped until enrollment.
+        if: matrix.os == 'macos' && secrets.APPLE_CERT_B64 != ''
+        shell: bash
+        env:
+          APPLE_CERT_B64: ${{ secrets.APPLE_CERT_B64 }}
+          APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_NOTARY_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_NOTARY_PASSWORD: ${{ secrets.APPLE_NOTARY_PASSWORD }}
+        run: |
+          echo "$APPLE_CERT_B64" | base64 -d > "$RUNNER_TEMP/release-cert.p12"
+          security create-keychain -p actions build.keychain
+          security import "$RUNNER_TEMP/release-cert.p12" -k build.keychain \
+            -P "$APPLE_CERT_PASSWORD" -T /usr/bin/codesign
+          security list-keychains -s build.keychain
+          /usr/bin/codesign --deep --force --options runtime --sign \
+            "Developer ID Application" \
+            build/macos/Build/Products/Release/my_control_panel.app
+          /usr/bin/codesign --verify --verbose=2 \
+            build/macos/Build/Products/Release/my_control_panel.app
+          rm -f "$RUNNER_TEMP/release-cert.p12"
 
       - name: Package macOS
         if: matrix.os == 'macos'
@@ -97,11 +190,55 @@ jobs:
           tar -czf "$RUNNER_TEMP/mycontrolpanel-linux-${{ steps.ver.outputs.version }}.tar.gz" \
             -C build/linux/x64/release bundle
 
+      - name: Package Android
+        if: matrix.os == 'android'
+        shell: bash
+        run: |
+          cp build/app/outputs/flutter-apk/app-release.apk \
+            "$RUNNER_TEMP/mycontrolpanel-android-${{ steps.ver.outputs.version }}.apk"
+          ls -la "$RUNNER_TEMP/mycontrolpanel-android-${{ steps.ver.outputs.version }}.apk"
+
+      - name: Record asset digest (builder sidecar for the gate)
+        # Burhanah's beta gate (verify-gate job) checks SHA256SUMS.txt
+        # against the downloaded assets, but that file is only assembled in
+        # publish — which runs AFTER the gate. So each builder attests its
+        # own asset here; the gate concatenates these sidecars into
+        # SHA256SUMS.txt before running tool/verify_release.py, and C2 then
+        # checks builder-produced digests on a different runner. Without
+        # this, C2 could never pass without an owner waiver.
+        shell: bash
+        run: |
+          cd "$RUNNER_TEMP"
+          sha256sum "mycontrolpanel-${{ matrix.os }}-${{ steps.ver.outputs.version }}."* > "mycontrolpanel-${{ matrix.os }}-${{ steps.ver.outputs.version }}.asset.sha256"
+          cat "mycontrolpanel-${{ matrix.os }}-${{ steps.ver.outputs.version }}.asset.sha256"
+
+      - name: Record build provenance
+        # Per-OS toolchain receipt: published + checksummed with the release
+        # so any artifact can be traced to its exact builder. C2 in
+        # tool/verify_release.py ignores these extras (it pins only the
+        # three updater-expected desktop assets).
+        shell: bash
+        run: |
+          FLUTTER_VER="$(flutter --version 2>/dev/null | head -1 | tr -d '\n')"
+          cat > "$RUNNER_TEMP/build-info-${{ matrix.os }}.json" <<EOF
+          {
+            "os": "${{ matrix.os }}",
+            "tag": "${{ steps.ver.outputs.tag }}",
+            "commit": "${{ github.sha }}",
+            "toolchain": "$FLUTTER_VER",
+            "runner": "${{ runner.os }} ${{ runner.arch }}",
+            "signed": "${{ secrets.WINDOWS_CERT_B64 != '' || secrets.APPLE_CERT_B64 != '' || secrets.ANDROID_KEYSTORE_B64 != '' }}"
+          }
+          EOF
+          cat "$RUNNER_TEMP/build-info-${{ matrix.os }}.json"
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: mycontrolpanel-${{ matrix.os }}-${{ steps.ver.outputs.version }}
-          path: ${{ runner.temp }}/mycontrolpanel-${{ matrix.os }}-${{ steps.ver.outputs.version }}.*
+          path: |
+            ${{ runner.temp }}/mycontrolpanel-${{ matrix.os }}-${{ steps.ver.outputs.version }}.*
+            ${{ runner.temp }}/build-info-${{ matrix.os }}.json
 
   verify-gate:
     name: beta release gate (Burhanah)
@@ -132,6 +269,7 @@ jobs:
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         with:
           channel: stable
+          flutter-version: '3.47.9' # pinned — bump procedure in docs/release-process.md
 
       - name: Install dependencies
         run: flutter pub get
@@ -141,6 +279,18 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+
+      - name: Assemble SHA256SUMS from builder sidecars
+        # Each build job attests its asset with a .asset.sha256 sidecar
+        # (see the build job). Concatenate them into the SHA256SUMS.txt
+        # that C2 in tool/verify_release.py expects, then drop the sidecars
+        # so dist/ holds only shippables + receipts.
+        shell: bash
+        run: |
+          cd dist
+          cat *.asset.sha256 | sort > SHA256SUMS.txt
+          rm -f *.asset.sha256
+          cat SHA256SUMS.txt
 
       - name: Run beta release gate
         shell: bash
@@ -158,9 +308,50 @@ jobs:
           path: release-proof.json
           retention-days: 90
 
+  sbom:
+    name: dependency SBOM (CycloneDX)
+    # No flutter needed: tool/sbom.py is stdlib-only over pubspec.lock.
+    # Runs in parallel with the builds; publish needs this job.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Resolve version from tag
+        id: ver
+        shell: bash
+        run: |
+          if [ -n "${{ inputs.tag }}" ]; then TAG="${{ inputs.tag }}"; else TAG="${GITHUB_REF_NAME}"; fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Python (sbom.py is stdlib-only, no deps to install)
+        uses: actions/setup-python@a26af69be951a213d495a44c3e91c03a2152674f5 # v5
+        with:
+          python-version: '3.12'
+
+      - name: Generate CycloneDX SBOM from pubspec.lock
+        shell: bash
+        run: |
+          python3 tool/sbom.py --lockfile pubspec.lock \
+            --app-version "${{ steps.ver.outputs.version }}" \
+            --out "$RUNNER_TEMP/sbom-${{ steps.ver.outputs.version }}.cyclonedx.json"
+          python3 -c "import json; d=json.load(open('$RUNNER_TEMP/sbom-${{ steps.ver.outputs.version }}.cyclonedx.json')); print('SBOM components:', len(d['components']))"
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ steps.ver.outputs.version }}
+          path: ${{ runner.temp }}/sbom-${{ steps.ver.outputs.version }}.cyclonedx.json
+          retention-days: 90
+
   release:
     name: publish release
-    needs: [build, verify-gate]
+    needs: [build, verify-gate, sbom]
     runs-on: ubuntu-latest
     steps:
       - name: Resolve version from tag
@@ -183,7 +374,15 @@ jobs:
         shell: bash
         run: |
           cd dist
-          sha256sum mycontrolpanel-* > SHA256SUMS.txt
+          # Builder sidecars are gate inputs, not shippables: drop them, then
+          # authoritatively re-hash everything published (C2 in
+          # tool/verify_release.py pins the three desktop assets; extras
+          # here are additive and gate-safe).
+          rm -f *.asset.sha256
+          # Every shippable + receipt EXCEPT the gate proof bundle (published
+          # below as the audit receipt, never checksummed — see comment on
+          # the download step).
+          sha256sum mycontrolpanel-* *.cyclonedx.json build-info-*.json > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
       - name: Publish GitHub Release
@@ -195,5 +394,7 @@ jobs:
           generate_release_notes: true
           files: |
             dist/mycontrolpanel-*
+            dist/*.cyclonedx.json
+            dist/build-info-*.json
             dist/SHA256SUMS.txt
             dist/release-proof.json
