@@ -1,9 +1,19 @@
 # Privacy + permission disclosures — Play / App Store / Snap / Microsoft Store
 
 Source of truth for every store questionnaire. All answers derive from code,
-not intent: Android manifest, iOS Info.plist, macOS entitlements,
-`docs/specs/tray-headless-privacy.md`, ADR-003. If code changes, update this
+not intent: `android/app/src/main/AndroidManifest.xml`,
+`ios/Runner/Info.plist`, `ios/Runner/AppDelegate.swift`, macOS
+entitlements, `lib/services/background_alerts.dart`,
+`lib/services/desktop_alerts.dart`, `lib/services/secure_store.dart`,
+`docs/specs/tray-headless-privacy.md`, ADR-003
+(`docs/decisions/003-tray-headless-security.md`). If code changes, update this
 file in the same PR.
+
+Review status: written by Ain (Tech Writer) from the files above;
+Security review by Alya required before first submission (tag Alya as
+reviewer on the release PR). Never answer a questionnaire from
+memory: re-read the manifest/plist in the release PR and paste the
+file paths into the review.
 
 ## What the app touches (all stores, same answers)
 
@@ -17,10 +27,18 @@ file in the same PR.
 - GitHub/GitLab PATs: stored in the keychain, sent only to api.github.com /
   the user's GitLab host.
 - Notifications: local only (`flutter_local_notifications` / `local_notifier`
-  / WorkManager periodic ≥15 min). No FCM/APNs token, no push relay.
-- Headless tick (Beta.2 tray plan): reads keychain in-memory only, writes no
-  new persistent state beyond `background_alerts_last_check_ms` + last-seen
-  set; scheduler argv carries no secrets (ADR-003, enforced in code).
+  / WorkManager periodic ≥15 min; desktop in-app timer rail in beta.1).
+  No FCM/APNs token, no push relay.
+- Headless tick (Beta.2 tray plan — implemented behind
+  `--poll-headless`, scheduler wiring pending): reads keychain
+  in-memory only, writes no new persistent state beyond
+  `background_alerts_last_check_ms` + last-seen set; scheduler argv
+  carries no secrets (ADR-003, enforced by `HeadlessSecurity` +
+  `test/headless_security_test.dart`).
+- Background consent: single shared `background_alerts` pref,
+  default OFF, binding copy "Polls your servers every ~15 min in the
+  background." Consent OFF = no network, no vault touch (exit 2
+  headless). A locked vault (biometrics ON) denies background reads.
 
 ## Google Play — Data safety (declare when listing)
 
@@ -31,17 +49,24 @@ file in the same PR.
 - Permissions declared: `POST_NOTIFICATIONS` (runtime prompt on API 33+,
   requested when the background toggle flips on), `USE_BIOMETRIC`
   (app-lock only). Deliberately NOT declared:
-  `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`, `RECEIVE_BOOT_COMPLETED`.
+  `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`,
+  `RECEIVE_BOOT_COMPLETED` (WorkManager reschedules with its own
+  merged receivers — no app declaration needed).
 - Account deletion: n/a — no account exists.
 
 ## Apple App Store — privacy nutrition + purpose strings
 
 - Data linked to user: none off-device. Answer "Data Not Collected" unless
   the user enables Sentry opt-in (then: crash data, linked, opt-in).
-- `NSFaceIDUsageDescription`: biometric app lock (already in Info.plist).
-- Background modes: `BGTaskScheduler` periodic task only; identifier
-  (`BackgroundAlerts.taskName`) must equal the permitted identifier and the
-  AppDelegate registration or iOS throws at launch of the task.
+- `NSFaceIDUsageDescription`: biometric app lock (already in
+  Info.plist: "Unlock My Control Panel with Face ID").
+- Background modes: `fetch` + `BGTaskScheduler` periodic task only;
+  identifier (`BackgroundAlerts.taskName` =
+  `com.mycontrolpanel.my_control_panel.backgroundAlerts`) must equal
+  the permitted identifier and the AppDelegate registration or iOS
+  throws BGTaskSchedulerErrorDomain Code=3 at task launch.
+- Local notifications need no plist entitlement — only the runtime
+  notification prompt (requested in-app when the toggle flips on).
 
 ## Snap Store
 
@@ -63,5 +88,8 @@ file in the same PR.
 
 - Never add a permission to silence a store warning (e.g. battery exemption
   as a manifest permission) — fix the flow, not the manifest.
+- Never claim tray-mode closed-app desktop alerts as shipped until
+  the Beta.2 gate (Balqis matrix green + Burhanah asset verification)
+  closes.
 - Never answer a questionnaire from memory: re-read the manifest/plist in
   the release PR and paste the file paths into the review.

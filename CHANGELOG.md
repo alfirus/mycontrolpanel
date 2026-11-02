@@ -15,6 +15,15 @@ releases are cut as Git tags `v<name>` via `.github/workflows/release.yml`
   p95 <50 MB agent) with `test/alert_reliability_test.dart` and
   `docs/specs/alert-reliability-slos.md`. No behavior change to the
   shipping tick; no new dependencies.
+- User docs + store-copy pack (Ain — background-alerting user guide):
+  new `docs/user/background-alerting.md` (cadence, battery limits,
+  consent default-OFF, stale banners, thresholds, troubleshooting —
+  every claim traced to shipped code); store listings refreshed
+  (`docs/store/listing-copy.md`: per-store descriptions within Play /
+  App Store limits, support field, captions; `privacy-permissions.md`:
+  code-derived disclosures, Alya Security review requested before
+  first submission); sales one-pager synced to the Beta.2 honesty
+  line (background opt-in, no push relay, desktop closed-app planned).
 - Adaptive anomaly scoring (Farah — ML, on-device): agent v6 additive
   `GET /anomaly` (stdlib-only EWMA + rolling variance with time-of-day
   buckets; score 0–100 + reason; Low/Med/High gate), offline eval harness
