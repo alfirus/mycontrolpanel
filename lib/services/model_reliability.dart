@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 /// Model reliability KPIs for the Metrics & Uptime screens.
 ///
 /// Pure-Dart rollup over [InferenceAttempt] history (see

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 /// Inference attempt log + provider fallback chain for the AI Chatbox.
 ///
 /// The transport layer ([AiService]) already speaks every provider; what

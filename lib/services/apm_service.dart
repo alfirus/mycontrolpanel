@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 /// APM-lite rollups over per-host metrics history.
 ///
 /// The control center already records one point per poll per host via

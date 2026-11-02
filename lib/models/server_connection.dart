@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import 'dart:convert';
 
 enum AuthMethod { password, sshKey, apiToken }

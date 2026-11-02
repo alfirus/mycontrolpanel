@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import 'package:flutter/material.dart';
 import '../models/mock_data.dart';
 import '../services/github_service.dart';

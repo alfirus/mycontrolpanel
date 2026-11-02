@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import 'package:flutter/material.dart';
 import '../models/audit_entry.dart';
 import '../services/audit_log.dart';
