@@ -80,11 +80,14 @@ jobs:
           java-version: '17'
 
       - name: Materialize Play keystore (Android, when enrolled)
-        # Runs ONLY after the owner enrolls the keystore in the
-        # `release-signing` environment (docs/release-signing.md). Absent
-        # secrets -> skipped -> android/app/build.gradle.kts falls back to
-        # the debug key, exactly as before.
-        if: matrix.os == 'android' && secrets.ANDROID_KEYSTORE_B64 != ''
+        # Runs on every Android tag build; inside, it no-ops unless the
+        # owner enrolled the keystore in the `release-signing` environment
+        # (docs/release-signing.md). NOTE: the `secrets` context is not
+        # allowed in `if:` here, so the enrolled check lives in the script
+        # (env indirection is the sanctioned path). Absent secrets ->
+        # skipped -> android/app/build.gradle.kts falls back to the debug
+        # key, exactly as before.
+        if: matrix.os == 'android'
         shell: bash
         env:
           ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
@@ -92,6 +95,10 @@ jobs:
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
           ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
         run: |
+          if [ -z "$ANDROID_KEYSTORE_B64" ]; then
+            echo "No Play keystore enrolled (release-signing env) — debug-signed build, as before."
+            exit 0
+          fi
           echo "$ANDROID_KEYSTORE_B64" | base64 -d > "$GITHUB_WORKSPACE/android/release.jks"
           cat > "$GITHUB_WORKSPACE/android/key.properties" <<EOF
           storeFile=release.jks
@@ -126,13 +133,18 @@ jobs:
       - name: Sign Windows binaries (Authenticode, when enrolled)
         # Owner-enrolled only (docs/release-signing.md): signs the runner
         # output BEFORE packaging so the published zip carries signatures.
-        # No WINDOWS_CERT_B64 secret -> skipped, ships unsigned as before.
-        if: matrix.os == 'windows' && secrets.WINDOWS_CERT_B64 != ''
+        # The enrolled check lives in the script (`secrets` is not allowed
+        # in `if:`); unenrolled builds exit 0 here and ship unsigned.
+        if: matrix.os == 'windows'
         shell: pwsh
         env:
           WINDOWS_CERT_B64: ${{ secrets.WINDOWS_CERT_B64 }}
           WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
         run: |
+          if ([string]::IsNullOrEmpty($env:WINDOWS_CERT_B64)) {
+            Write-Host 'No Authenticode cert enrolled (release-signing env) — shipping unsigned, as before.'
+            exit 0
+          }
           $pfx = "$env:RUNNER_TEMP/release-cert.pfx"
           [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERT_B64))
           $sdk = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Directory |
@@ -146,8 +158,10 @@ jobs:
 
       - name: Sign macOS app (Developer ID, when enrolled)
         # Owner-enrolled only (docs/release-signing.md): codesign + notarize
-        # BEFORE the ditto packaging step below. Skipped until enrollment.
-        if: matrix.os == 'macos' && secrets.APPLE_CERT_B64 != ''
+        # BEFORE the ditto packaging step below. The enrolled check lives in
+        # the script (`secrets` is not allowed in `if:`); unenrolled builds
+        # exit 0 here and ship unsigned.
+        if: matrix.os == 'macos'
         shell: bash
         env:
           APPLE_CERT_B64: ${{ secrets.APPLE_CERT_B64 }}
@@ -156,6 +170,10 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_NOTARY_PASSWORD: ${{ secrets.APPLE_NOTARY_PASSWORD }}
         run: |
+          if [ -z "$APPLE_CERT_B64" ]; then
+            echo "No Developer ID cert enrolled (release-signing env) — shipping unsigned, as before."
+            exit 0
+          fi
           echo "$APPLE_CERT_B64" | base64 -d > "$RUNNER_TEMP/release-cert.p12"
           security create-keychain -p actions build.keychain
           security import "$RUNNER_TEMP/release-cert.p12" -k build.keychain \
