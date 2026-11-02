@@ -18,6 +18,7 @@ library;
 
 import '../models/alert_entry.dart';
 import 'anomaly_baseline.dart';
+import 'anomaly_scoring.dart';
 import 'forecast_alerts.dart';
 
 /// Delivery sink: (title, body). Implemented by the UI layer.
@@ -40,6 +41,12 @@ class AlertPipeline {
   /// Critical at/under this ETA (hours) to the 90% line.
   final double criticalEtaHours;
 
+  /// Alert-quality sensitivity for the anomaly branch (shared Settings
+  /// picker pref, default Medium). Today it labels the why-this-alerted
+  /// copy; threshold gating stays in the detectors until the agent `/anomaly`
+  /// path is wired per docs/specs/anomaly-scoring.md.
+  final AnomalySensitivity sensitivity;
+
   final Map<String, int> _lastSentMs = {};
 
   AlertPipeline({
@@ -48,6 +55,7 @@ class AlertPipeline {
     DiskForecaster? diskForecaster,
     LoadSpikeForecaster? loadForecaster,
     AnomalyBaseline? cpuBaseline,
+    this.sensitivity = AnomalySensitivity.medium,
     this.resendCooldown = const Duration(hours: 6),
     this.warnEtaHours = 72,
     this.criticalEtaHours = 48,
@@ -118,11 +126,17 @@ class AlertPipeline {
 
     final anomaly = cpuAnomaly.update(cpuSample);
     if (anomaly.isAnomaly) {
+      final why = anomalyWhyCopy(
+        metric: 'CPU',
+        value: cpuSample,
+        baseline: anomaly.baseline,
+        scoreText: 'score ${anomaly.score.toStringAsFixed(1)}',
+        sensitivity: sensitivity,
+      );
       emit(
         'cpu-anomaly',
         AlertEntry(
-          title:
-              'CPU anomaly on $serverName (score ${anomaly.score.toStringAsFixed(1)})',
+          title: 'CPU anomaly on $serverName — $why',
           source: 'ml-pipeline/cpu',
           severity: 'warning',
           serverId: serverId,

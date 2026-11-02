@@ -8,20 +8,37 @@ releases are cut as Git tags `v<name>` via `.github/workflows/release.yml`
 ## [Unreleased]
 
 ### Added
-- Alert reliability harness + SLOs (Nadia, Beta.2 instrumentation):
+- Alert reliability harness + SLOs (Nadia, Beta.2 instrumentation, #138):
   `lib/services/alert_reliability.dart` (pure-Dart lifecycle tracking
   scheduled/executed/notified/dismissed, latency, drops, agent CPU/mem
   samples, frozen SLOs: 99% within 5 min, <1% drops, p95 <2 s tick,
   p95 <50 MB agent) with `test/alert_reliability_test.dart` and
   `docs/specs/alert-reliability-slos.md`. No behavior change to the
   shipping tick; no new dependencies.
-- Headless-agent operability (Nadia, Beta.2): `bin/agent_check.dart`
+- Headless-agent operability (Nadia, Beta.2, #140): `bin/agent_check.dart`
   (`--check --json` SLO report with headless-mirrored exit codes,
   `--rotate` log rotation), pure-Dart builders
   (`agent_operability.dart`, `alert_log_rotation.dart`: 512 KiB × 3
   generations) with tests, hardened scheduler templates with
   restart/backoff (`scripts/reliability/`), local-only opt-in SLO
   dashboard spec. No new dependencies.
+- User docs + store-copy pack (Ain — background-alerting user guide):
+  new `docs/user/background-alerting.md` (cadence, battery limits,
+  consent default-OFF, stale banners, thresholds, troubleshooting —
+  every claim traced to shipped code); store listings refreshed
+  (`docs/store/listing-copy.md`: per-store descriptions within Play /
+  App Store limits, support field, captions; `privacy-permissions.md`:
+  code-derived disclosures, Alya Security review requested before
+  first submission); sales one-pager synced to the Beta.2 honesty
+  line (background opt-in, no push relay, desktop closed-app planned).
+- Adaptive anomaly scoring (Farah — ML, on-device): agent v6 additive
+  `GET /anomaly` (stdlib-only EWMA + rolling variance with time-of-day
+  buckets; score 0–100 + reason; Low/Med/High gate), offline eval harness
+  (`python -m pytest agent/tests -q`: precision 0.95, 0 idle-day false
+  alerts, ~0.006 ms/sample), Flutter sensitivity picker with why-this-
+  alerted copy reusing the #116/#117/#118 rails, `AgentService.fetchAnomaly`
+  with pre-v6 fallback, privacy note (fully on-device), handoff spec
+  `docs/specs/anomaly-scoring.md`.
 - Headless poll CLI architecture + core (TM-1, Lina — Beta.2 contract
   freeze): single shared headless check pipeline
   (`lib/background/headless_check.dart` + `lib/background/headless_state.dart`,
