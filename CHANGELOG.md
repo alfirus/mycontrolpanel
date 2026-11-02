@@ -82,6 +82,16 @@ releases are cut as Git tags `v<name>` via `.github/workflows/release.yml`
 - Biometric app lock: `local_auth` + lock screen on cold start and
   resume-from-background when the Settings toggle is on, with device
   PIN/passcode fallback and clear messaging where nothing is available.
+- Headless slice verdict parity (Elizabeth — closed-app slice, no
+  contract change): failed CI runs now ride the `--poll-headless` tick
+  (`lib/services/headless_slice.dart` mapping to `HeadlessSignal(kind:
+  'ci')` + `fetchRuns` seam in `lib/headless.dart`; production default
+  reads tracked repos + read-only vault tokens, CI sickness never sinks
+  the host tick, exit codes untouched); `test/headless_slice_test.dart`
+  proves headless verdicts == in-app verdicts (alerts + CI, stale +
+  no-data, resolve→re-fire) with two documented degenerate-case
+  divergences; `docs/specs/headless-slice-parity.md` parity table;
+  `headless.yml` covers the new files.
 
 ### Security
 - Credential storage cut over to OS keychain/keystore; quality gates documented
