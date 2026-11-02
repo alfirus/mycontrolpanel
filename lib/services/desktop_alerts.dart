@@ -28,11 +28,13 @@
 /// keeps the in-app timer path only in beta.1.
 library;
 
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
+import 'alert_inbox_store.dart';
 import 'background_alerts.dart';
 import 'polling_alerts.dart';
 import '../tray/quiet_hours.dart';
@@ -104,6 +106,10 @@ abstract class DesktopAlerts {
   /// - Linux: notify-send path via [linuxDefaultActionName].
   /// - macOS: Darwin settings (user-allow prompt on first fire).
   /// Idempotent; safe to call anywhere (failures stay silent).
+  ///
+  /// Tap handling mirrors the mobile rail: the response callback stashes
+  /// valid `mcp://inbox` payloads for the inbox to consume on
+  /// launch/resume (Nurul t_7ba899fe).
   static Future<void> initNotifications() async {
     if (_pluginReady) return;
     try {
@@ -118,7 +124,10 @@ abstract class DesktopAlerts {
           guid: windowsGuid,
         ),
       );
-      await _plugin.initialize(settings: settings);
+      await _plugin.initialize(
+        settings: settings,
+        onDidReceiveNotificationResponse: _onTapResponse,
+      );
       _pluginReady = true;
     } catch (_) {
       _pluginReady = false;
@@ -163,12 +172,17 @@ abstract class DesktopAlerts {
   /// one-shot "mute until morning" is active, toasts are dropped and the
   /// call returns false. Defaults (quiet OFF, no mute) preserve the old
   /// behavior exactly.
-  static Future<bool> showFresh(List<String> freshTitles) async {
+  ///
+  /// [payload] is the tap deep link (`AlertDeepLink.build`, `mcp://inbox…`);
+  /// the response callback stashes it for the inbox to consume. Optional —
+  /// existing callers without a link keep working.
+  static Future<bool> showFresh(List<String> freshTitles,
+      {String? payload}) async {
     if (!isSupportedPlatform) return false;
     if (!await isEnabled()) return false;
     if (await TrayQuietHours.suppressedNow()) return false;
-    final payload = buildLocalPayload('MyControlPanel alert', freshTitles);
-    if ((payload['body'] ?? '').isEmpty) return false;
+    final built = buildLocalPayload('MyControlPanel alert', freshTitles);
+    if ((built['body'] ?? '').isEmpty) return false;
     try {
       await initNotifications();
       if (!_pluginReady) return false;
@@ -181,9 +195,10 @@ abstract class DesktopAlerts {
           DateTime.now().millisecondsSinceEpoch % 0x7fffffff;
       await _plugin.show(
         id: id,
-        title: payload['title'],
-        body: payload['body'],
+        title: built['title'],
+        body: built['body'],
         notificationDetails: details,
+        payload: payload,
       );
       return true;
     } catch (_) {
@@ -196,7 +211,12 @@ abstract class DesktopAlerts {
   /// builds the payload verbatim, this rail only delivers it — no second
   /// payload format. Same guards as [showFresh] (incl. quiet-hours
   /// suppression); returns true when shown.
-  static Future<bool> showFreshPayload(String title, String body) async {
+  ///
+  /// [payload] is the optional tap deep link (`AlertDeepLink.build`) for
+  /// Lisa's headless tick to thread once the tray helper owns the closed-app
+  /// path.
+  static Future<bool> showFreshPayload(String title, String body,
+      {String? payload}) async {
     if (!isSupportedPlatform) return false;
     if (!await isEnabled()) return false;
     if (await TrayQuietHours.suppressedNow()) return false;
@@ -216,10 +236,20 @@ abstract class DesktopAlerts {
         title: title,
         body: body,
         notificationDetails: details,
+        payload: payload,
       );
       return true;
     } catch (_) {
       return false;
     }
+  }
+
+  /// Tap-response sink: stash valid inbox deep links for the inbox to
+  /// consume on launch/resume. Foreign/legacy payloads are ignored.
+  static void _onTapResponse(NotificationResponse response) {
+    final payload = response.payload;
+    if (payload == null || payload.isEmpty) return;
+    if (AlertDeepLink.parse(payload) == null) return;
+    unawaited(AlertDeepLink.storePending(payload));
   }
 }
