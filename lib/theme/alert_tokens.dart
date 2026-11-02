@@ -172,7 +172,11 @@ class QuietHours {
   });
 
   /// Shared pref keys (owned by the Settings/tray wiring, declared here
-  /// so inbox + headless read the same keys).
+  /// so inbox + tray helper read the same keys). Enforcement lives at the
+  /// NOTIFY layer (tray helper suppresses toasts while quiet) — the
+  /// headless tick itself always runs to completion per the frozen TM-1
+  /// contract (`docs/specs/headless-cli-contract.md`), so the inbox stays
+  /// complete and the staleness stamp stays honest.
   static const prefEnabledKey = 'alerts_quiet_hours_enabled';
   static const prefStartKey = 'alerts_quiet_hours_start_minutes';
   static const prefEndKey = 'alerts_quiet_hours_end_minutes';

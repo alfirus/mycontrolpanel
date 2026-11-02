@@ -46,7 +46,12 @@ Headlines state WHAT is true (≤48 chars). Bodies state WHY + WHAT TO DO
 | snooze | (snack) | `Snoozed for 1 hour — fires again if still down.` |
 
 Title/body templates live in `AlertCopy.notificationTitle`; Nurul wires them
-straight into `NotificationHook.build(title, freshTitles)`.
+straight into `NotificationHook.build(title, freshTitles)` for inbox +
+in-app display copy. Frozen-headless note: the TM-1 stdout payload title is
+frozen as `'MyControlPanel alert'` (`docs/specs/headless-cli-contract.md`
+§5) — Lisa does NOT change it. Per-severity titles above are the display
+layer's copy (inbox rows, tray-helper toasts); the headless JSON keeps the
+frozen title until Rina signs a contract change.
 
 ## 3. Tokens (`AppAlertTokens`, executable)
 
@@ -85,8 +90,12 @@ critical 5.3:1, warning 10.3:1, info ~7:1 (same ramp as spec 01 §2).
   (`22:00 – 07:00` / `Off`); the staleness line keeps ticking
   ("last checked Xm ago") so quiet is never confused with broken.
 - Pref keys (`alerts_quiet_hours_enabled/_start_minutes/_end_minutes`)
-  declared in `QuietHours` so inbox + headless read the same keys. Headless
-  evaluates quiet at tick time (local time on the polled host path).
+  declared in `QuietHours` so inbox + tray helper read the same keys.
+  Enforcement is NOT headless: per the frozen TM-1 contract the headless
+  tick always runs to completion (exit 0/2/1); quiet is enforced at the
+  notify layer (tray helper suppresses toasts, icon shows `quiet`), so the
+  inbox still collects every firing signal and `lastSentMs` 6 h flap
+  suppression keeps working underneath.
 
 ## 6. Notification actions
 
@@ -238,7 +247,8 @@ WCAG 2.2 AA, asserted where computable (`AlertA11y` + token tests):
   (`mcp.open` payload).
 - **Elizabeth** (tray shell, TM-3): icon states §7.1, menu order §7.2,
   restore/single-instance §7.4, denied/opt-out §7.5.
-- **Lisa** (headless, TM-1): action ids §6, quiet-hours keys §5, shared
+- **Lisa** (headless, TM-1): action ids §6, quiet-hours keys §5 (notify-layer
+  only — headless honors the frozen contract verbatim), shared
   seen-set §4. Headless never invents copy — titles from
   `NotificationHook.build`, window chrome from this doc.
 - **Balqis** (TM-6): matrix rows — open+closed × consent on/off × quiet
