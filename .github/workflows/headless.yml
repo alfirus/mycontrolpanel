@@ -16,6 +16,7 @@ on:
     paths:
       - 'lib/background/**'
       - 'lib/headless.dart'
+      - 'lib/services/headless_slice.dart'
       - 'lib/main.dart'
       - 'bin/headless_check.dart'
       - 'scripts/headless/**'
@@ -26,6 +27,7 @@ on:
     paths:
       - 'lib/background/**'
       - 'lib/headless.dart'
+      - 'lib/services/headless_slice.dart'
       - 'lib/main.dart'
       - 'bin/headless_check.dart'
       - 'scripts/headless/**'
@@ -55,11 +57,12 @@ jobs:
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         with:
           channel: stable
+          flutter-version: '3.47.9' # pinned — bump procedure in docs/release-process.md
       - name: Install dependencies
         run: flutter pub get
       - name: Analyze headless slice
-        run: flutter analyze --no-fatal-infos --no-fatal-warnings lib/background lib/headless.dart lib/main.dart bin/headless_check.dart test/headless_state_test.dart test/headless_check_test.dart test/headless_contract_test.dart test/headless_entry_test.dart
+        run: flutter analyze --no-fatal-infos --no-fatal-warnings lib/background lib/headless.dart lib/main.dart lib/services/headless_slice.dart bin/headless_check.dart test/headless_state_test.dart test/headless_check_test.dart test/headless_contract_test.dart test/headless_entry_test.dart test/headless_slice_test.dart
       - name: Headless unit + contract tests
-        run: flutter test test/headless_state_test.dart test/headless_check_test.dart test/headless_contract_test.dart test/headless_entry_test.dart
+        run: flutter test test/headless_state_test.dart test/headless_check_test.dart test/headless_contract_test.dart test/headless_entry_test.dart test/headless_slice_test.dart
       - name: Headless pipeline self-test (fake transport)
         run: dart run my_control_panel:headless_check --self-test

@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  MyControlPanel headless poll — macOS LaunchAgent template, HARDENED (Nadia, operability).
+  Layers restart/backoff on top of the TM-1 minimal template
+  (scripts/headless/macos/com.mycontrolpanel.poll.plist, Lina owns argv).
+  Managed lifecycle: Zara owns (t_13eee02b); menu-bar helper scope:
+  Elizabeth owns (t_a0fe4895).
+
+  Install: copy to ~/Library/LaunchAgents/com.mycontrolpanel.poll.hardened.plist,
+  replace @INSTALL_DIR@ (e.g. /Applications/MyControlPanel.app/Contents/MacOS),
+  then `launchctl load ~/Library/LaunchAgents/com.mycontrolpanel.poll.hardened.plist`.
+
+  Hardening vs the minimal template (Alya reviews):
+  - KeepAlive.SuccessfulExit=false: relaunch only after a CRASH (non-zero
+    exit 1); clean exits (0 ok, 2 skipped) stay exited until StartInterval.
+  - ThrottleInterval=60: at most one relaunch per minute — backoff against
+    a persistently failing tick instead of a respawn hot-loop.
+  - Tick output is one JSON line per run; the delivery log itself is
+    size-capped by the agent_check rotate mode (alert_log_rotation policy).
+  - Per-user agent, NEVER a system-wide daemon (unchanged from TM-1).
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.mycontrolpanel.poll.hardened</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@INSTALL_DIR@/mycontrolpanel</string>
+    <string>--poll-headless</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>900</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
+</dict>
+</plist>

@@ -1,8 +1,8 @@
 # Release Checklist
 
-How to cut a release. Every `v*` tag builds macOS / Windows / Linux
-artifacts via `.github/workflows/release.yml` and must pass this list
-first. The full v1 acceptance bar (no MOCK-tab ships as live, credential
+How to cut a release. Every `v*` tag builds macOS / Windows / Linux /
+Android artifacts via `.github/workflows/release.yml` and must pass this
+list first. The full v1 acceptance bar (no MOCK-tab ships as live, credential
 rules) is the release gate in `docs/release-gate.md` (PR #30, in review)
 — this page is the mechanical runbook; the gate is the quality bar.
 
@@ -38,7 +38,8 @@ git tag v1.0.0-alpha.2 && git push origin v1.0.0-alpha.2
       `mycontrolpanel-windows-<version>.zip`,
       `mycontrolpanel-linux-<version>.tar.gz`, plus `SHA256SUMS.txt`.
 - [ ] In-app update path spot-checked (Windows/Linux/macOS against the
-      new GitHub Release).
+      new GitHub Release; stable track. Beta tags additionally checked
+      with the beta-track opt-in per `docs/runbooks/rollout.md`).
 - [ ] GitHub Release notes pasted from the `CHANGELOG.md` entry.
 
 ## 4. After

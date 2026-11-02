@@ -36,13 +36,18 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'background/headless_check.dart';
 import 'background/headless_state.dart';
+import 'models/mock_data.dart' show DeployItem;
 import 'models/server_connection.dart';
 import 'services/agent_service.dart';
 import 'services/alert_poller.dart';
 import 'services/app_lock.dart' show appLockPrefsKey;
 import 'services/background_alerts.dart';
+import 'services/ci_sync.dart';
 import 'services/desktop_alerts.dart';
+import 'services/github_service.dart';
+import 'services/gitlab_service.dart';
 import 'services/headless_security.dart';
+import 'services/headless_slice.dart';
 import 'services/secure_store.dart';
 
 /// Max hosts per tick (parity with `BackgroundAlerts.runBackgroundTick`).
@@ -56,12 +61,19 @@ const headlessFetchTimeout = Duration(seconds: 15);
 /// Returns the process exit code (`0` tick ok, `2` skipped, `1` error), or
 /// null when the flag is absent (normal UI launch proceeds). Never throws —
 /// unexpected failures become exit 1 with a secret-free JSON line.
+///
+/// CI enrichment (Elizabeth slice): [fetchRuns] supplies the failed-CI
+/// half of the in-app verdict (`AlertWatch.currentKeys(alerts, runs)`).
+/// Production default reads tracked repos + read-only vault tokens and
+/// syncs via `CiSyncService` (cache stands in on failure); a throwing CI
+/// fetch never sinks the host tick.
 Future<int?> runHeadlessIfRequested(
   List<String> args, {
   Future<Map<String, Object?>> Function()? readPrefs,
   Future<String?> Function(String key)? readVault,
   Future<List<ServerConnection>> Function()? loadServersRaw,
   Future<List<HeadlessSignal>> Function(ServerConnection server)? fetchFor,
+  Future<List<DeployItem>> Function()? fetchRuns,
   Future<void> Function(String title, String body)? notify,
   Future<void> Function()? onCheckRecorded,
   Directory Function()? stateDir,
@@ -88,6 +100,7 @@ Future<int?> runHeadlessIfRequested(
       readVault: readVault,
       loadServersRaw: loadServersRaw,
       fetchFor: fetchFor,
+      fetchRuns: fetchRuns,
       notify: notify,
       onCheckRecorded: onCheckRecorded,
       dir: dir,
@@ -114,6 +127,7 @@ Future<int> _runTick({
   required Future<List<ServerConnection>> Function()? loadServersRaw,
   required Future<List<HeadlessSignal>> Function(ServerConnection server)?
       fetchFor,
+  required Future<List<DeployItem>> Function()? fetchRuns,
   required Future<void> Function(String title, String body)? notify,
   required Future<void> Function()? onCheckRecorded,
   required Directory dir,
@@ -155,6 +169,18 @@ Future<int> _runTick({
       } catch (_) {
         // One sick host never sinks the run (parity: runBackgroundTick).
       }
+    }
+    // CI enrichment (slice parity): failed runs ride the host tick so the
+    // headless verdict covers the same `AlertWatch.currentKeys(alerts,
+    // runs)` set the in-app rail diffs. CI sickness never sinks the host
+    // tick — and `answered` stays host-driven (frozen exit semantics).
+    try {
+      final runs = fetchRuns != null
+          ? await fetchRuns()
+          : await _fetchRunsDefault(prefsMap, readVault);
+      out.addAll(HeadlessSlice.signalsFromCiRuns(runs));
+    } catch (_) {
+      // One sick CI leg never sinks the run.
     }
     if (!answered) {
       throw Exception('alert poll failed (no host answered)');
@@ -203,7 +229,82 @@ Future<Map<String, Object?>> _readPrefsSnapshot() async {
     BackgroundAlerts.prefEnabledKey:
         prefs.getBool(BackgroundAlerts.prefEnabledKey) ?? false,
     appLockPrefsKey: prefs.getBool(appLockPrefsKey) ?? false,
+    // CI enrichment reads (slice parity — same keys the control center
+    // screen reads; read-only, never written headless).
+    'github_repos': prefs.getStringList('github_repos') ?? const <String>[],
+    'gitlab_projects':
+        prefs.getStringList('gitlab_projects') ?? const <String>[],
+    'gitlab_base_url':
+        prefs.getString('gitlab_base_url') ?? 'https://gitlab.com',
   };
+}
+
+/// Default CI fetch: GitHub Actions runs + GitLab pipelines for the
+/// user's tracked repos/projects, mapped downstream to `kind: 'ci'`
+/// signals. Headless-safe by construction:
+///
+/// - Tokens come from the vault read-only (`github_token` /
+///   `gitlab_token` via [readVault] or `SecureStore.readSecret`);
+///   absent/empty token ⇒ that VCS is skipped, never an error.
+/// - [CiSyncService] never throws (per-repo backoff + last-good cache
+///   stands in); GitLab legs are per-project try/catch. Total CI failure
+///   ⇒ empty list, and the caller swallows even that.
+/// - Capped + time-boxed (a scheduler tick must stay short).
+Future<List<DeployItem>> _fetchRunsDefault(
+  Map<String, Object?> prefs,
+  Future<String?> Function(String key)? readVault,
+) async {
+  final out = <DeployItem>[];
+  try {
+    final repos = ((prefs['github_repos'] as List?) ?? const [])
+        .map((e) => e.toString().trim())
+        .where((e) => e.isNotEmpty)
+        .take(6)
+        .toList();
+    if (repos.isNotEmpty) {
+      final token = readVault != null
+          ? await readVault('github_token')
+          : await SecureStore.readSecret('github_token');
+      if (token != null && token.isNotEmpty) {
+        final sync = CiSyncService(perRepoLimit: 4);
+        final res = await sync
+            .syncRepos(GithubService(token), repos)
+            .timeout(const Duration(seconds: 60));
+        out.addAll(res.runs);
+      }
+    }
+  } catch (_) {
+    // GitHub sickness never sinks the tick.
+  }
+  try {
+    final projects = ((prefs['gitlab_projects'] as List?) ?? const [])
+        .map((e) => e.toString().trim())
+        .where((e) => e.isNotEmpty)
+        .take(6)
+        .toList();
+    if (projects.isNotEmpty) {
+      final base = (prefs['gitlab_base_url']?.toString() ?? '').trim();
+      final token = readVault != null
+          ? await readVault('gitlab_token')
+          : await SecureStore.readSecret('gitlab_token');
+      if (token != null && token.isNotEmpty) {
+        final svc = GitlabService(
+          baseUrl: base.isEmpty ? 'https://gitlab.com' : base,
+          token: token,
+        );
+        for (final p in projects) {
+          try {
+            out.addAll(await svc
+                .projectPipelines(p, limit: 4)
+                .timeout(const Duration(seconds: 30)));
+          } catch (_) {}
+        }
+      }
+    }
+  } catch (_) {
+    // GitLab sickness never sinks the tick.
+  }
+  return out;
 }
 
 /// Default raw server load via the store of record WITHOUT healing

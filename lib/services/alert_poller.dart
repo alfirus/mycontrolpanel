@@ -122,7 +122,9 @@ List<AlertEntry> unionAlerts(List<AlertEntry> a, List<AlertEntry> b) {
 
 /// Poll one host: agent HTTP first, SSH sweep for what HTTP cannot see.
 ///
-/// - `/health` gates the agent path (cheap, no /proc scan). Unreachable =
+/// - `/alerts/snapshot` is tried first (one cheap fetch of pre-computed
+///   trigger inputs). Pre-snapshot agents answer 404 → falls back to the
+///   `/health` + `/metrics` + `/sysstats` triple below. Unreachable =
 ///   agent leg skipped, not fatal.
 /// - `/metrics` + `/sysstats` feed [AlertRules] (disk, load vs nproc).
 /// - [AgentService.fetchAlerts] over SSH adds failed units, brute-force,
@@ -137,26 +139,48 @@ Future<List<AlertEntry>> pollHostAlerts(
   String? keyPassphrase,
   bool sshSweep = true,
   AlertRules rules = const AlertRules(),
+  bool snapshotFirst = true,
 }) async {
   final agentAlerts = <AlertEntry>[];
   var agentOk = false;
-  try {
-    final health = await agent.fetchHealth(s.host,
-        agentToken: agentToken, serverId: s.id);
-    if (health != null) {
-      final metrics = await agent.fetch(s.host,
+  // Snapshot leg (Lisa): one cheap fetch carrying the pre-computed
+  // trigger inputs. Pre-snapshot agents answer 404 (null) — fall
+  // through to the legacy triple below.
+  if (snapshotFirst) {
+    try {
+      final snap = await agent.fetchAlertSnapshot(s.host,
           agentToken: agentToken, serverId: s.id);
-      final sys = await agent.fetchSysstats(s.host,
-          agentToken: agentToken, serverId: s.id);
-      agentAlerts.addAll(rules.evaluate(
-        s.id,
-        s.name,
-        buildAgentHostSignals(metrics: metrics, sysstats: sys),
-      ));
-      agentOk = true;
+      if (snap != null) {
+        agentAlerts.addAll(rules.evaluate(
+          s.id,
+          s.name,
+          HostSignals.fromSnapshot(snap),
+        ));
+        agentOk = true;
+      }
+    } catch (_) {
+      agentOk = false;
     }
-  } catch (_) {
-    agentOk = false;
+  }
+  if (!agentOk) {
+    try {
+      final health = await agent.fetchHealth(s.host,
+          agentToken: agentToken, serverId: s.id);
+      if (health != null) {
+        final metrics = await agent.fetch(s.host,
+            agentToken: agentToken, serverId: s.id);
+        final sys = await agent.fetchSysstats(s.host,
+            agentToken: agentToken, serverId: s.id);
+        agentAlerts.addAll(rules.evaluate(
+          s.id,
+          s.name,
+          buildAgentHostSignals(metrics: metrics, sysstats: sys),
+        ));
+        agentOk = true;
+      }
+    } catch (_) {
+      agentOk = false;
+    }
   }
 
   var sshAlerts = const <AlertEntry>[];
