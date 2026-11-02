@@ -30,6 +30,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:workmanager/workmanager.dart';
 
 import 'agent_service.dart';
+import 'alert_inbox_store.dart';
 import 'alert_poller.dart';
 import 'alert_watch.dart';
 import '../models/alert_entry.dart';
@@ -198,6 +199,11 @@ abstract class BackgroundAlerts {
 
   /// Init the notifications plugin + create the Android channel.
   /// Idempotent; safe on any platform (failures stay silent).
+  ///
+  /// Tap handling (Nurul t_7ba899fe): the response callback stashes valid
+  /// `mcp://inbox` payloads via `AlertDeepLink.storePending` — the inbox
+  /// consumes them on launch/resume and lands on the tapped alert. Never
+  /// throws, never navigates from here (no BuildContext at this layer).
   static Future<void> initNotifications() async {
     if (_pluginReady) return;
     try {
@@ -209,7 +215,10 @@ abstract class BackgroundAlerts {
         iOS: darwinInit,
         macOS: darwinInit,
       );
-      await _plugin.initialize(settings: settings);
+      await _plugin.initialize(
+        settings: settings,
+        onDidReceiveNotificationResponse: _onTapResponse,
+      );
       const channel = AndroidNotificationChannel(
         channelId,
         channelName,
@@ -241,10 +250,15 @@ abstract class BackgroundAlerts {
   /// Show one local notification for [freshTitles]. Mobile-only (desktop
   /// keeps the `local_notifier` rail in [AlertNotifications]); returns true
   /// when a notification was shown.
-  static Future<bool> showFresh(List<String> freshTitles) async {
+  ///
+  /// [payload] is the tap deep link (`AlertDeepLink.build`, `mcp://inbox…`);
+  /// the response callback stashes it for the inbox to consume. Optional —
+  /// existing callers without a link keep working.
+  static Future<bool> showFresh(List<String> freshTitles,
+      {String? payload}) async {
     if (!isSupportedPlatform) return false;
-    final payload = buildLocalPayload('MyControlPanel alert', freshTitles);
-    if ((payload['body'] ?? '').isEmpty) return false;
+    final built = buildLocalPayload('MyControlPanel alert', freshTitles);
+    if ((built['body'] ?? '').isEmpty) return false;
     try {
       await initNotifications();
       if (!_pluginReady) return false;
@@ -263,14 +277,24 @@ abstract class BackgroundAlerts {
           DateTime.now().millisecondsSinceEpoch % 0x7fffffff;
       await _plugin.show(
         id: id,
-        title: payload['title'],
-        body: payload['body'],
+        title: built['title'],
+        body: built['body'],
         notificationDetails: details,
+        payload: payload,
       );
       return true;
     } catch (_) {
       return false;
     }
+  }
+
+  /// Tap-response sink: stash valid inbox deep links for the inbox to
+  /// consume on launch/resume. Foreign/legacy payloads are ignored.
+  static void _onTapResponse(NotificationResponse response) {
+    final payload = response.payload;
+    if (payload == null || payload.isEmpty) return;
+    if (AlertDeepLink.parse(payload) == null) return;
+    unawaited(AlertDeepLink.storePending(payload));
   }
 
   /// Record a background check attempt (called by the worker; the UI reads
