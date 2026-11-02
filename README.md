@@ -269,6 +269,9 @@ Feedback and PRs welcome — especially homelab/self-hosted setups.
  public repo. Pro and MSP bundles are *proposed* post-traction concepts with
  no prices and no sale dates yet. Full tier framing: [docs/packaging.md](docs/packaging.md).
  License decision ratified: [`docs/decisions/002-commercial-packaging.md`](docs/decisions/002-commercial-packaging.md).
+ Sales execution kit (Syafiqah): [`docs/sales/01-value-prop.md`](docs/sales/01-value-prop.md)
+ (value prop, ICP, pilot pricing, 10-min demo script, proposal/follow-up
+ templates, objections + ROI vs RMM).
 
 ## License
 

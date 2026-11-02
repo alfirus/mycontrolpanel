@@ -60,6 +60,15 @@ jobs:
           flutter-version: '3.47.9' # pinned — bump procedure in docs/release-process.md
       - name: Install dependencies
         run: flutter pub get
+      # Linux desktop system deps, ubuntu leg only (Lina — additive, needed
+      # by the tray slice #153: `flutter test` builds native assets for the
+      # whole graph and tray_manager -> cnativeapi needs GTK/X11/Xi headers;
+      # same package list release.yml uses).
+      - name: Install Linux desktop dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libstdc++-12-dev libsecret-1-dev libnotify-dev
       - name: Analyze headless slice
         run: flutter analyze --no-fatal-infos --no-fatal-warnings lib/background lib/headless.dart lib/main.dart lib/services/headless_slice.dart bin/headless_check.dart test/headless_state_test.dart test/headless_check_test.dart test/headless_contract_test.dart test/headless_entry_test.dart test/headless_slice_test.dart
       - name: Headless unit + contract tests

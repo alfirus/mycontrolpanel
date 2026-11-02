@@ -10,7 +10,9 @@ name: build-matrix
 # This workflow proves every PR still COMPILES on each shipping platform.
 # It publishes no releases and performs no code signing: signing needs
 # owner-held certificates (see docs/release-process.md) and stays a manual,
-# tag-gated step. No step in this workflow uses sudo.
+# tag-gated step. The ubuntu `gate` job installs Linux desktop system
+# packages with sudo (same list release.yml uses) because `flutter test`
+# builds native assets for the whole graph including the tray stack.
 
 on:
   pull_request:
@@ -41,6 +43,14 @@ jobs:
         with:
           channel: stable
           flutter-version: '3.47.9' # pinned — bump procedure in docs/release-process.md
+      # Linux desktop system deps (same list release.yml uses): `flutter
+      # test` builds native assets for the whole graph, and the tray stack
+      # (tray_manager -> nativeapi -> cnativeapi) compiles GTK/X11/Xi
+      # sources on Linux (Elizabeth, tray slice #153).
+      - name: Install Linux desktop dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libstdc++-12-dev libsecret-1-dev libnotify-dev
       - name: Install dependencies
         run: flutter pub get
       - name: Static analysis
