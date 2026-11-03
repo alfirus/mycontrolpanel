@@ -68,6 +68,32 @@ void main() {
       expect(await m.isOn(), isFalse);
       expect(files, isEmpty);
     });
+
+    test('Exec escapes backslashes and quotes, round-trips', () async {
+      const exe = r'/opt/m c/p"ath\app';
+      final entry =
+          LoginItemManager.renderDesktopFile(exePath: exe);
+      expect(entry, contains(r'Exec="/opt/m c/p\"ath\\app"'));
+      final files = <String, String>{};
+      final m = LoginItemManager(linuxDeps(files: files, exe: exe));
+      await m.setEnabled(true);
+      expect(await m.isOn(), isTrue);
+      expect(
+          HeadlessSecurity.findSecretMaterialInArgs(
+              files.values.single.split('\n')),
+          isEmpty);
+    });
+
+    test('path with spaces stays inside one quoted Exec value', () async {
+      const exe = '/opt/my app/mycontrolpanel';
+      final entry =
+          LoginItemManager.renderDesktopFile(exePath: exe);
+      expect(entry, contains('Exec="/opt/my app/mycontrolpanel"'));
+      final files = <String, String>{};
+      final m = LoginItemManager(linuxDeps(files: files, exe: exe));
+      await m.setEnabled(true);
+      expect(await m.isOn(), isTrue);
+    });
   });
 
   group('macos login agent', () {
@@ -92,6 +118,22 @@ void main() {
       expect(
           HeadlessSecurity.findSecretMaterialInArgs(
               plist.split('\n')),
+          isEmpty);
+    });
+
+    test('plist escapes XML metacharacters and round-trips', () async {
+      const exe = '/Applications/A&B<C>/mycontrolpanel';
+      final plist =
+          LoginItemManager.renderLaunchAgentPlist(exePath: exe);
+      expect(plist, contains('<string>/Applications/A&amp;B&lt;C&gt;/mycontrolpanel</string>'));
+      expect(plist, isNot(contains('<string>$exe</string>')));
+      final files = <String, String>{};
+      final m = LoginItemManager(macDeps(files: files, exe: exe));
+      await m.setEnabled(true);
+      expect(await m.isOn(), isTrue);
+      expect(
+          HeadlessSecurity.findSecretMaterialInArgs(
+              files.values.single.split('\n')),
           isEmpty);
     });
   });
@@ -132,12 +174,46 @@ void main() {
       expect(add, isNot(contains('HKLM')));
       expect(
           HeadlessSecurity.findSecretMaterialInArgs(add), isEmpty);
+      // /d value is quoted so paths with spaces survive.
+      final dValue = add[add.indexOf('/d') + 1];
+      expect(dValue.startsWith('"'), isTrue);
+      expect(dValue.endsWith('"'), isTrue);
 
       calls.clear();
       expect(await m.isOn(), isTrue);
       final query = calls.single;
       expect(query[1], 'query');
       expect(query, isNot(contains('HKLM')));
+    });
+
+    test('quoted /d value round-trips on paths with spaces', () async {
+      const exeWithSpace = 'C:/Program Files/mcp/app.exe';
+      final spaceCalls = <List<String>>[];
+      Future<LoginCmdResult> spaceRun(String exe, List<String> args) async {
+        spaceCalls.add([exe, ...args]);
+        if (args.first == 'query') {
+          return (
+            exitCode: 0,
+            stdout: '    MyControlPanel    REG_SZ    "$exeWithSpace"'
+          );
+        }
+        return (exitCode: 0, stdout: '');
+      }
+
+      final spaceManager = LoginItemManager(LoginItemDeps(
+        isWindows: true,
+        isLinux: false,
+        isMacOS: false,
+        home: 'C:/Users/u',
+        exePath: exeWithSpace,
+        run: spaceRun,
+      ));
+
+      await spaceManager.setEnabled(true);
+      final spaceAdd = spaceCalls.single;
+      expect(spaceAdd, contains('"$exeWithSpace"'));
+      spaceCalls.clear();
+      expect(await spaceManager.isOn(), isTrue);
     });
   });
 
