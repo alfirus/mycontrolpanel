@@ -132,13 +132,24 @@ class LoginItemManager {
   String get _macosPath =>
       _join(deps.home, 'Library/LaunchAgents', macosFileName, _sep);
 
+  /// Minimal XML escaping for plist string values (& < >).
+  static String escapeXml(String s) => s
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;');
+
+  /// Escape backslashes and double-quotes for the freedesktop Exec value
+  /// (rendered inside double quotes).
+  static String escapeDesktopExec(String s) =>
+      s.replaceAll('\\', '\\\\').replaceAll('"', '\\"');
+
   /// Render the freedesktop autostart entry (pure).
   static String renderDesktopFile({required String exePath}) =>
       '[Desktop Entry]\n'
       'Type=Application\n'
       'Name=MyControlPanel\n'
       'Comment=Stay notified when the app is closed\n'
-      'Exec="$exePath"\n'
+      'Exec="${escapeDesktopExec(exePath)}"\n'
       'Hidden=false\n'
       'X-GNOME-Autostart-enabled=true\n';
 
@@ -153,7 +164,7 @@ class LoginItemManager {
       '  <string>$macosLabel</string>\n'
       '  <key>ProgramArguments</key>\n'
       '  <array>\n'
-      '    <string>$exePath</string>\n'
+      '    <string>${escapeXml(exePath)}</string>\n'
       '  </array>\n'
       '  <key>RunAtLoad</key>\n'
       '  <true/>\n'
@@ -167,19 +178,23 @@ class LoginItemManager {
         if (deps.run == null) return false;
         final r = await deps.run!(
             'reg', ['query', windowsRunKey, '/v', windowsValueName]);
-        return r.exitCode == 0 && r.stdout.contains(deps.exePath);
+        // _install writes the value quoted ("<exePath>"); accept the
+        // quoted form plus the legacy unquoted form.
+        return r.exitCode == 0 &&
+            (r.stdout.contains('"${deps.exePath}"') ||
+                r.stdout.contains(deps.exePath));
       }
       if (deps.isLinux) {
         final cur =
             deps.readFile == null ? null : await deps.readFile!(_linuxPath);
         return cur != null &&
-            cur.contains('Exec="${deps.exePath}"');
+            cur.contains('Exec="${escapeDesktopExec(deps.exePath)}"');
       }
       if (deps.isMacOS) {
         final cur =
             deps.readFile == null ? null : await deps.readFile!(_macosPath);
         return cur != null &&
-            cur.contains('<string>${deps.exePath}</string>');
+            cur.contains('<string>${escapeXml(deps.exePath)}</string>');
       }
       return false;
     } catch (_) {
@@ -214,7 +229,7 @@ class LoginItemManager {
         '/t',
         'REG_SZ',
         '/d',
-        deps.exePath,
+        '"${deps.exePath}"',
         '/f',
       ]);
       return;
