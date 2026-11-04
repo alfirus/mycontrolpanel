@@ -349,6 +349,11 @@ abstract class BackgroundAlerts {
   /// Always records the check; never throws (a crashing worker costs more
   /// battery than a missed poll).
   ///
+  /// Hosts are polled concurrently with a per-host 15 s timeout (see
+  /// [pollHostsConcurrently]): one slow host times out alone instead of
+  /// stalling every host behind it, and the per-host diff/notify below
+  /// merges outcomes back in configuration order.
+  ///
   /// [fetchAlertsFor] is injectable for tests; production passes null to
   /// use [pollHostAlerts] with `sshSweep: false`.
   static Future<void> runBackgroundTick({
@@ -360,18 +365,28 @@ abstract class BackgroundAlerts {
       if (!(prefs.getBool(prefEnabledKey) ?? false)) return;
       final servers = await SecureStore.readServers();
       final agent = AgentService();
-      for (final s in servers.take(10)) {
+      final hosts = servers.take(10).toList();
+      final byId = <String, ServerConnection>{for (final s in hosts) s.id: s};
+      final outcomes = await pollHostsConcurrently<List<AlertEntry>>(
+        hostIds: [for (final s in hosts) s.id],
+        perHostTimeout: const Duration(seconds: 15),
+        fetch: (id) {
+          final s = byId[id]!;
+          if (fetchAlertsFor != null) return fetchAlertsFor(s);
+          return SecureStore.readSecret(SecureStore.agentTokenKey(s.id)).then(
+            (t) => pollHostAlerts(agent, s, agentToken: t, sshSweep: false),
+          );
+        },
+      );
+      // Ordered merge: outcomes arrive in configuration order, so the
+      // shared seen-set diff is stable regardless of answer order.
+      for (final o in outcomes) {
+        final alerts = o.value;
+        if (!o.answered || alerts == null) {
+          // One sick host never sinks the run.
+          continue;
+        }
         try {
-          final alerts = fetchAlertsFor != null
-              ? await fetchAlertsFor(s)
-              : await pollHostAlerts(
-                  agent,
-                  s,
-                  agentToken: await SecureStore.readSecret(
-                    SecureStore.agentTokenKey(s.id),
-                  ),
-                  sshSweep: false,
-                ).timeout(const Duration(seconds: 15));
           // Reuse the foreground diff verbatim (titles only — the worker
           // never touches widgets). The seen-set is shared with the
           // foreground rail, so neither rail double-notifies.
