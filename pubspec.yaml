@@ -36,13 +36,13 @@ dependencies:
   shared_preferences: ^2.3.3
   uuid: ^4.5.1
   dartssh2: ^4.1.0
-  file_picker: ^13.2.0
+  file_picker: ^13.3.2
   http: ^1.6.0
   flutter_markdown: ^0.7.7+1
   url_launcher: ^6.3.3
   package_info_plus: ^10.2.2
   path_provider: ^2.1.6
-  archive: ^4.5.2
+  archive: ^4.6.0
   crypto: ^3.0.8
   flutter_secure_storage: ^11.2.0
   local_notifier: ^0.1.6
@@ -50,7 +50,7 @@ dependencies:
   # Opt-in crash reporting (#26). Pinned 2026-10-29: latest stable per
   # https://pub.dev/api/packages/sentry_flutter; needs Dart >=3.12 /
   # Flutter >=3.44, satisfied by CI stable (Flutter 3.47.8 / Dart 3.13.7).
-  sentry_flutter: ^10.2.0
+  sentry_flutter: ^10.3.0
   # Mobile background alerting (beta.1, owner green-lit 2026-10-30 for ALL
   # platforms; desktop closed-app deferred to tray-mode work). Mobile-only at
   # runtime (guarded by Platform.isAndroid/isIOS): WorkManager periodic poll
