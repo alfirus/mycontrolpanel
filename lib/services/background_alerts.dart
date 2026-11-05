@@ -353,6 +353,11 @@ abstract class BackgroundAlerts {
   /// when the foreground rail fires the same alert concurrently, exactly
   /// one rail wins the claim and notifies — the loser stays silent.
   ///
+  /// Hosts are polled concurrently with a per-host 15 s timeout (see
+  /// [pollHostsConcurrently]): one slow host times out alone instead of
+  /// stalling every host behind it, and the per-host diff/notify below
+  /// merges outcomes back in configuration order.
+  ///
   /// [fetchAlertsFor] is injectable for tests; production passes null to
   /// use [pollHostAlerts] with `sshSweep: false`. [lockFile] is the
   /// cross-process guard (the dispatcher passes the shared per-user file;
@@ -368,18 +373,28 @@ abstract class BackgroundAlerts {
       if (!(prefs.getBool(prefEnabledKey) ?? false)) return;
       final servers = await SecureStore.readServers();
       final agent = AgentService();
-      for (final s in servers.take(10)) {
+      final hosts = servers.take(10).toList();
+      final byId = <String, ServerConnection>{for (final s in hosts) s.id: s};
+      final outcomes = await pollHostsConcurrently<List<AlertEntry>>(
+        hostIds: [for (final s in hosts) s.id],
+        perHostTimeout: const Duration(seconds: 15),
+        fetch: (id) {
+          final s = byId[id]!;
+          if (fetchAlertsFor != null) return fetchAlertsFor(s);
+          return SecureStore.readSecret(SecureStore.agentTokenKey(s.id)).then(
+            (t) => pollHostAlerts(agent, s, agentToken: t, sshSweep: false),
+          );
+        },
+      );
+      // Ordered merge: outcomes arrive in configuration order, so the
+      // shared seen-set diff is stable regardless of answer order.
+      for (final o in outcomes) {
+        final alerts = o.value;
+        if (!o.answered || alerts == null) {
+          // One sick host never sinks the run.
+          continue;
+        }
         try {
-          final alerts = fetchAlertsFor != null
-              ? await fetchAlertsFor(s)
-              : await pollHostAlerts(
-                  agent,
-                  s,
-                  agentToken: await SecureStore.readSecret(
-                    SecureStore.agentTokenKey(s.id),
-                  ),
-                  sshSweep: false,
-                ).timeout(const Duration(seconds: 15));
           // Single-flight claim on the shared seen-set (parity: the
           // foreground rail claims the same way). The winner notifies;
           // a concurrent foreground claim loses and stays silent.
