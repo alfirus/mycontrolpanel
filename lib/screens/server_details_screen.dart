@@ -10,12 +10,15 @@ import '../models/cron_entry.dart';
 import '../models/mock_data.dart';
 import '../models/server_connection.dart';
 import '../services/agent_service.dart';
+import '../services/host_snapshot_cache.dart';
+import '../services/background_alerts.dart';
 import '../services/secure_store.dart';
 import '../services/ssh_key_loader.dart';
 import '../services/apm_service.dart';
 import '../services/metrics_history.dart';
 import '../widgets/cron_dialogs.dart';
 import '../widgets/pitch_card.dart';
+import '../widgets/alerts_staleness_line.dart';
 
 /// Full detail for one saved server: connection, live metrics, its cronjobs, actions.
 class ServerDetailsScreen extends StatefulWidget {
@@ -31,6 +34,9 @@ class _ServerDetailsScreenState extends State<ServerDetailsScreen> {
   final _agent = AgentService();
   ServerConnection? _conn;
   Map<String, dynamic>? _metrics;
+  // Offline mode: last-good snapshot + staleness for this host.
+  DateTime? _snapshotAt;
+  bool _offline = false;
   ApmSummary? _apm;
   List<CronEntry> _crons = [];
   List<AppEntry> _apps = [];
@@ -72,16 +78,39 @@ class _ServerDetailsScreenState extends State<ServerDetailsScreen> {
   Future<void> _refreshMetrics() async {
     final c = _conn;
     if (c == null) return;
+    // Offline-first: seed the last-good snapshot before the live fetch so an
+    // unreachable host shows cache + stale banner instead of an error box.
+    if (_metrics == null) {
+      try {
+        final cached = await HostSnapshotCache.read(c.host);
+        if (cached != null && mounted) {
+          final at = await HostSnapshotCache.savedAt(c.host);
+          setState(() {
+            _metrics = cached;
+            _snapshotAt = at;
+            _offline = true;
+          });
+        }
+      } catch (_) {}
+    }
     setState(() { _metricsBusy = true; _metricsError = null; });
     final m = await _agent.fetch(c.host, serverId: c.id);
     if (!mounted) return;
     setState(() {
       _metricsBusy = false;
       if (m != null) {
+        // Live poll won: transparent resume — overwrite cache, clear stale.
         _metrics = m;
-      } else {
+        _snapshotAt = DateTime.now();
+        _offline = false;
+        unawaited(HostSnapshotCache.save(c.host, m));
+      } else if (_metrics == null) {
+        // Unreachable with no cache either: the only true error state.
         _metricsError = 'Agent not reachable at ${c.host}:${AgentService.agentPort}';
       }
+      // Else: unreachable but serving the seeded cache — keep it, mark stale.
+      // Alert identity still flows through the shared AlertWatch seen-set, so
+      // a reconnect never double-notifies.
     });
     // APM-lite: roll up this host's recorded poll history (best-effort).
     try {
@@ -391,8 +420,15 @@ class _ServerDetailsScreenState extends State<ServerDetailsScreen> {
 
   Widget _metricsCard() {
     final m = _metrics;
+    // Offline mode: cached snapshot renders the same bars; the footer swaps
+    // LIVE for the established stale banner (never an error box while cache
+    // exists — the error box below is only for never-had-data).
+    final staleLabel = _offline
+        ? BackgroundAlerts.formatLastChecked(
+            now: DateTime.now(), last: _snapshotAt)
+        : null;
     return PitchCard(
-      title: 'LIVE METRICS',
+      title: _offline ? 'CACHED METRICS' : 'LIVE METRICS',
       subtitle: m != null ? 'agent :${AgentService.agentPort} • up ${m['uptime_days']}d' : 'via metrics agent',
       trailing: _metricsBusy
           ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.accentCyan))
@@ -408,10 +444,17 @@ class _ServerDetailsScreenState extends State<ServerDetailsScreen> {
               ]),
               const SizedBox(height: 8),
               Row(children: [
-                Container(width: 7, height: 7, decoration: const BoxDecoration(color: AppColors.success, shape: BoxShape.circle)),
+                Container(width: 7, height: 7, decoration: BoxDecoration(color: _offline ? AppColors.warning : AppColors.success, shape: BoxShape.circle)),
                 const SizedBox(width: 6),
-                Text('LIVE • ${((m['cpu'] as num).toDouble() * 100).toInt()}% CPU • ${((m['ram'] as num).toDouble() * 100).toInt()}% RAM • ${((m['disk'] as num).toDouble() * 100).toInt()}% DISK', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: AppColors.success)),
+                if (_offline)
+                  Text('CACHED • ${((m['cpu'] as num).toDouble() * 100).toInt()}% CPU • ${((m['ram'] as num).toDouble() * 100).toInt()}% RAM • ${((m['disk'] as num).toDouble() * 100).toInt()}% DISK', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: AppColors.warning))
+                else
+                  Text('LIVE • ${((m['cpu'] as num).toDouble() * 100).toInt()}% CPU • ${((m['ram'] as num).toDouble() * 100).toInt()}% RAM • ${((m['disk'] as num).toDouble() * 100).toInt()}% DISK', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: AppColors.success)),
               ]),
+              if (_offline && staleLabel != null) ...[
+                const SizedBox(height: 6),
+                AlertsStalenessLine(label: staleLabel),
+              ],
               if (_apm != null) ...[
                 const SizedBox(height: 6),
                 Row(children: [
