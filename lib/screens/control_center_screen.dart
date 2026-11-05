@@ -33,6 +33,7 @@ import '../services/security_posture.dart';
 import '../services/ssh_key_loader.dart';
 import '../services/log_tail_service.dart';
 import '../services/metrics_history.dart';
+import '../services/chart_downsample.dart';
 import '../services/host_snapshot_cache.dart';
 import '../services/alert_watch.dart';
 import '../services/alert_notifications.dart';
@@ -2522,10 +2523,16 @@ class _ControlCenterScreenState extends State<ControlCenterScreen>
     onSelected: (v){ if (v) setState(()=> _serverFilter = val); }, materialTapTargetSize: MaterialTapTargetSize.shrinkWrap, visualDensity: VisualDensity.compact, padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 0),
   );
 
-  Widget _miniSparkline(List<double> vals, Color c) => LineChart(LineChartData(
-    gridData: const FlGridData(show: false), titlesData: const FlTitlesData(show: false), borderData: FlBorderData(show: false),
-    lineBarsData: [LineChartBarData(spots: [for (int i=0;i<vals.length;i++) FlSpot(i.toDouble(), vals[i])], isCurved: true, color: c, barWidth: 1.6, dotData: const FlDotData(show: false), belowBarData: BarAreaData(show: true, color: c.withValues(alpha: 0.08)))],
-  ));
+  /// Per-card CPU sparkline. Aged/long histories collapse to a fixed render
+  /// budget before spots are built so per-tick path cost stays flat on
+  /// low-end Android; demo-scale series pass through untouched (pixel parity).
+  Widget _miniSparkline(List<double> vals, Color c) {
+    final sampled = downsampleSeries(vals, maxPoints: kMaxSparklinePoints);
+    return LineChart(LineChartData(
+      gridData: const FlGridData(show: false), titlesData: const FlTitlesData(show: false), borderData: FlBorderData(show: false),
+      lineBarsData: [LineChartBarData(spots: [for (int i=0;i<sampled.length;i++) FlSpot(i.toDouble(), sampled[i])], isCurved: true, color: c, barWidth: 1.6, dotData: const FlDotData(show: false), belowBarData: BarAreaData(show: true, color: c.withValues(alpha: 0.08)))],
+    ));
+  }
 
   /// Real discovered crons across all connected servers (empty until polled).
   List<CronEntry> get _realCrons => _serverCrons.values.expand((e) => e).toList();
@@ -3761,7 +3768,11 @@ class _ControlCenterScreenState extends State<ControlCenterScreen>
       final allLat = _latHistory.values.expand((e) => e).toList();
       final p = MetricsHistory.p95(allLat);
       p95label = MetricsHistory.formatMs(p);
-      final series = allLat.isEmpty ? <double>[] : allLat.take(40).toList();
+      // Render budget: merged multi-host histories can outgrow any single
+      // host cap, so collapse aged points before building spots instead of
+      // redrawing the full series every tick. Short series pass through
+      // untouched (pixel parity with the 0.71 rendering).
+      final series = allLat.isEmpty ? <double>[] : downsampleSeries(allLat, maxPoints: kMaxLatencyChartPoints);
       if (series.isNotEmpty) {
         final maxV = series.reduce((a, b) => a > b ? a : b);
         final scale = maxV <= 0 ? 1.0 : maxV;
