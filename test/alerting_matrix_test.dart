@@ -19,6 +19,8 @@
 /// Device-lab rows (SSH-live hosts, real schedulers, real toasts) are NOT
 /// here — they live in the guarded `device-lab` lane
 /// (`.github/workflows/device-lab.yml`) + `docs/qa/test-plan-beta.md`.
+import 'dart:io';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -426,6 +428,56 @@ void main() {
           prefs.getStringList('alert_watch_seen_v1')?.toSet() ?? {};
       expect(AlertWatch.freshTitles(current, seen, [alert], const []),
           isEmpty);
+    });
+
+    test('AM-D6 cross-rail simultaneous fire notifies exactly once', () async {
+      // Regression for the read-modify-write double-toast: foreground +
+      // background snapshotting the same stale seen-set before either
+      // marks must still yield ONE notification, not two. Both rails
+      // claim through the shared per-user lock file (file-lock semantics
+      // per the headless single-flight contract).
+      final dir = await Directory.systemTemp.createTemp('mcp-xrail-');
+      final lockFile =
+          File('${dir.path}${Platform.pathSeparator}headless.lock');
+      try {
+        final alert = MatrixDoubles.firingDisk('xrail-host');
+        final keys = AlertWatch.currentKeys([alert], const []);
+        final results = await Future.wait([
+          AlertWatch.claimFreshTitles(keys, [alert], const [],
+              lockFile: lockFile),
+          AlertWatch.claimFreshTitles(keys, [alert], const [],
+              lockFile: lockFile),
+        ]);
+        final notifying =
+            results.where((fresh) => fresh.isNotEmpty).length;
+        expect(notifying, 1,
+            reason: 'simultaneous cross-rail fire must notify exactly once');
+        expect(results.expand((fresh) => fresh), hasLength(1));
+        // Sequential follow-up on the now-shared set stays silent.
+        final again = await AlertWatch.claimFreshTitles(keys, [alert],
+            const [],
+            lockFile: lockFile);
+        expect(again, isEmpty);
+      } finally {
+        try {
+          await dir.delete(recursive: true);
+        } catch (_) {}
+      }
+    });
+
+    test('AM-D6b mutex-only concurrent claims still notify exactly once',
+        () async {
+      // Same exactly-once contract without a lock file (unit-test rails
+      // and same-isolate callers): the in-process chain serializes the
+      // claims so the loser sees the winner's write.
+      final alert = MatrixDoubles.firingDisk('xrail-mutex-host');
+      final keys = AlertWatch.currentKeys([alert], const []);
+      final results = await Future.wait([
+        AlertWatch.claimFreshTitles(keys, [alert], const []),
+        AlertWatch.claimFreshTitles(keys, [alert], const []),
+      ]);
+      expect(results.where((fresh) => fresh.isNotEmpty), hasLength(1));
+      expect(results.expand((fresh) => fresh), hasLength(1));
     });
 
     test('AM-D4 in-app fan-out stamps the shared check (honest while open)',

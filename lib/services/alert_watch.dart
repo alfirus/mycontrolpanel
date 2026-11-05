@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: MIT
+import 'dart:async';
+import 'dart:io';
+
 import 'package:shared_preferences/shared_preferences.dart';
+import '../background/headless_state.dart';
 import '../models/alert_entry.dart';
 import '../models/mock_data.dart';
 
@@ -32,6 +36,76 @@ class AlertWatch {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setStringList(_seenKey, keys.toList());
     } catch (_) {}
+  }
+
+  /// Injectable cross-process lock for the shared seen-set transaction.
+  /// Tests / device-lab point it at a temp dir; production resolves the
+  /// per-user default (ADR-003: per-user locations only).
+  static File? dedupLockFileOverride;
+
+  /// Per-user lock file guarding the shared `alert_watch_seen_v1`
+  /// transaction. Every prefs-sharing rail takes this same file
+  /// (foreground claim callers + `BackgroundAlerts.runBackgroundTick`)
+  /// so concurrent rails serialize instead of double-notifying.
+  static File dedupLockFile() =>
+      dedupLockFileOverride ??
+      HeadlessPaths.lockFile(HeadlessPaths.stateDir());
+
+  /// In-process single-flight chain: serializes concurrent claims inside
+  /// this isolate. The file lock covers the cross-process half; both
+  /// layers must agree (same two-layer contract as [HeadlessLock]).
+  static Future<void> _claimChain = Future.value();
+
+  /// Atomically claim the fresh batch for [current]: read the shared
+  /// seen-set, diff, and mark seen in one critical section, then return
+  /// the fresh titles the caller must notify on.
+  ///
+  /// Exactly-once contract: when N rails claim the same firing batch
+  /// concurrently, exactly one claimant gets a non-empty list (the
+  /// winner) and every loser gets `[]` and must stay silent. A rail that
+  /// finds the lock held returns `[]` immediately (skip, never overlap —
+  /// same philosophy as the headless tick's exit-2 single-flight).
+  ///
+  /// [lockFile] is the cross-process guard (`dedupLockFile()` in
+  /// production); null means in-process mutex only (unit tests, and
+  /// rails that never leave their isolate). [lockTimeout] bounds the
+  /// wait — foreground callers pass a short timeout so the UI never
+  /// stalls behind a background tick; a timeout is a skip (`[]`), and a
+  /// skip is safe because the lock holder owns the toast.
+  static Future<List<String>> claimFreshTitles(
+    Set<String> current,
+    List<AlertEntry> alerts,
+    List<DeployItem> runs, {
+    File? lockFile,
+    Duration lockTimeout = const Duration(seconds: 10),
+  }) async {
+    final previous = _claimChain;
+    final gate = Completer<void>();
+    _claimChain = gate.future;
+    await previous;
+    HeadlessLock? lock;
+    try {
+      if (lockFile != null) {
+        lock = await HeadlessLock.tryAcquire(lockFile, timeout: lockTimeout);
+        if (lock == null) return <String>[];
+      }
+      final prefs = await SharedPreferences.getInstance();
+      try {
+        // Fresh read inside the critical section: a contending isolate's
+        // cache may predate the winner's write (real backends only; the
+        // unit-test mock answers from memory either way).
+        await prefs.reload();
+      } catch (_) {}
+      final seen = prefs.getStringList(_seenKey)?.toSet() ?? {};
+      final fresh = freshTitles(current, seen, alerts, runs);
+      await markSeen(current);
+      return fresh;
+    } finally {
+      try {
+        await lock?.release();
+      } catch (_) {}
+      gate.complete();
+    }
   }
 
   /// Current badge set (firing alerts + failed runs).
