@@ -407,11 +407,25 @@ class _ControlCenterScreenState extends State<ControlCenterScreen>
   Future<void> _updateAlertBadge() async {
     try {
       final keys = AlertWatch.currentKeys(_realAlerts, _allRuns);
-      final seen = await _readSeenKeys();
-      final fresh = AlertWatch.freshTitles(keys, seen, _realAlerts, _allRuns);
+      // Payload-only snapshot for the tap deep link (informational; the
+      // notify/no-notify decision below comes from the atomic claim).
+      final seenBefore = await _readSeenKeys();
+      // Single-flight claim on the shared seen-set: when the background
+      // worker fires the same alert concurrently, exactly one rail wins
+      // and notifies. Short lock timeout — the UI never stalls behind a
+      // background tick; a skip is safe because the lock holder owns the
+      // toast for this batch.
+      final fresh = await AlertWatch.claimFreshTitles(
+        keys,
+        _realAlerts,
+        _allRuns,
+        lockFile: AlertWatch.dedupLockFile(),
+        lockTimeout: const Duration(seconds: 2),
+      );
       if (!mounted) return;
       setState(() => _alertBadge = keys.length);
-      await AlertWatch.markSeen(keys);
+      // NB: no separate markSeen — the claim above already recorded the
+      // batch atomically (a second mark here would reopen the race).
       // Desktop beta.1 rail: the in-app diff tick IS the check — record it
       // against the shared staleness stamp on every tick (even with zero
       // fresh titles) so the alerts-surface "last checked …" line stays
@@ -434,7 +448,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen>
         // deferred to tray-mode work (DesktopAlerts.closedAppNote).
         // Notification-tap deep link: fresh keys ride as `mcp://inbox`
         // payload on both rails; taps land on the inbox tab (highlighted).
-        final freshKeys = keys.difference(seen).take(10).toList();
+        final freshKeys = keys.difference(seenBefore).take(10).toList();
         final tapPayload = AlertDeepLink.build(keys: freshKeys);
         unawaited(BackgroundAlerts.showFresh(fresh, payload: tapPayload));
         if (DesktopAlerts.isSupportedPlatform &&
