@@ -151,6 +151,14 @@ void main() {
 
       await tester.pump(const Duration(seconds: 3));
       expect(find.textContaining('heartbeat ok'), findsNWidgets(base + 2));
+
+      // Drain: unmount cancels the periodic tickers, and advancing well
+      // past the 2s cross-rail lock timeout ([AlertWatch.claimFreshTitles]
+      // inside the auto-tick badge path) settles any in-flight badge claim,
+      // so no timer is left pending at teardown (framework invariant).
+      await tester.pumpWidget(const SizedBox());
+      await tester.pump(const Duration(minutes: 5));
+      expect(tester.takeException(), isNull);
     });
 
     testWidgets('unmount cancels both tickers (no post-dispose ticks)',
