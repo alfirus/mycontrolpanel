@@ -48,6 +48,7 @@ import 'services/github_service.dart';
 import 'services/gitlab_service.dart';
 import 'services/headless_security.dart';
 import 'services/headless_slice.dart';
+import 'services/polling_alerts.dart';
 import 'services/secure_store.dart';
 
 /// Max hosts per tick (parity with `BackgroundAlerts.runBackgroundTick`).
@@ -155,20 +156,33 @@ Future<int> _runTick({
     } catch (_) {
       servers = const [];
     }
+    final enabled = servers
+        .where((e) => e.enabled)
+        .take(headlessMaxHosts)
+        .toList();
+    final byId = <String, ServerConnection>{for (final s in enabled) s.id: s};
+    // Concurrent fan-out with a per-host timeout: one slow SSH handshake
+    // times out alone instead of stalling every host behind it (the old
+    // sequential loop failure). Outcomes arrive in configuration order so
+    // the merged signal list is stable tick to tick.
+    final outcomes = await pollHostsConcurrently<List<HeadlessSignal>>(
+      hostIds: [for (final s in enabled) s.id],
+      perHostTimeout: headlessFetchTimeout,
+      fetch: (id) {
+        final s = byId[id]!;
+        return (fetchFor != null ? fetchFor(s) : _fetchForDefault(s, readVault))
+            .timeout(headlessFetchTimeout);
+      },
+    );
     final out = <HeadlessSignal>[];
     var answered = false;
-    for (final s in servers.where((e) => e.enabled).take(headlessMaxHosts)) {
-      try {
-        final signals = fetchFor != null
-            ? await fetchFor(s)
-                .timeout(headlessFetchTimeout)
-            : await _fetchForDefault(s, readVault).timeout(
-                headlessFetchTimeout);
+    for (final o in outcomes) {
+      final signals = o.value;
+      if (o.answered && signals != null) {
         answered = true;
         out.addAll(signals);
-      } catch (_) {
-        // One sick host never sinks the run (parity: runBackgroundTick).
       }
+      // One sick host never sinks the run (parity: runBackgroundTick).
     }
     // CI enrichment (slice parity): failed runs ride the host tick so the
     // headless verdict covers the same `AlertWatch.currentKeys(alerts,
