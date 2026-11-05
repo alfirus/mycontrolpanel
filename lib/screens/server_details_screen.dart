@@ -109,8 +109,8 @@ class _ServerDetailsScreenState extends State<ServerDetailsScreen> {
         _metricsError = 'Agent not reachable at ${c.host}:${AgentService.agentPort}';
       }
       // Else: unreachable but serving the seeded cache — keep it, mark stale.
-      // Alert identity still flows through the shared AlertWatch seen-set, so
-      // a reconnect never double-notifies.
+      // Alert identity flows through the atomic AlertWatch seen-set claim,
+      // so a reconnect never double-notifies.
     });
     // APM-lite: roll up this host's recorded poll history (best-effort).
     try {

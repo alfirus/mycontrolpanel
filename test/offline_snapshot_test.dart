@@ -6,7 +6,7 @@
 // - Unreachable hosts render the cached snapshot with the established
 //   stale banner ("last checked Xm ago") instead of error screens.
 // - Reconnect resumes live polling transparently: retained cached alerts
-//   diff to zero fresh titles through the shared AlertWatch seen-set, so
+//   claim silent through the atomic AlertWatch seen-set transaction, so
 //   nothing double-notifies.
 //
 // CI determinism: SharedPreferences is the only mock
@@ -201,24 +201,28 @@ void main() {
           time: DateTime(2026, 1, 1),
         );
 
-    test('retained cached alerts diff to zero fresh titles', () {
-      // First tick (live): keys unseen → one fresh title, then marked seen.
+    test('retained cached alerts claim silent, new alerts claim once',
+        () async {
+      // First tick (live): the winner gets the titles.
       final alerts = [firing('web-1')];
       final runs = [failedRun()];
       final keys = AlertWatch.currentKeys(alerts, runs);
-      final freshFirst = AlertWatch.freshTitles(keys, {}, alerts, runs);
-      expect(freshFirst, isNotEmpty);
-      // Offline ticks serve the same retained alerts: seen-set already has
-      // the keys → silent.
-      final freshOffline = AlertWatch.freshTitles(keys, keys, alerts, runs);
-      expect(freshOffline, isEmpty);
+      final first =
+          await AlertWatch.claimFreshTitles(keys, alerts, runs);
+      expect(first, isNotEmpty);
+      // Offline ticks serve the same retained batch: silent.
+      final offline =
+          await AlertWatch.claimFreshTitles(keys, alerts, runs);
+      expect(offline, isEmpty);
       // Reconnect with unchanged alerts: still silent (no duplicates).
-      final freshReconnect = AlertWatch.freshTitles(keys, keys, alerts, runs);
-      expect(freshReconnect, isEmpty);
+      final reconnect =
+          await AlertWatch.claimFreshTitles(keys, alerts, runs);
+      expect(reconnect, isEmpty);
       // A genuinely new alert after reconnect fires exactly once.
       final grown = [...alerts, firing('db-2')];
       final grownKeys = AlertWatch.currentKeys(grown, runs);
-      final freshNew = AlertWatch.freshTitles(grownKeys, keys, grown, runs);
+      final freshNew =
+          await AlertWatch.claimFreshTitles(grownKeys, grown, runs);
       expect(freshNew.length, 1);
     });
   });

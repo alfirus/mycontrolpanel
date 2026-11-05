@@ -135,8 +135,8 @@ class _ControlCenterScreenState extends State<ControlCenterScreen>
   // error box. [_snapshotAt] is the per-host last-good time, [_offlineHosts]
   // marks which server ids are currently serving cache (cleared on the
   // next successful poll = transparent resume, no duplicate alerts: the
-  // alert diff below reuses the shared AlertWatch seen-set, so retained
-  // cached alerts never re-fire).
+  // badge tick below claims through the atomic AlertWatch seen-set
+  // transaction, so retained cached alerts never re-fire).
   Map<String, DateTime> _snapshotAt = {}; // host -> last-good poll time
   Set<String> _offlineHosts = {}; // server ids currently serving cache
   Set<String> _installing = {};
@@ -408,9 +408,9 @@ class _ControlCenterScreenState extends State<ControlCenterScreen>
         if (m != null) {
           // Live poll won: overwrite the snapshot (transparent resume) and
           // clear the offline flag. No alert housekeeping here — the badge
-          // tick below diffs through the shared AlertWatch seen-set, so a
-          // reconnect with unchanged alerts stays silent and genuinely new
-          // alerts fire exactly once.
+          // tick below claims through the atomic AlertWatch seen-set
+          // transaction, so a reconnect with unchanged alerts stays silent
+          // and genuinely new alerts fire exactly once.
           setState(() {
             _metrics[c.id] = m;
             _offlineHosts.remove(c.id);
