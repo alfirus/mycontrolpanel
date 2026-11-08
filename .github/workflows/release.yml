@@ -7,6 +7,10 @@ name: release
 #   mycontrolpanel-windows-<version>.zip
 #   mycontrolpanel-linux-<version>.tar.gz
 #   mycontrolpanel-android-<version>.apk   (extra: sideload / store track)
+#   mycontrolpanel-headless-<version>.zip   (extra: scheduler/unit install
+#     scripts + unit templates + tray icons + headless runbook — TM-2
+#     packaging half of #125; updater ignores it, C2 pins only the
+#     three desktop assets above so this extra is gate-safe)
 #   SHA256SUMS.txt                          (covers every asset above plus
 #   sbom-<version>.cyclonedx.json            the SBOM and build-info receipts)
 #   build-info-<os>.json                    (toolchain provenance per OS)
@@ -439,6 +443,50 @@ jobs:
           merge-multiple: true
           # release-proof-* (gate verdict) lands here too via merge-multiple;
           # it is published below as the audit receipt, never checksummed.
+
+      - name: Checkout (headless bundle sources)
+        # The publish job needs repo files for the headless scheduler
+        # bundle (scripts/headless, tray icons, runbook). Builders and the
+        # gate never see them, so C2 keeps pinning only the three desktop
+        # assets — the bundle below is purely additive.
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Assemble headless scheduler bundle (#125 TM-2)
+        # Single cross-platform zip published alongside the desktop
+        # archives: per-user scheduler install/uninstall scripts + unit
+        # templates (no elevation), tray icon states, and the manual-install
+        # runbook. Single-binary contract: the installed app binary itself
+        # serves `--poll-headless` (contract docs/specs/headless-cli-contract.md);
+        # `mycontrolpanel-check` is also baked INSIDE each desktop archive
+        # (see the build job) for wrapper use. Stdlib-only python so no
+        # toolchain setup is needed in the publish job.
+        shell: bash
+        run: |
+          python3 - <<'EOF'
+          import os, zipfile
+          version = "${{ steps.ver.outputs.version }}"
+          out = f"dist/mycontrolpanel-headless-{version}.zip"
+          # (source path in repo -> path inside the zip)
+          files = []
+          for root, _, fns in os.walk("scripts/headless"):
+              for fn in sorted(fns):
+                  src = os.path.join(root, fn)
+                  files.append((src, src))
+          for fn in sorted(os.listdir("assets/tray")):
+              files.append((os.path.join("assets/tray", fn), f"tray-icons/{fn}"))
+          files.append(("docs/runbooks/headless-manual-install.md",
+                        "headless-manual-install.md"))
+          with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
+              for src, arc in files:
+                  zf.write(src, arc)
+          print(f"wrote {out} ({len(files)} files):")
+          with zipfile.ZipFile(out) as zf:
+              for n in zf.namelist():
+                  print(f"  {n}")
+          EOF
+          ls -la "dist/mycontrolpanel-headless-${{ steps.ver.outputs.version }}.zip"
 
       - name: Checksums
         shell: bash
