@@ -69,7 +69,7 @@ the checklist at that time. Until then the checklist stays unticked.
 
 ## 5. Sign-offs (fill before store submit)
 
-- [ ] Kira brand review (tokens, series consistency, legibility)
+- [x] Kira brand review (tokens, series consistency, legibility) — GRANTED t_4ce92366 (post-#160 fixes + 2 nits, cold vision-read of 6 PNGs)
 - [x] Naura messaging sign-off (claims vs README matrix + `listing-copy.md`) — GRANTED 2026-11-03, re-review t_9c86034a post-#160 (pixels vision-verified on main).
 - [ ] Sofia voice · Syafiqah kit safety (companions, not blocking this pack)
 - [ ] Alya privacy review on release PR (permissions/nutrition answers)
