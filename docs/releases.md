@@ -37,6 +37,11 @@ git tag v1.0.0-alpha.2 && git push origin v1.0.0-alpha.2
       `mycontrolpanel-macos-<version>.zip`,
       `mycontrolpanel-windows-<version>.zip`,
       `mycontrolpanel-linux-<version>.tar.gz`, plus `SHA256SUMS.txt`.
+      Extras also published (and checksummed, updater-ignored, gate-safe):
+      `mycontrolpanel-android-<version>.apk`,
+      `mycontrolpanel-headless-<version>.zip` (scheduler/unit scripts +
+      tray icons + headless runbook, #125), SBOM + `build-info-*.json`.
+      `SHA256SUMS.txt` must list every `mycontrolpanel-*` file.
 - [ ] In-app update path spot-checked (Windows/Linux/macOS against the
       new GitHub Release; stable track. Beta tags additionally checked
       with the beta-track opt-in per `docs/runbooks/rollout.md`).

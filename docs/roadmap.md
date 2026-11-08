@@ -105,6 +105,18 @@ install with vault-only credentials (Alya review closed); `flutter
 analyze` + `flutter test` green; assets Burhanah-verified; beta.2 tag cut
 via `release.yml`.
 
+What each OS build delivers for closed-app mode (#125, shipped in
+`release.yml` + `docs/release-process.md`): every desktop archive carries
+the single-binary `--poll-headless` entry-point plus the baked-in
+`mycontrolpanel-check` wrapper; per-user scheduler wiring (Task Scheduler
+XML / systemd user service+timer / LaunchAgent plist), tray icon states,
+and the manual-install runbook ship in the published
+`mycontrolpanel-headless-<version>.zip` (checksummed, updater-ignored,
+gate-safe). Linux stays checksum-only (no signing story for tarballs);
+Windows Authenticode and Apple Developer ID/notarization stay unenrolled
+owner steps (see `docs/release-signing.md` + `need-owner-decision`
+follow-ups) — unenrolled builds ship unsigned, as before.
+
 Tracking (Shiela, TM-8): epic #119, children #121 (TM-2 Windows), #122
 (TM-2 Linux), #123 (TM-1 headless CLI), #124 (TM-3/TM-4 tray + menu-bar),
 #125 (TM-2 packaging half + release assets). WBS/RACI owned by Rina —

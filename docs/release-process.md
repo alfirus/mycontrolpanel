@@ -49,16 +49,41 @@ release is traceable to its exact toolchain after the fact.
   `mycontrolpanel-windows-<version>.zip`,
   `mycontrolpanel-linux-<version>.tar.gz`, plus `SHA256SUMS.txt`.
   Do not rename assets without updating the updater + this doc.
+  Extra published files (Android APK, headless scheduler bundle,
+  SBOM, build-info receipts) are ignored by the updater and pinned
+  out of the release-gate C2 check, so they are gate-safe additions.
+
+## Headless / scheduler bundle (TM-2, #125)
+
+Tag releases additionally publish `mycontrolpanel-headless-<version>.zip`,
+assembled in the `publish` job (after the gate, so C2 keeps pinning only
+the three desktop assets). Contents:
+
+- `scripts/headless/` — per-user install/uninstall scripts + unit
+  templates for all three OSes (Windows Task Scheduler XML, Linux
+  systemd user service + timer, macOS LaunchAgent plist). No elevation.
+- `tray-icons/` — the four tray states (`tray-ok/firing/quiet/stale.png`,
+  from `assets/tray/`).
+- `headless-manual-install.md` — the manual install/uninstall runbook.
+
+Single-binary contract: the installed app binary itself serves
+`--poll-headless` (frozen contract
+`docs/specs/headless-cli-contract.md`); `mycontrolpanel-check` is also
+baked INSIDE each desktop archive (see the build job's stage step) for
+wrapper use. The desktop archives therefore deliver closed-app polling
+with no extra download; the headless zip only adds the scheduler wiring
++ icons + runbook. `SHA256SUMS.txt` covers the headless zip like every
+other shippable (the `mycontrolpanel-*` glob in the Checksums step).
 
 ## Platform matrix
 
-| Platform | PR smoke build (`build-matrix.yml`) | Tag release (`release.yml`) | Signing |
-|---|---|---|---|
-| Windows | `flutter build windows`, artifact 7d | `.zip` published | Unsigned until owner enrolls; then Authenticode via `release-signing` env (see `docs/release-signing.md`) |
-| macOS | `flutter build macos`, artifact 7d | `.zip` (ditto) published | Unsigned until owner enrolls; then Developer ID `codesign` via `release-signing` env |
-| Linux | analyze+test only (see note) | `.tar.gz` published | SHA256SUMS checksum (no signing story for tarballs) |
-| Android | `flutter build apk --release` (debug-signed), artifact 7d | `.apk` published (sideload / store track) | Debug key until owner enrolls; then Play keystore via `release-signing` env + `android/key.properties` |
-| iOS | `flutter build ios --no-codesign` | Not published (no distributable without export) | No signing in CI; provisioning is a manual owner step |
+| Platform | PR smoke build (`build-matrix.yml`) | Tag release (`release.yml`) | Closed-app delivery in the build | Signing |
+|---|---|---|---|---|
+| Windows | `flutter build windows`, artifact 7d | `.zip` published | app `.exe` (serves `--poll-headless`) + `mycontrolpanel-check.exe` baked in; scheduler wiring via headless zip (`install-windows.ps1` + `mcp-poll-task.xml`) | Unsigned until owner enrolls; then Authenticode via `release-signing` env (see `docs/release-signing.md`) |
+| macOS | `flutter build macos`, artifact 7d | `.zip` (ditto) published | `.app` (serves `--poll-headless`) + `mycontrolpanel-check` baked in `Contents/MacOS/`; scheduler wiring via headless zip (`install-macos.sh` + `com.mycontrolpanel.poll.plist`) | Unsigned until owner enrolls; then Developer ID `codesign` via `release-signing` env |
+| Linux | analyze+test only (see note) | `.tar.gz` published | `bundle/` (serves `--poll-headless`) + `mycontrolpanel-check` baked in; scheduler wiring via headless zip (`install-linux.sh` + `mcp-poll.service`/`.timer`) | SHA256SUMS checksum (no signing story for tarballs) |
+| Android | `flutter build apk --release` (debug-signed), artifact 7d | `.apk` published (sideload / store track) | n/a (no closed-app scheduler; OS background limits — Post-1.0) | Debug key until owner enrolls; then Play keystore via `release-signing` env + `android/key.properties` |
+| iOS | `flutter build ios --no-codesign` | Not published (no distributable without export) | n/a | No signing in CI; provisioning is a manual owner step |
 
 Linux note: a full Linux desktop build needs `apt-get install` of GTK
 toolchains (privileged, sudo). Per repo policy there are no sudo steps in
