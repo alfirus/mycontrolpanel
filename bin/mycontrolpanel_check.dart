@@ -18,7 +18,7 @@
 ///   mycontrolpanel-check ledger [--tail N] [--json] [--state-dir <path>]
 ///   mycontrolpanel-check install --install-dir <dir> --wrapper <exe>
 ///       [--task-path <tn>] [--unit-name <n>] [--sandbox <dir>]
-///       [--force] [--template-dir <dir>]
+///       [--install-user <DOMAIN/user>] [--force] [--template-dir <dir>]
 ///   mycontrolpanel-check verify [--task-path <tn>] [--sandbox <dir>]
 ///       [--artifact <path>] [--template-dir <dir>]
 ///   mycontrolpanel-check uninstall [--task-path <tn>] [--sandbox <dir>]
@@ -78,7 +78,8 @@ Usage:
   mycontrolpanel-check ledger [--tail N] [--json] [--state-dir <path>]
   mycontrolpanel-check install --install-dir <dir> --wrapper <exe>
       [--task-path <tn>] [--unit-name <n>] [--unit-dir <dir>]
-      [--sandbox <dir>] [--no-reload] [--force] [--template-dir <dir>]
+      [--install-user <DOMAIN/user>] [--sandbox <dir>] [--no-reload]
+      [--force] [--template-dir <dir>]
   mycontrolpanel-check verify [--task-path <tn>] [--unit-name <n>]
       [--unit-dir <dir>] [--sandbox <dir>] [--artifact <path>]
       [--template-dir <dir>] [--json]
@@ -209,6 +210,7 @@ Future<int> _install(List<String> args) async {
     taskPath: _flagValue(args, '--task-path') ?? defaultTaskPath,
     unitName: _flagValue(args, '--unit-name') ?? defaultUnitName,
     unitDirOverride: _flagValue(args, '--unit-dir'),
+    installUser: _flagValue(args, '--install-user'),
     sandbox: _flagValue(args, '--sandbox'),
     noReload: _hasFlag(args, '--no-reload'),
     force: _hasFlag(args, '--force'),

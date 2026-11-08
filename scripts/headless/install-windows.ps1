@@ -7,11 +7,16 @@
 #   .\install-windows.ps1 -InstallDir "$env:LOCALAPPDATA\MyControlPanel"
 param(
   [string]$InstallDir = "$env:LOCALAPPDATA\MyControlPanel",
-  [string]$TaskName = "\MyControlPanel\poll-headless"
+  [string]$TaskName = "\MyControlPanel\poll-headless",
+  # User scope for the LogonTrigger: an unscoped logon trigger fires at
+  # any logon, so schtasks /Create demands elevation and a standard-user
+  # install fails with "Access is denied". Scoping to the installing
+  # user keeps the install per-user with no elevation.
+  [string]$InstallUser = ("$env:USERDOMAIN\$env:USERNAME")
 )
 $ErrorActionPreference = 'Stop'
 $template = Join-Path $PSScriptRoot 'windows\mcp-poll-task.xml'
-$filled = (Get-Content $template -Raw).Replace('INSTALL_DIR', $InstallDir)
+$filled = (Get-Content $template -Raw).Replace('INSTALL_DIR', $InstallDir).Replace('INSTALL_USER', $InstallUser)
 $tmp = [IO.Path]::GetTempFileName()
 Set-Content -Path $tmp -Value $filled -Encoding Unicode
 schtasks /Create /TN $TaskName /XML $tmp /F

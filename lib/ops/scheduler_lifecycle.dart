@@ -78,6 +78,7 @@ class InstallOptions {
     this.templateDir,
     this.preflight,
     this.runCmd,
+    this.installUser,
   });
 
   final String installDir;
@@ -93,6 +94,12 @@ class InstallOptions {
   final String? templateDir;
   final Future<ProviderResult> Function()? preflight;
   final Future<ProcessResult> Function(String exe, List<String> args)? runCmd;
+
+  /// DOMAIN\user the Windows LogonTrigger fires for. Null resolves to the
+  /// current Windows user at install time. An unscoped logon trigger fires
+  /// at any logon, so schtasks /Create demands elevation — scoping keeps
+  /// the install per-user with no elevation (live repro 2026-11-08).
+  final String? installUser;
 }
 
 /// Outcome of one lifecycle operation.
@@ -213,9 +220,12 @@ abstract class SchedulerLifecycle {
       '<Command>INSTALL_DIR\\mycontrolpanel.exe</Command>';
   static const _windowsArgsAnchor =
       '<Arguments>--poll-headless</Arguments>';
+  static const _windowsTriggerUserAnchor =
+      '<UserId>INSTALL_USER</UserId>';
 
   /// Fill the Windows task XML: template triggers/principals/settings
-  /// preserved, Exec action routed through the wrapper. Throws
+  /// preserved, Exec action routed through the wrapper, LogonTrigger
+  /// scoped to [installUser]. Throws
   /// [StateError] when the template anchors move (fail loud on drift).
   ///
   /// The template's header comment is dropped in the managed artifact:
@@ -229,12 +239,14 @@ abstract class SchedulerLifecycle {
     required String template,
     required String wrapperExe,
     required String tickBinary,
+    required String installUser,
   }) {
     final uncommented = _stripXmlComments(template);
     if (!uncommented.contains(_windowsCommandAnchor) ||
-        !uncommented.contains(_windowsArgsAnchor)) {
+        !uncommented.contains(_windowsArgsAnchor) ||
+        !uncommented.contains(_windowsTriggerUserAnchor)) {
       throw StateError(
-          'windows task template drifted (Exec anchors not found) — '
+          'windows task template drifted (anchors not found) — '
           'refusing to fork the schedule; sync with Lina\'s template');
     }
     final args =
@@ -243,7 +255,9 @@ abstract class SchedulerLifecycle {
         .replaceFirst(
             _windowsCommandAnchor, '<Command>${_xmlEscape(wrapperExe)}</Command>')
         .replaceFirst(
-            _windowsArgsAnchor, '<Arguments>$args</Arguments>');
+            _windowsArgsAnchor, '<Arguments>$args</Arguments>')
+        .replaceFirst(_windowsTriggerUserAnchor,
+            '<UserId>${_xmlEscape(installUser)}</UserId>');
     // schtasks on current Windows images rejects <AllowDemandStart>
     // inside <Settings> outright (bisected on CI: identical artifacts
     // register without it, fail with it in any position). The element
@@ -287,6 +301,19 @@ abstract class SchedulerLifecycle {
   static String defaultTickBinary(String installDir, OpsOs os) {
     if (os == OpsOs.windows) return '$installDir\\mycontrolpanel.exe';
     return '$installDir/mycontrolpanel';
+  }
+
+  /// DOMAIN\user of the account running install, for the user-scoped
+  /// LogonTrigger. Throws when the account cannot be resolved.
+  static String _currentWindowsUser() {
+    final domain = Platform.environment['USERDOMAIN'] ?? '';
+    final name = Platform.environment['USERNAME'] ?? '';
+    final user = domain.isNotEmpty ? '$domain\\$name' : name;
+    if (user.isEmpty) {
+      throw StateError('cannot resolve installing Windows user '
+          '(USERDOMAIN/USERNAME unset) — pass InstallOptions.installUser');
+    }
+    return user;
   }
 
   static Directory defaultUnitDir() {
@@ -351,6 +378,7 @@ abstract class SchedulerLifecycle {
           template: template,
           wrapperExe: options.wrapperPath,
           tickBinary: tickBinary,
+          installUser: options.installUser ?? _currentWindowsUser(),
         );
         final artifact = await _installWindows(
             options, filled, runCmd: run);
@@ -576,6 +604,14 @@ abstract class SchedulerLifecycle {
       violations.add('windowsTaskScheduler: principal must use '
           'LeastPrivilege run level (no elevation)');
     }
+    final trigger = _extractBlock(xml, 'LogonTrigger');
+    if (trigger == null ||
+        !trigger.contains('<UserId>') ||
+        trigger.contains('INSTALL_USER')) {
+      violations.add('windowsTaskScheduler: LogonTrigger must be scoped '
+          'to the installing user via <UserId> (an unscoped logon '
+          'trigger makes schtasks /Create demand elevation)');
+    }
     return violations;
   }
 
@@ -623,14 +659,20 @@ abstract class SchedulerLifecycle {
   /// Template fidelity for Windows: installed XML must equal the template
   /// outside the Exec Command/Arguments lines. Normalized away on both
   /// sides (see [fillWindowsTask]): the template's header comment (its
-  /// `--poll-headless` text is illegal inside an XML comment) and the
+  /// `--poll-headless` text is illegal inside an XML comment), the
   /// `<AllowDemandStart>` line (rejected by current schtasks parsers;
-  /// defaults to true when omitted).
+  /// defaults to true when omitted), and the `<UserId>` identity text
+  /// (the template carries the INSTALL_USER token; schtasks resolves the
+  /// trigger user and stamps the principal SID on registration — the
+  /// element must still be present on both sides, only the identity
+  /// value is normalized).
   static bool windowsMatchesTemplateExceptExec(
       String installed, String template) {
     String strip(String xml) => const LineSplitter()
         .convert(
             _dropAllowDemandStart(_stripXmlComments(xml)))
+        .map((l) => l.replaceAll(
+            RegExp('<UserId>.*?</UserId>'), '<UserId></UserId>'))
         .where((l) =>
             !l.contains('<Command>') && !l.contains('<Arguments>'))
         .join('\n');
@@ -768,6 +810,13 @@ abstract class SchedulerLifecycle {
     final match =
         RegExp('<$tag>(.*?)</$tag>', dotAll: true).firstMatch(xml);
     return match?.group(1)?.trim();
+  }
+
+  /// Inner XML of the first <$tag>…</$tag> block (trigger-scope checks).
+  static String? _extractBlock(String xml, String tag) {
+    final match =
+        RegExp('<$tag>(.*?)</$tag>', dotAll: true).firstMatch(xml);
+    return match?.group(1);
   }
 
   /// Minimal argv splitter honoring double quotes (scheduler XML and

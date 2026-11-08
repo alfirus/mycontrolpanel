@@ -26,6 +26,7 @@ void main() {
         template: template,
         wrapperExe: r'C:\Tools\mycontrolpanel-check.exe',
         tickBinary: r'C:\App\mycontrolpanel.exe',
+        installUser: r'DESKTOP\TestUser',
       );
       expect(filled.contains('mycontrolpanel-check.exe'), isTrue);
       expect(filled.contains('--poll-headless'), isTrue);
@@ -50,6 +51,7 @@ void main() {
         template: template,
         wrapperExe: r'C:\Tools\mycontrolpanel-check.exe',
         tickBinary: r'C:\App\mycontrolpanel.exe',
+        installUser: r'DESKTOP\TestUser',
       );
       final dir = await Directory.systemTemp.createTemp('mcp-ops-xml');
       try {
@@ -80,6 +82,7 @@ void main() {
                 template: '<Task><Nope/></Task>',
                 wrapperExe: 'w',
                 tickBinary: 'b',
+                installUser: 'u',
               ),
           throwsStateError);
     });
@@ -121,6 +124,7 @@ void main() {
         template: template,
         wrapperExe: r'C:\Tools\mycontrolpanel-check.exe',
         tickBinary: r'C:\App\mycontrolpanel.exe',
+        installUser: r'DESKTOP\TestUser',
       );
       expect(
           SchedulerLifecycle.verifyWindowsXml(
@@ -169,6 +173,7 @@ void main() {
         template: template,
         wrapperExe: 'w',
         tickBinary: 'b',
+        installUser: 'u',
       );
       final drifted =
           filled.replaceFirst('PT15M', 'PT5M');
@@ -176,6 +181,70 @@ void main() {
           SchedulerLifecycle.windowsMatchesTemplateExceptExec(
               drifted, template),
           isFalse);
+    });
+
+    test('windows fill scopes the logon trigger to the installing user',
+        () {
+      final template =
+          SchedulerLifecycle.windowsTemplate(templates());
+      final filled = SchedulerLifecycle.fillWindowsTask(
+        template: template,
+        wrapperExe: 'w',
+        tickBinary: 'b',
+        installUser: r'DESKTOP\TestUser',
+      );
+      expect(filled.contains('INSTALL_USER'), isFalse);
+      expect(
+          filled.contains(r'<UserId>DESKTOP\TestUser</UserId>'), isTrue);
+      expect(
+          SchedulerLifecycle.verifyWindowsXml(
+              xml: filled, taskPath: defaultTaskPath),
+          isEmpty);
+    });
+
+    test('fidelity tolerates schtasks-stamped identities, not scope loss',
+        () {
+      final template =
+          SchedulerLifecycle.windowsTemplate(templates());
+      final filled = SchedulerLifecycle.fillWindowsTask(
+        template: template,
+        wrapperExe: 'w',
+        tickBinary: 'b',
+        installUser: r'DESKTOP\TestUser',
+      );
+      // schtasks resolves the trigger user and stamps the caller SID on
+      // the principal — fidelity must still hold for registered XML.
+      final registered =
+          filled.replaceFirst('DESKTOP', 'S-1-5-21-1-2-3-1001');
+      expect(
+          SchedulerLifecycle.windowsMatchesTemplateExceptExec(
+              registered, template),
+          isTrue);
+      // Dropping the trigger UserId (back to an unscoped logon trigger)
+      // must break fidelity.
+      final unscoped = filled.replaceAll(
+          RegExp('<UserId>.*?</UserId>'), '');
+      expect(
+          SchedulerLifecycle.windowsMatchesTemplateExceptExec(
+              unscoped, template),
+          isFalse);
+    });
+
+    test('verify requires a user-scoped logon trigger', () {
+      final template =
+          SchedulerLifecycle.windowsTemplate(templates());
+      // Raw template still carries the INSTALL_USER token: not installable.
+      expect(
+          SchedulerLifecycle.verifyWindowsXml(
+              xml: template, taskPath: defaultTaskPath),
+          anyElement(contains('must be scoped')));
+      // No UserId at all: unscoped trigger demands elevation.
+      final unscoped =
+          template.replaceAll(RegExp('      <UserId>.*?</UserId>\n'), '');
+      expect(
+          SchedulerLifecycle.verifyWindowsXml(
+              xml: unscoped, taskPath: defaultTaskPath),
+          anyElement(contains('must be scoped')));
     });
 
     test('clean linux units verify', () {
@@ -253,6 +322,7 @@ void main() {
           sandbox: sandbox.path,
           os: OpsOs.windows,
           templateDir: 'scripts/headless',
+          installUser: r'DESKTOP\TestUser',
           preflight: () async => FakeProviders.consentOff(),
         ));
         expect(result.ok, isFalse);
@@ -275,6 +345,7 @@ void main() {
           sandbox: sandbox.path,
           os: OpsOs.windows,
           templateDir: 'scripts/headless',
+          installUser: r'DESKTOP\TestUser',
           force: true,
           preflight: () async => FakeProviders.ok(),
         ));
@@ -390,6 +461,7 @@ void main() {
           sandbox: sandbox.path,
           os: OpsOs.windows,
           templateDir: 'scripts/headless',
+          installUser: r'DESKTOP\TestUser',
           preflight: () async => FakeProviders.totalFailure(),
         ));
         expect(result.ok, isFalse);
