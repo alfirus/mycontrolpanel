@@ -470,6 +470,18 @@ jobs:
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
           if [[ "$TAG" == *-* ]]; then echo "track=beta" >> "$GITHUB_OUTPUT"; else echo "track=stable" >> "$GITHUB_OUTPUT"; fi
 
+      - name: Checkout (headless bundle sources)
+        # The publish job needs repo files for the headless scheduler
+        # bundle (scripts/headless, tray icons, runbook). Builders and the
+        # gate never see them, so C2 keeps pinning only the three desktop
+        # assets — the bundle below is purely additive. MUST run BEFORE
+        # the artifact download: checkout's default `clean: true` wipes
+        # untracked dirs, which would delete an already-downloaded dist/
+        # (dry-run 42455198900: bundle assembly died on missing dist/).
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
@@ -477,15 +489,6 @@ jobs:
           merge-multiple: true
           # release-proof-* (gate verdict) lands here too via merge-multiple;
           # it is published below as the audit receipt, never checksummed.
-
-      - name: Checkout (headless bundle sources)
-        # The publish job needs repo files for the headless scheduler
-        # bundle (scripts/headless, tray icons, runbook). Builders and the
-        # gate never see them, so C2 keeps pinning only the three desktop
-        # assets — the bundle below is purely additive.
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-        with:
-          persist-credentials: false
 
       - name: Assemble headless scheduler bundle (#125 TM-2)
         # Single cross-platform zip published alongside the desktop
