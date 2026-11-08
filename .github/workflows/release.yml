@@ -74,7 +74,18 @@ jobs:
         if: matrix.os == 'linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libstdc++-12-dev libsecret-1-dev libnotify-dev
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libstdc++-12-dev libsecret-1-dev libnotify-dev libcurl4-openssl-dev libx11-dev libxi-dev
+
+      - name: Install Android-leg native-hook dependencies
+        # `flutter pub get` builds native assets for the whole graph even
+        # for the APK leg, and the tray stack (tray_manager -> nativeapi ->
+        # cnativeapi) probes GTK/X11/Xi via pkg-config (dry-run 42442214476).
+        # Same desktop list as the linux leg so both ubuntu runners share
+        # one toolchain.
+        if: matrix.os == 'android'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libstdc++-12-dev libsecret-1-dev libnotify-dev libcurl4-openssl-dev libx11-dev libxi-dev
 
       - name: Setup Java (Android leg)
         if: matrix.os == 'android'
@@ -324,7 +335,7 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Setup Python (verifier is stdlib-only, no deps to install)
-        uses: actions/setup-python@a26af69be951a213d495a44c3e91c03a2152674f5 # v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
 
@@ -393,7 +404,7 @@ jobs:
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
 
       - name: Setup Python (sbom.py is stdlib-only, no deps to install)
-        uses: actions/setup-python@a26af69be951a213d495a44c3e91c03a2152674f5 # v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
 
