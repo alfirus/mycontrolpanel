@@ -36,6 +36,12 @@ release is traceable to its exact toolchain after the fact.
   `docs/release-signing.md`. The `signed` flag in `build-info-<os>.json`
   shows whether a given release was signed.
 
+The `verify-gate` job re-runs both suites from scratch (`flutter test`
+for C3, `pytest agent/tests` for C4), so it installs the same Linux
+desktop list as the build legs (C3's native-asset hooks need it) plus
+`pytest` (the setup-python toolcache ships without it) before running
+the verifier. Tag-gated, so `sudo` is fine there.
+
 ## Versioning
 
 - Single source of truth: `version:` in `pubspec.yaml`
