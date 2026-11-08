@@ -279,7 +279,12 @@ jobs:
         shell: bash
         run: |
           cd "$RUNNER_TEMP"
-          sha256sum "mycontrolpanel-${{ matrix.os }}-${{ steps.ver.outputs.version }}."* > "mycontrolpanel-${{ matrix.os }}-${{ steps.ver.outputs.version }}.asset.sha256"
+          # --text: GNU sha256sum on the windows leg emits binary-mode
+          # `<hash> *<file>` lines by default, which C2 in
+          # tool/verify_release.py rejects (it expects `<hash>  <file>`).
+          # Text mode keeps every builder's sidecar identical (dry-run
+          # 42448768786: windows sidecar carried `*`, gate C2 failed).
+          sha256sum --text "mycontrolpanel-${{ matrix.os }}-${{ steps.ver.outputs.version }}."* > "mycontrolpanel-${{ matrix.os }}-${{ steps.ver.outputs.version }}.asset.sha256"
           cat "mycontrolpanel-${{ matrix.os }}-${{ steps.ver.outputs.version }}.asset.sha256"
 
       - name: Record build provenance
