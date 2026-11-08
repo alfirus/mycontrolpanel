@@ -219,13 +219,12 @@ abstract class SchedulerLifecycle {
   /// [StateError] when the template anchors move (fail loud on drift).
   ///
   /// The template's header comment is dropped in the managed artifact:
-  /// it names `--poll-headless`, and a double hyphen is illegal inside
-  /// an XML comment — schtasks rejects the pristine template with
-  /// `(11,63): incorrect comment syntax` (reproducible with
-  /// `schtasks /Create` on the unmodified template; Lina's manual
-  /// path via install-windows.ps1 hits the same wall — follow-up
-  /// filed on her card). Comments carry no schedule semantics, so the
-  /// managed artifact stays a faithful copy otherwise.
+  /// historically it named `--poll-headless`, and a double hyphen is
+  /// illegal inside an XML comment — schtasks rejected the pristine
+  /// template with `(11,63): incorrect comment syntax` (fixed on
+  /// Lina's card t_f25d2a50; the strip stays as defense in depth).
+  /// Comments carry no schedule semantics, so the managed artifact
+  /// stays a faithful copy otherwise.
   static String fillWindowsTask({
     required String template,
     required String wrapperExe,

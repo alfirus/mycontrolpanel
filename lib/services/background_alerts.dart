@@ -349,37 +349,63 @@ abstract class BackgroundAlerts {
   /// Always records the check; never throws (a crashing worker costs more
   /// battery than a missed poll).
   ///
+  /// The diff is an atomic [AlertWatch.claimFreshTitles] transaction:
+  /// when the foreground rail fires the same alert concurrently, exactly
+  /// one rail wins the claim and notifies — the loser stays silent.
+  ///
+  /// Hosts are polled concurrently with a per-host 15 s timeout (see
+  /// [pollHostsConcurrently]): one slow host times out alone instead of
+  /// stalling every host behind it, and the per-host diff/notify below
+  /// merges outcomes back in configuration order.
+  ///
   /// [fetchAlertsFor] is injectable for tests; production passes null to
-  /// use [pollHostAlerts] with `sshSweep: false`.
+  /// use [pollHostAlerts] with `sshSweep: false`. [lockFile] is the
+  /// cross-process guard (the dispatcher passes the shared per-user file;
+  /// null means in-process mutex only, which is what unit tests use).
   static Future<void> runBackgroundTick({
     Future<List<AlertEntry>> Function(ServerConnection server)?
         fetchAlertsFor,
+    File? lockFile,
+    Duration lockTimeout = const Duration(seconds: 10),
   }) async {
     try {
       final prefs = await SharedPreferences.getInstance();
       if (!(prefs.getBool(prefEnabledKey) ?? false)) return;
       final servers = await SecureStore.readServers();
       final agent = AgentService();
-      for (final s in servers.take(10)) {
+      final hosts = servers.take(10).toList();
+      final byId = <String, ServerConnection>{for (final s in hosts) s.id: s};
+      final outcomes = await pollHostsConcurrently<List<AlertEntry>>(
+        hostIds: [for (final s in hosts) s.id],
+        perHostTimeout: const Duration(seconds: 15),
+        fetch: (id) {
+          final s = byId[id]!;
+          if (fetchAlertsFor != null) return fetchAlertsFor(s);
+          return SecureStore.readSecret(SecureStore.agentTokenKey(s.id)).then(
+            (t) => pollHostAlerts(agent, s, agentToken: t, sshSweep: false),
+          );
+        },
+      );
+      // Ordered merge: outcomes arrive in configuration order, so the
+      // shared seen-set diff is stable regardless of answer order.
+      for (final o in outcomes) {
+        final alerts = o.value;
+        if (!o.answered || alerts == null) {
+          // One sick host never sinks the run.
+          continue;
+        }
         try {
-          final alerts = fetchAlertsFor != null
-              ? await fetchAlertsFor(s)
-              : await pollHostAlerts(
-                  agent,
-                  s,
-                  agentToken: await SecureStore.readSecret(
-                    SecureStore.agentTokenKey(s.id),
-                  ),
-                  sshSweep: false,
-                ).timeout(const Duration(seconds: 15));
-          // Reuse the foreground diff verbatim (titles only — the worker
-          // never touches widgets). The seen-set is shared with the
-          // foreground rail, so neither rail double-notifies.
+          // Single-flight claim on the shared seen-set (parity: the
+          // foreground rail claims the same way). The winner notifies;
+          // a concurrent foreground claim loses and stays silent.
           final keys = AlertWatch.currentKeys(alerts, const <DeployItem>[]);
-          final seen = await _readSeenKeys(prefs);
-          final fresh = AlertWatch.freshTitles(
-              keys, seen, alerts, const <DeployItem>[]);
-          await AlertWatch.markSeen(keys);
+          final fresh = await AlertWatch.claimFreshTitles(
+            keys,
+            alerts,
+            const <DeployItem>[],
+            lockFile: lockFile,
+            lockTimeout: lockTimeout,
+          );
           if (fresh.isNotEmpty) {
             await showFresh(fresh);
           }
@@ -391,14 +417,6 @@ abstract class BackgroundAlerts {
       // Total failure still counts as an attempt (stale UI stays honest).
     } finally {
       await recordCheck();
-    }
-  }
-
-  static Future<Set<String>> _readSeenKeys(SharedPreferences prefs) async {
-    try {
-      return prefs.getStringList('alert_watch_seen_v1')?.toSet() ?? {};
-    } catch (_) {
-      return {};
     }
   }
 }
@@ -413,7 +431,13 @@ void backgroundAlertDispatcher() {
       return Future.value(true);
     }
     try {
-      await BackgroundAlerts.runBackgroundTick();
+      // The worker runs in a separate isolate (often a separate process)
+      // from the foreground UI: pass the shared per-user lock file so the
+      // background claim and any concurrent foreground claim serialize
+      // instead of double-notifying.
+      await BackgroundAlerts.runBackgroundTick(
+        lockFile: AlertWatch.dedupLockFile(),
+      );
     } catch (_) {}
     return Future.value(true);
   });

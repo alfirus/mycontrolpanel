@@ -13,6 +13,9 @@
     file paths only. Vault-backed reads stay inside the app rail; scheduled
     mcpoll runs target open agents. Interactive runs needing a token pass
     it via the process environment (see scripts/mcpoll/README.md).
+  NOTE: no AllowDemandStart element — current schtasks parsers reject
+  it outright; demand-start (schtasks /Run) stays enabled by schema
+  default, so omitting it is behavior-neutral.
   Replace INSTALL_DIR at install time (e.g. %LOCALAPPDATA%\MyControlPanel).
 -->
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
@@ -43,7 +46,6 @@
     <StartWhenAvailable>true</StartWhenAvailable>
     <Enabled>true</Enabled>
     <Hidden>false</Hidden>
-    <AllowDemandStart>true</AllowDemandStart>
   </Settings>
   <Actions Context="Author">
     <Exec>

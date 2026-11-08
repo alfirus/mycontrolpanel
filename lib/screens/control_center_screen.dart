@@ -33,6 +33,8 @@ import '../services/security_posture.dart';
 import '../services/ssh_key_loader.dart';
 import '../services/log_tail_service.dart';
 import '../services/metrics_history.dart';
+import '../services/chart_downsample.dart';
+import '../services/host_snapshot_cache.dart';
 import '../services/alert_watch.dart';
 import '../services/alert_notifications.dart';
 import '../services/background_alerts.dart';
@@ -129,6 +131,15 @@ class _ControlCenterScreenState extends State<ControlCenterScreen>
   bool get _useRealServers => _savedServers.isNotEmpty;
   final _agent = AgentService();
   Map<String, Map<String, dynamic>> _metrics = {}; // server id -> {cpu,ram,disk,uptime_days}
+  // Offline mode (last-good per-host snapshot): when a host is unreachable
+  // the cached snapshot stays rendered with the stale banner instead of an
+  // error box. [_snapshotAt] is the per-host last-good time, [_offlineHosts]
+  // marks which server ids are currently serving cache (cleared on the
+  // next successful poll = transparent resume, no duplicate alerts: the
+  // badge tick below claims through the atomic AlertWatch seen-set
+  // transaction, so retained cached alerts never re-fire).
+  Map<String, DateTime> _snapshotAt = {}; // host -> last-good poll time
+  Set<String> _offlineHosts = {}; // server ids currently serving cache
   Set<String> _installing = {};
   Set<String> _checking = {};
   Map<String, List<CronEntry>> _serverCrons = {}; // server id -> discovered crons
@@ -245,6 +256,10 @@ class _ControlCenterScreenState extends State<ControlCenterScreen>
       _glToken = glTok;
       _aiKey = aiK;
     });
+    // Offline-first: seed the last-good snapshots before the first poll so
+    // an unreachable host renders cache + stale banner on launch instead
+    // of flashing the no-agent box.
+    _seedSnapshots();
     _pollAgents();
     _pollGithub();
     _pollGitlab();
@@ -361,6 +376,25 @@ class _ControlCenterScreenState extends State<ControlCenterScreen>
 
   bool _agentsPolling = false;
 
+  /// Seed in-memory metrics from the last-good snapshot cache so the first
+  /// paint already shows cached data for unreachable hosts (offline-first).
+  /// Marks seeded hosts offline; the next successful poll clears the flag.
+  Future<void> _seedSnapshots() async {
+    for (final c in _savedServers) {
+      if (_metrics.containsKey(c.id)) continue;
+      try {
+        final cached = await HostSnapshotCache.read(c.host);
+        if (cached == null || !mounted) continue;
+        final at = await HostSnapshotCache.savedAt(c.host);
+        setState(() {
+          _metrics[c.id] = cached;
+          if (at != null) _snapshotAt[c.host] = at;
+          _offlineHosts.add(c.id);
+        });
+      } catch (_) {}
+    }
+  }
+
   Future<void> _pollAgents() async {
     if (_agentsPolling) return; // re-entrancy guard for the interval timer
     _agentsPolling = true;
@@ -373,7 +407,17 @@ class _ControlCenterScreenState extends State<ControlCenterScreen>
         _pollTotal++; // session error-rate counters (#62)
         if (m == null) _pollErr++;
         if (m != null) {
-          setState(() => _metrics[c.id] = m);
+          // Live poll won: overwrite the snapshot (transparent resume) and
+          // clear the offline flag. No alert housekeeping here — the badge
+          // tick below claims through the atomic AlertWatch seen-set
+          // transaction, so a reconnect with unchanged alerts stays silent
+          // and genuinely new alerts fire exactly once.
+          setState(() {
+            _metrics[c.id] = m;
+            _offlineHosts.remove(c.id);
+          });
+          _snapshotAt[c.host] = DateTime.now();
+          unawaited(HostSnapshotCache.save(c.host, m));
           final cpu = (((m['cpu'] as num?) ?? 0).toDouble()).clamp(0.0, 1.0).toDouble();
           final ram = (((m['ram'] as num?) ?? 0).toDouble()).clamp(0.0, 1.0).toDouble();
           final disk = (((m['disk'] as num?) ?? 0).toDouble()).clamp(0.0, 1.0).toDouble();
@@ -384,14 +428,31 @@ class _ControlCenterScreenState extends State<ControlCenterScreen>
               _cpuHistory[c.host] = [...?_cpuHistory[c.host], cpu].take(40).toList();
             });
           }
+        } else if (!_metrics.containsKey(c.id)) {
+          // Unreachable and nothing live yet: fall back to the last-good
+          // cached snapshot (offline mode) instead of the no-agent box.
+          try {
+            final cached = await HostSnapshotCache.read(c.host);
+            if (cached != null && mounted) {
+              final at = await HostSnapshotCache.savedAt(c.host);
+              setState(() {
+                _metrics[c.id] = cached;
+                if (at != null) _snapshotAt[c.host] = at;
+                _offlineHosts.add(c.id);
+              });
+            }
+          } catch (_) {}
+        } else {
+          // Had live data, poll failed: keep serving it, mark stale.
+          if (mounted) setState(() => _offlineHosts.add(c.id));
         }
         final ps = await _agent.fetchAppStats(c.host, serverId: c.id);
         if (!mounted) return;
         if (ps != null) {
           setState(() => _procStats[c.id] = ps);
-        } else {
-          if (mounted) setState(() => _procStats.remove(c.id));
         }
+        // Offline mode: keep the last-good proc snapshot when the host is
+        // unreachable instead of dropping to empty.
       }
       _pollCrons();
       _pollApps();
@@ -407,11 +468,25 @@ class _ControlCenterScreenState extends State<ControlCenterScreen>
   Future<void> _updateAlertBadge() async {
     try {
       final keys = AlertWatch.currentKeys(_realAlerts, _allRuns);
-      final seen = await _readSeenKeys();
-      final fresh = AlertWatch.freshTitles(keys, seen, _realAlerts, _allRuns);
+      // Payload-only snapshot for the tap deep link (informational; the
+      // notify/no-notify decision below comes from the atomic claim).
+      final seenBefore = await _readSeenKeys();
+      // Single-flight claim on the shared seen-set: when the background
+      // worker fires the same alert concurrently, exactly one rail wins
+      // and notifies. Short lock timeout — the UI never stalls behind a
+      // background tick; a skip is safe because the lock holder owns the
+      // toast for this batch.
+      final fresh = await AlertWatch.claimFreshTitles(
+        keys,
+        _realAlerts,
+        _allRuns,
+        lockFile: AlertWatch.dedupLockFile(),
+        lockTimeout: const Duration(seconds: 2),
+      );
       if (!mounted) return;
       setState(() => _alertBadge = keys.length);
-      await AlertWatch.markSeen(keys);
+      // NB: no separate markSeen — the claim above already recorded the
+      // batch atomically (a second mark here would reopen the race).
       // Desktop beta.1 rail: the in-app diff tick IS the check — record it
       // against the shared staleness stamp on every tick (even with zero
       // fresh titles) so the alerts-surface "last checked …" line stays
@@ -434,7 +509,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen>
         // deferred to tray-mode work (DesktopAlerts.closedAppNote).
         // Notification-tap deep link: fresh keys ride as `mcp://inbox`
         // payload on both rails; taps land on the inbox tab (highlighted).
-        final freshKeys = keys.difference(seen).take(10).toList();
+        final freshKeys = keys.difference(seenBefore).take(10).toList();
         final tapPayload = AlertDeepLink.build(keys: freshKeys);
         unawaited(BackgroundAlerts.showFresh(fresh, payload: tapPayload));
         if (DesktopAlerts.isSupportedPlatform &&
@@ -867,6 +942,13 @@ class _ControlCenterScreenState extends State<ControlCenterScreen>
     final m = _metrics[c.id];
     if (m != null) {
       final cpu = (m['cpu'] as num).toDouble(), ram = (m['ram'] as num).toDouble(), disk = (m['disk'] as num).toDouble();
+      // Offline mode: serving the last-good cached snapshot. Same bars as
+      // live; the footer swaps LIVE for the established stale banner.
+      final offline = _offlineHosts.contains(c.id);
+      final staleLabel = offline
+          ? BackgroundAlerts.formatLastChecked(
+              now: DateTime.now(), last: _snapshotAt[c.host])
+          : null;
       return Column(children: [
         Row(children: [
           // Spec 02 §2.3: shared AppThresholds at every call site; hue means
@@ -900,15 +982,23 @@ class _ControlCenterScreenState extends State<ControlCenterScreen>
           );
         }),
         Row(children: [
-          Container(width: 6, height: 6, decoration: const BoxDecoration(color: AppColors.success, shape: BoxShape.circle)),
+          Container(width: 6, height: 6, decoration: BoxDecoration(color: offline ? AppColors.warning : AppColors.success, shape: BoxShape.circle)),
           const SizedBox(width: 6),
           // Spec 02 §2.5: footer grows to 11px; uptime is its own segment.
-          Text('LIVE • agent :9108', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: AppColors.success, letterSpacing: 0.4)),
+          // Offline: CACHED + stale banner instead of LIVE (never an error box).
+          if (offline)
+            Text('CACHED • agent :9108', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: AppColors.warning, letterSpacing: 0.4))
+          else
+            Text('LIVE • agent :9108', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: AppColors.success, letterSpacing: 0.4)),
           const SizedBox(width: 8),
           Text('UPTIME ${m['uptime_days']}d', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: AppColors.textPrimary, letterSpacing: 0.4)),
           const Spacer(),
           InkWell(onTap: () => _pollAgents(), child: const Row(children: [Icon(Icons.refresh, size: 11, color: AppColors.textMuted), SizedBox(width: 3), Text('REFRESH', style: TextStyle(fontSize: 9, fontWeight: FontWeight.w800, color: AppColors.textMuted))])),
         ]),
+        if (offline && staleLabel != null) ...[
+          const SizedBox(height: 6),
+          AlertsStalenessLine(label: staleLabel),
+        ],
       ]);
     }
     final busy = _installing.contains(c.id);
@@ -955,7 +1045,9 @@ class _ControlCenterScreenState extends State<ControlCenterScreen>
     String verdict;
     final m = await _agent.fetch(c.host, serverId: c.id);
     if (m != null) {
-      if (mounted) setState(() { _metrics[c.id] = m; _checking.remove(c.id); });
+      if (mounted) setState(() { _metrics[c.id] = m; _offlineHosts.remove(c.id); _checking.remove(c.id); });
+      _snapshotAt[c.host] = DateTime.now();
+      unawaited(HostSnapshotCache.save(c.host, m));
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(backgroundColor: AppColors.success.withValues(alpha: 0.14), content: Text('Agent live on ${c.host} ✓ cpu=${m['cpu']} ram=${m['ram']} disk=${m['disk']}', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.success))));
       return;
@@ -2431,10 +2523,16 @@ class _ControlCenterScreenState extends State<ControlCenterScreen>
     onSelected: (v){ if (v) setState(()=> _serverFilter = val); }, materialTapTargetSize: MaterialTapTargetSize.shrinkWrap, visualDensity: VisualDensity.compact, padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 0),
   );
 
-  Widget _miniSparkline(List<double> vals, Color c) => LineChart(LineChartData(
-    gridData: const FlGridData(show: false), titlesData: const FlTitlesData(show: false), borderData: FlBorderData(show: false),
-    lineBarsData: [LineChartBarData(spots: [for (int i=0;i<vals.length;i++) FlSpot(i.toDouble(), vals[i])], isCurved: true, color: c, barWidth: 1.6, dotData: const FlDotData(show: false), belowBarData: BarAreaData(show: true, color: c.withValues(alpha: 0.08)))],
-  ));
+  /// Per-card CPU sparkline. Aged/long histories collapse to a fixed render
+  /// budget before spots are built so per-tick path cost stays flat on
+  /// low-end Android; demo-scale series pass through untouched (pixel parity).
+  Widget _miniSparkline(List<double> vals, Color c) {
+    final sampled = downsampleSeries(vals, maxPoints: kMaxSparklinePoints);
+    return LineChart(LineChartData(
+      gridData: const FlGridData(show: false), titlesData: const FlTitlesData(show: false), borderData: FlBorderData(show: false),
+      lineBarsData: [LineChartBarData(spots: [for (int i=0;i<sampled.length;i++) FlSpot(i.toDouble(), sampled[i])], isCurved: true, color: c, barWidth: 1.6, dotData: const FlDotData(show: false), belowBarData: BarAreaData(show: true, color: c.withValues(alpha: 0.08)))],
+    ));
+  }
 
   /// Real discovered crons across all connected servers (empty until polled).
   List<CronEntry> get _realCrons => _serverCrons.values.expand((e) => e).toList();
@@ -3670,7 +3768,11 @@ class _ControlCenterScreenState extends State<ControlCenterScreen>
       final allLat = _latHistory.values.expand((e) => e).toList();
       final p = MetricsHistory.p95(allLat);
       p95label = MetricsHistory.formatMs(p);
-      final series = allLat.isEmpty ? <double>[] : allLat.take(40).toList();
+      // Render budget: merged multi-host histories can outgrow any single
+      // host cap, so collapse aged points before building spots instead of
+      // redrawing the full series every tick. Short series pass through
+      // untouched (pixel parity with the 0.71 rendering).
+      final series = allLat.isEmpty ? <double>[] : downsampleSeries(allLat, maxPoints: kMaxLatencyChartPoints);
       if (series.isNotEmpty) {
         final maxV = series.reduce((a, b) => a > b ? a : b);
         final scale = maxV <= 0 ? 1.0 : maxV;
