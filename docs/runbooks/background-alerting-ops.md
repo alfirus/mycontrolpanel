@@ -200,6 +200,18 @@ the line from the generated artifact defensively (pinned by
 `test/ops_lifecycle_test.dart`; template fidelity normalizes both
 sides, so the normalization is a no-op on the fixed templates).
 
+Live re-verification on a standard-user Windows token (Zara, 2026-11-08)
+found a third wall §7 missed: an unscoped `<LogonTrigger>` (fires at
+any logon) makes `schtasks /Create` demand elevation — `Access is
+denied` for non-elevated installs, while the elevated CI runner in
+`ops-smoke.yml` stays green and masks it. Fixed by scoping the trigger
+to the installing user (`<UserId>` filled from `%USERDOMAIN%` +
+`%USERNAME%` by `install-windows.ps1`, from `InstallOptions.installUser`
+by the managed `install`); `verify` flags unscoped triggers and
+fidelity normalizes only the identity text. The sibling
+`scripts/reliability/windows/` hardened template still carries the
+unscoped trigger — Nadia's follow-up before it is used for installs.
+
 ## 8. CI + packaging notes
 
 - `.github/workflows/ops-smoke.yml` (this rail's gate, runs on
