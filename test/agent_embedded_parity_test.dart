@@ -11,12 +11,18 @@ import 'package:my_control_panel/services/agent_service.dart';
 /// re-vendor the block into AgentService.agentScript — this test fails
 /// otherwise.
 void main() {
+  // Line-ending agnostic: Windows checkouts (core.autocrlf=true) carry
+  // CRLF while the Dart front-end normalises source newlines, so a raw
+  // byte compare fails on windows-latest even when the vendored text is
+  // identical (tag dry-runs 42442214476 + 42446435597). Normalise both
+  // sides to LF — the intent is vendored-text parity, not newline style.
+  String norm(String s) => s.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
   test('embedded agentScript vendors anomaly_scorer.py verbatim', () {
     const begin =
         '# BEGIN ANOMALY SCORER (vendored into AgentService.agentScript verbatim)';
     const end =
         '# END ANOMALY SCORER (vendored into AgentService.agentScript verbatim)';
-    final src = File('agent/anomaly_scorer.py').readAsStringSync();
+    final src = norm(File('agent/anomaly_scorer.py').readAsStringSync());
     final si = src.indexOf(begin);
     final ei = src.indexOf(end);
     expect(si, isNot(-1), reason: 'BEGIN marker missing in scorer');
@@ -27,7 +33,7 @@ void main() {
         reason: 'triple-quote would break the Dart raw string');
     expect(block.contains('\$'), isFalse,
         reason: 'dollar would interpolate in the Dart string');
-    expect(AgentService.agentScript.contains(block), isTrue,
+    expect(norm(AgentService.agentScript).contains(block), isTrue,
         reason: 're-vendor agent/anomaly_scorer.py into agentScript');
   });
 
