@@ -2,7 +2,7 @@
 
 Owner: Hana (Visual Content Designer) · Reports to Naura (CMO).
 Brand review: Kira (dotted line) — PENDING sign-off.
-Messaging sign-off: Naura — PENDING sign-off.
+Messaging sign-off: Naura — SIGNED 2026-11-03 (re-review t_9c86034a, post-#160).
 Image pipeline: deterministic PIL renders from `lib/theme` tokens
 (series-conditioned on `_reference-render-1600x1000.png`).
 The `image-generation` skill (Muse pipeline) is not installed on this
@@ -70,7 +70,7 @@ the checklist at that time. Until then the checklist stays unticked.
 ## 5. Sign-offs (fill before store submit)
 
 - [ ] Kira brand review (tokens, series consistency, legibility)
-- [ ] Naura messaging sign-off (claims vs README matrix + `listing-copy.md`)
+- [x] Naura messaging sign-off (claims vs README matrix + `listing-copy.md`) — GRANTED 2026-11-03, re-review t_9c86034a post-#160 (pixels vision-verified on main).
 - [ ] Sofia voice · Syafiqah kit safety (companions, not blocking this pack)
 - [ ] Alya privacy review on release PR (permissions/nutrition answers)
 
