@@ -58,6 +58,13 @@ jobs:
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
+      - name: Install Linux system deps (Ubuntu only)
+        # Native-asset build hooks (tray cnativeapi) need GTK/X11 — without
+        # these the job dies in `pub get` before any smoke step runs.
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang cmake ninja-build pkg-config libgtk-3-dev libx11-dev libxi-dev liblzma-dev libstdc++-12-dev libsecret-1-dev libnotify-dev libcurl4-openssl-dev
       - name: Setup Flutter
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         with:
