@@ -46,11 +46,12 @@ jobs:
       # Linux desktop system deps (same list release.yml uses): `flutter
       # test` builds native assets for the whole graph, and the tray stack
       # (tray_manager -> nativeapi -> cnativeapi) compiles GTK/X11/Xi
-      # sources on Linux (Elizabeth, tray slice #153).
+      # sources on Linux (Elizabeth, tray slice #153). libcurl4-openssl-dev
+      # feeds sentry-native's CMake (tag dry-run 42442214476).
       - name: Install Linux desktop dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libstdc++-12-dev libsecret-1-dev libnotify-dev
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libstdc++-12-dev libsecret-1-dev libnotify-dev libcurl4-openssl-dev libx11-dev libxi-dev
       - name: Install dependencies
         run: flutter pub get
       - name: Static analysis
