@@ -237,6 +237,23 @@ Tracked under milestones
 - [x] Background alert polling (beta.1: mobile WorkManager / BGAppRefresh + local notifications; desktop in-app timer toasts — both behind the shared Settings opt-in toggle, default OFF; closed-app deferred to tray mode, no remote push — design: [docs/design/05-background-alerting.md](docs/design/05-background-alerting.md))
 - [x] Sentry opt-in crash reporting (Settings → Integrations; explicit toggle default OFF, DSN in OS keychain, test-event verifies delivery) — Datadog sink still future
 
+### Closed-app delivery per OS build (tray mode Beta.2, #125)
+
+Every tag release publishes `mycontrolpanel-headless-<version>.zip`
+(scheduler/unit install scripts + unit templates, tray icon states,
+headless runbook; checksummed in `SHA256SUMS.txt`) alongside the desktop
+archives. Detail: [docs/release-process.md](docs/release-process.md).
+
+| OS build | Closed-app contents |
+|---|---|
+| Windows `.zip` | app `.exe` serves `--poll-headless` + baked-in `mycontrolpanel-check.exe`; Task Scheduler wiring via headless zip |
+| macOS `.zip` | `.app` serves `--poll-headless` + baked-in `mycontrolpanel-check`; LaunchAgent wiring via headless zip |
+| Linux `.tar.gz` | `bundle/` serves `--poll-headless` + baked-in `mycontrolpanel-check`; systemd user timer wiring via headless zip |
+
+Signing: Linux checksum-only; Windows Authenticode + Apple Developer ID /
+notarization are unenrolled owner steps — builds ship unsigned until the
+owner enrolls (`docs/release-signing.md`).
+
 <details>
 <summary>Done</summary>
 
