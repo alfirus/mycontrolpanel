@@ -33,6 +33,7 @@ import 'package:my_control_panel/background/headless_state.dart';
 import 'package:my_control_panel/mcpoll/config.dart';
 import 'package:my_control_panel/mcpoll/snapshot_fetch.dart';
 import 'package:my_control_panel/services/headless_security.dart';
+import 'package:my_control_panel/services/polling_alerts.dart';
 
 Future<void> main(List<String> args) async {
   late final McpollConfig config;
@@ -93,24 +94,36 @@ Future<void> main(List<String> args) async {
   }
 }
 
-/// Agent-HTTP sweep over the configured hosts. Per-host failures are
+/// Agent-HTTP sweep over the configured hosts, fetched concurrently with a
+/// per-host timeout (see [pollHostsConcurrently]). Per-host failures are
 /// swallowed (parity: `pollHostAlerts`); only a total failure throws.
 Future<List<HeadlessSignal>> _fetchAll(McpollConfig config) async {
-  final out = <HeadlessSignal>[];
-  var answered = false;
-  for (final h in config.hosts.take(config.maxHosts)) {
-    try {
-      final signals = await fetchHostSignals(
+  final hosts = config.hosts.take(config.maxHosts).toList();
+  final byId = <String, McpollHost>{for (final h in hosts) h.id: h};
+  final outcomes = await pollHostsConcurrently<List<HeadlessSignal>>(
+    hostIds: [for (final h in hosts) h.id],
+    perHostTimeout: config.timeout,
+    fetch: (id) {
+      final h = byId[id]!;
+      return fetchHostSignals(
         h,
         timeout: config.timeout,
         token: resolveToken(h),
         noSnapshot: config.noSnapshot,
       ).timeout(config.timeout);
+    },
+  );
+  final out = <HeadlessSignal>[];
+  var answered = false;
+  // Outcomes arrive in configuration order, so the merged signal list is
+  // stable tick to tick regardless of which host answered first.
+  for (final o in outcomes) {
+    final signals = o.value;
+    if (o.answered && signals != null) {
       answered = true;
       out.addAll(signals);
-    } catch (_) {
-      // One sick host never sinks the run.
     }
+    // One sick host never sinks the run (parity with the old loop).
   }
   if (!answered) {
     throw Exception('mcpoll: no host answered (agent :9108 down)');
