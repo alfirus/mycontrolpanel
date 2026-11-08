@@ -10,11 +10,14 @@
 # Usage:
 #   .\install-windows.ps1 [-InstallDir $env:LOCALAPPDATA\MyControlPanel]
 param(
-  [string]$InstallDir = "$env:LOCALAPPDATA\MyControlPanel"
+  [string]$InstallDir = "$env:LOCALAPPDATA\MyControlPanel",
+  # User scope for the LogonTrigger (see template): an unscoped logon
+  # trigger makes schtasks /Create demand elevation.
+  [string]$InstallUser = ("$env:USERDOMAIN\$env:USERNAME")
 )
 $ErrorActionPreference = 'Stop'
 $xml = Get-Content "$PSScriptRoot\windows\mcp-poll-task.xml" -Raw
-$xml = $xml -replace 'INSTALL_DIR', $InstallDir
+$xml = ($xml -replace 'INSTALL_DIR', $InstallDir) -replace 'INSTALL_USER', $InstallUser
 $tmp = Join-Path $env:TEMP 'mcp-mcpoll-task.xml'
 Set-Content -Path $tmp -Value $xml -Encoding Unicode
 schtasks /Create /TN '\MyControlPanel\mcpoll' /XML $tmp /F

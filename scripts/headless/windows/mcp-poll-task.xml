@@ -2,11 +2,16 @@
 <!--
   MyControlPanel headless poll — Windows Task Scheduler template (TM-1, Lina).
   Per-user task, logon + repeat trigger, NO elevation, NO stored password.
-  Install: scripts/headless/install-windows.ps1 (manual path).
+  Install: scripts/headless/install-windows.ps1 (manual path), which fills
+  INSTALL_DIR and INSTALL_USER (DOMAIN\user of the installing user).
   Managed lifecycle (verify/status/ledger): Zara owns (t_13eee02b).
 
   Invariants (Alya reviews; pinned by test/headless_contract_test.dart):
   - Task path \MyControlPanel\  => per-user scope, never system-wide.
+  - The LogonTrigger MUST stay user-scoped via <UserId>INSTALL_USER</UserId>:
+    an unscoped logon trigger fires at any logon, so schtasks /Create
+    demands elevation and a standard-user install fails with
+    "Access is denied" (reproduced live 2026-11-08; fixed by scoping).
   - No elevated run level, no stored password on the principal.
   - Action argv is EXACTLY "<INSTALL_DIR>\mycontrolpanel.exe" plus the
     poll-headless flag (see the Arguments element below; no credential
@@ -14,7 +19,8 @@
   NOTE: no AllowDemandStart element — current schtasks parsers reject
   it outright; demand-start (schtasks /Run) stays enabled by schema
   default, so omitting it is behavior-neutral.
-  Replace INSTALL_DIR at install time (e.g. %LOCALAPPDATA%\MyControlPanel).
+  Replace INSTALL_DIR at install time (e.g. %LOCALAPPDATA%\MyControlPanel)
+  and INSTALL_USER with the installing user (e.g. %USERDOMAIN%\%USERNAME%).
 -->
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
@@ -23,6 +29,7 @@
   <Triggers>
     <LogonTrigger>
       <Enabled>true</Enabled>
+      <UserId>INSTALL_USER</UserId>
       <Repetition>
         <Interval>PT15M</Interval>
         <Duration>P1D</Duration>

@@ -66,6 +66,11 @@ void main() {
     test('windows task: per-user, no elevation, exact argv', () {
       final xml =
           _read('scripts/headless/windows/mcp-poll-task.xml');
+      xml.split('\n').firstWhere((l) => l.contains('<LogonTrigger>'));
+      // Live repro 2026-11-08: an unscoped logon trigger makes
+      // schtasks /Create demand elevation for standard users, so the
+      // template must scope the trigger to the installing user.
+      expect(xml, contains('<UserId>INSTALL_USER</UserId>'));
       expect(xml, contains('--poll-headless'));
       expect(xml, isNot(contains('HighestAvailableAuthority')));
       expect(xml, isNot(contains('System')));
@@ -130,6 +135,10 @@ void main() {
         );
       }
       expect(ps1.toLowerCase(), isNot(contains('runas')));
+      // The manual installer must scope the logon trigger to the
+      // installing user (see the template pin above).
+      expect(ps1, contains('INSTALL_USER'));
+      expect(ps1, contains('USERDOMAIN'));
       // No elevation INVOKED: comments may name the forbidden tools, but
       // no operative line may call them.
       bool invokes(String script, String tool) => script
