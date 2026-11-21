@@ -12,11 +12,13 @@ import '../models/server_connection.dart';
 import '../services/agent_service.dart';
 import '../services/host_snapshot_cache.dart';
 import '../services/background_alerts.dart';
+import '../services/run_actions.dart';
 import '../services/secure_store.dart';
 import '../services/ssh_key_loader.dart';
 import '../services/apm_service.dart';
 import '../services/metrics_history.dart';
 import '../widgets/cron_dialogs.dart';
+import '../widgets/host_fix_sheet.dart';
 import '../widgets/pitch_card.dart';
 import '../widgets/alerts_staleness_line.dart';
 
@@ -735,11 +737,41 @@ class _ServerDetailsScreenState extends State<ServerDetailsScreen> {
             Text(a.title, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: AppColors.textPrimary), maxLines: 2, overflow: TextOverflow.ellipsis),
             const SizedBox(height: 3),
             Text(a.source, style: const TextStyle(fontSize: 9, color: AppColors.textMuted, fontFamily: AppFonts.mono)),
+            if (HostFixes.actionsFor(a).isNotEmpty) ...[
+              const SizedBox(height: 6),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: OutlinedButton(
+                  onPressed: () => _openHostFix(a),
+                  style: OutlinedButton.styleFrom(
+                      foregroundColor: AppColors.accentCyan,
+                      side: const BorderSide(color: AppColors.accentCyan),
+                      minimumSize: const Size(0, 28),
+                      padding: const EdgeInsets.symmetric(horizontal: 10),
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap),
+                  child: const Text('FIX…',
+                      style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800)),
+                ),
+              ),
+            ],
           ])),
           const SizedBox(width: 6),
           Pill(text: a.status.toUpperCase(), color: a.status == 'firing' ? AppColors.critical : AppColors.success),
         ]),
       );
+
+  /// Open the approve-first host-fix sheet for [alert]. The runner goes
+  /// over the existing SSH path ([AgentService.runCommand]).
+  void _openHostFix(AlertEntry alert) {
+    final c = _conn;
+    if (c == null || !mounted) return;
+    showHostFixSheet(
+      context: context,
+      alert: alert,
+      runner: (cmd) => _agent.runCommand(c, cmd),
+      onChanged: _refreshAlerts,
+    );
+  }
 
   Widget _actionsCard() {
     final c = _conn!;

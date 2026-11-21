@@ -1530,7 +1530,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen>
         baseUrl: base,
         headers: headers,
         model: _aiModelName,
-        system: '${_aiSystemPrompt()}\n\nYou have tools for live data${_aiWriteEnabled ? ' and actions' : ''}. Prefer calling a read tool over guessing.${_aiWriteEnabled ? ' For restart_service, run_ssh_command, rerun_workflow, retry_gitlab_pipeline, create_github_issue: the app asks the user to approve first — briefly say what you are about to do, then call the tool.' : ' Write actions are DISABLED by the user — you are read-only. If asked to change anything, explain the manual steps instead of calling a tool.'}',
+        system: '${_aiSystemPrompt()}\n\nYou have tools for live data${_aiWriteEnabled ? ' and actions' : ''}. Prefer calling a read tool over guessing.${_aiWriteEnabled ? ' For restart_service, run_ssh_command, rerun_workflow, retry_gitlab_pipeline, prune_disk, vacuum_journal, clear_queue, create_github_issue: the app asks the user to approve first — briefly say what you are about to do, then call the tool.' : ' Write actions are DISABLED by the user — you are read-only. If asked to change anything, explain the manual steps instead of calling a tool.'}',
         messages: turns.map((m) => {'role': m['role'].toString(), 'content': (m['content'] ?? '').toString()}).toList(),
         tools: tools,
         path: path,
@@ -1712,7 +1712,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen>
       : AiTools.schemas().where((t) => !AiTools.gated.contains((((t['function'] as Map?)) ?? const {})['name'])).toList();
 
   String _toolSystemSuffix() =>
-      ' Prefer calling a read tool over guessing.${_aiWriteEnabled ? ' For restart_service, run_ssh_command, rerun_workflow, retry_gitlab_pipeline, create_github_issue: the app asks the user to approve first — briefly say what you are about to do, then call the tool.' : ' Write actions are DISABLED by the user — you are read-only. If asked to change anything, explain the manual steps instead of calling a tool.'}';
+      ' Prefer calling a read tool over guessing.${_aiWriteEnabled ? ' For restart_service, run_ssh_command, rerun_workflow, retry_gitlab_pipeline, prune_disk, vacuum_journal, clear_queue, create_github_issue: the app asks the user to approve first — briefly say what you are about to do, then call the tool.' : ' Write actions are DISABLED by the user — you are read-only. If asked to change anything, explain the manual steps instead of calling a tool.'}';
 
   /// Native Anthropic tool loop (Anthropic provider + Zen/Go anthropic models).
   Future<void> _runAnthropicToolLoop(List<Map<String, String>> convo) async {
@@ -2064,7 +2064,7 @@ class _ControlCenterScreenState extends State<ControlCenterScreen>
     }
     b.writeln();
     if (_aiWriteEnabled) {
-      b.writeln('Write tools are ENABLED: you may restart services, run allowlisted diagnostic commands (incl. directory listings), re-run failed GitHub workflows, retry GitLab pipelines, and file GitHub issues via tools. The app asks the user to approve each write before it runs — say what you will do, then call the tool. Never claim inability to act: use the tools.');
+      b.writeln('Write tools are ENABLED: you may restart services, run allowlisted diagnostic commands (incl. directory listings), re-run failed GitHub workflows, retry GitLab pipelines, free disk (prune_disk), vacuum journals, clear queued jobs, and file GitHub issues via tools. The app asks the user to approve each write before it runs — say what you will do, then call the tool. Never claim inability to act: use the tools.');
     } else {
       b.writeln('Write tools are DISABLED: you are read-only. If asked to DO something, explain the manual steps and point to the relevant screen/terminal command.');
     }

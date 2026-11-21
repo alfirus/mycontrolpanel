@@ -5,6 +5,7 @@ import '../services/github_service.dart';
 import '../services/gitlab_service.dart';
 import '../services/run_actions.dart';
 import '../theme/app_theme.dart';
+import 'single_toast.dart';
 
 /// Run detail dialog for the live CI/CD timeline.
 ///
@@ -53,14 +54,11 @@ Future<void> showRunDetailSheet({
       }
       if (!ctx.mounted) return;
       Navigator.pop(ctx, true);
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        backgroundColor: AppColors.success.withValues(alpha: 0.14),
-        content: Text(
-          '${RunActions.label(action)} accepted for ${run.app} ${run.version}',
-          style: const TextStyle(fontSize: 12, color: AppColors.success),
-        ),
-        duration: const Duration(seconds: 3),
-      ));
+      showSingleToast(
+        context,
+        '${RunActions.label(action)} accepted for ${run.app} ${run.version}',
+        foreground: AppColors.success,
+      );
       onChanged();
     } catch (e) {
       if (!ctx.mounted) return;
