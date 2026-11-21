@@ -234,11 +234,12 @@ void main() {
       expect(rules.bruteCritAt, const AlertRules().bruteCritAt);
     });
 
-    test('IA order contract: all six rows in Kira order', () {
+    test('IA order contract: all seven rows in Kira order', () {
       expect(AlertSettingsOrder.rows, [
         'background_alerts',
         'severity_filter',
         'quiet_hours',
+        'channel_routing',
         'per_metric_thresholds',
         'battery_prompt',
         'last_checked',

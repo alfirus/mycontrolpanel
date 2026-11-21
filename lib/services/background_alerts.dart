@@ -32,6 +32,7 @@ import 'package:workmanager/workmanager.dart';
 import 'agent_service.dart';
 import 'alert_inbox_store.dart';
 import 'alert_poller.dart';
+import 'alert_routing.dart';
 import 'alert_watch.dart';
 import '../models/alert_entry.dart';
 import '../models/mock_data.dart' show DeployItem;
@@ -408,6 +409,11 @@ abstract class BackgroundAlerts {
           );
           if (fresh.isNotEmpty) {
             await showFresh(fresh);
+            // Winner-only outbound fan-out (WhatsApp / Telegram / email):
+            // same claimed batch, prefs + consent gated, never throws.
+            await AlertRoutingFanout.fanOut(
+              fresh: AlertRouting.freshEntries(alerts, keys),
+            );
           }
         } catch (_) {
           // One sick host never sinks the run.

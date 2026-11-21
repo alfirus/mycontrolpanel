@@ -8,6 +8,16 @@ releases are cut as Git tags `v<name>` via `.github/workflows/release.yml`
 ## [Unreleased]
 
 ### Added
+- Alert routing to WhatsApp / Telegram / email (Farah — ML): per-severity
+  + per-host routing rules (`lib/services/alert_routing.dart`,
+  `test/alert_routing_test.dart`) that forward firing/clearing alerts in
+  addition to the existing toast + inbox rails. Payloads reuse
+  `NotificationHook.build` verbatim; each channel is an explicit opt-in
+  (default OFF) with secrets in SecureStore only; dedupe reuses the atomic
+  `AlertWatch` seen-set claim from #168 (one delivery, N presentations —
+  `AM-X1` row in `test/alerting_matrix_test.dart`); rules UI lives in
+  Settings next to quiet-hours; foreground + background rails fan out on the
+  winning claim only.
 - Deploy observability, phase 3 (Aisyah — DevOps): Sentry release-health
   (`ErrorReporting.buildRelease`/`resolveEnvironment` + `release`/
   `environment` on init; `SENTRY_ENVIRONMENT` baked by tag builds —

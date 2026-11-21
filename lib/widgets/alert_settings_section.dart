@@ -7,6 +7,8 @@
 /// 2. `severity_filter` — which severities toast (toasts only, the inbox
 ///    always collects everything);
 /// 3. `quiet_hours` — OFF default, start/end pickers, summary label;
+/// 3b. `channel_routing` — WhatsApp/Telegram/email opt-ins (each OFF
+///    default) + per-severity/per-host rule editor (secrets in SecureStore);
 /// 4. `per_metric_thresholds` — disk warn/crit + brute-force warn/crit
 ///    steppers on `AlertRules` defaults (headless reuses verbatim);
 /// 5. `battery_prompt` — Android/iOS platform explainer (existing copy);
@@ -24,6 +26,7 @@ import '../services/background_alerts.dart';
 import '../theme/alert_tokens.dart';
 import '../theme/app_theme.dart';
 import 'alerts_staleness_line.dart';
+import 'alert_routing_section.dart';
 import 'background_consent_tile.dart';
 import 'pitch_card.dart';
 
@@ -224,7 +227,7 @@ class _AlertSettingsSectionState extends State<AlertSettingsSection> {
   @override
   Widget build(BuildContext context) {
     // Assert the IA contract: this section renders every ordered row.
-    assert(AlertSettingsOrder.rows.length == 6);
+    assert(AlertSettingsOrder.rows.length == 7);
     if (_loading) {
       return const PitchCard(
         title: 'ALERTS',
@@ -341,6 +344,11 @@ class _AlertSettingsSectionState extends State<AlertSettingsSection> {
                 ],
               ),
             ),
+          const SizedBox(height: 10),
+          // 3b. outbound channel routing (WhatsApp / Telegram / email) —
+          // per-channel opt-ins (each default OFF) + rule editor. Secrets
+          // stay in SecureStore; payloads reuse NotificationHook.build.
+          const AlertRoutingSection(),
           const SizedBox(height: 10),
           // 4. per-metric thresholds (AlertRules defaults, headless verbatim)
           _rowHeader(

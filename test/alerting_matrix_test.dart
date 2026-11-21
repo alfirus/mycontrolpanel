@@ -27,6 +27,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:my_control_panel/models/alert_entry.dart';
 import 'package:my_control_panel/models/mock_data.dart' show DeployItem;
 import 'package:my_control_panel/models/server_connection.dart';
+import 'package:my_control_panel/services/alert_routing.dart';
 import 'package:my_control_panel/services/alert_watch.dart';
 import 'package:my_control_panel/services/background_alerts.dart';
 import 'package:my_control_panel/services/desktop_alerts.dart';
@@ -539,6 +540,100 @@ void main() {
         );
         expect(violations, isNotEmpty, reason: '$kind');
         expect(violations.join(' '), contains(headlessFlag));
+      }
+    });
+  });
+
+  group('AM-X outbound channel routing (dedupe across channels)', () {
+    test('AM-X1 cross-rail + cross-channel fire is one delivery, N presentations',
+        () async {
+      // Dedupe-across-channels row: the foreground rail and the background
+      // rail race the same firing batch through the atomic seen-set claim
+      // (PR #168). Exactly one rail wins; only the winner fans out to the
+      // outbound channels. The toast and the channel message are two
+      // presentations of that single delivery — never two deliveries.
+      final dir = await Directory.systemTemp.createTemp('mcp-xchan-');
+      final lockFile =
+          File('${dir.path}${Platform.pathSeparator}headless.lock');
+      try {
+        final alert = MatrixDoubles.firingDisk('xchan-host');
+        final keys = AlertWatch.currentKeys([alert], const []);
+        await AlertRouting.setChannelEnabled(AlertChannel.telegram, true);
+
+        final deliveries = <String>[];
+        Future<bool> sender(
+          AlertChannel channel,
+          Map<String, String> payload,
+          List<AlertEntry> entries,
+        ) async {
+          deliveries.add('${channel.name}:${payload['body']}');
+          return true;
+        }
+
+        Future<Map<AlertChannel, Map<String, String>>> rail() async {
+          final fresh = await AlertWatch.claimFreshTitles(
+            keys,
+            [alert],
+            const [],
+            lockFile: lockFile,
+          );
+          if (fresh.isEmpty) return const {};
+          // Winner-only presentations: the OS toast payload plus the
+          // channel fan-out, both built from the same claimed batch.
+          final toast =
+              BackgroundAlerts.buildLocalPayload('MyControlPanel alert', fresh);
+          expect(toast['body'], isNotEmpty);
+          return AlertRoutingFanout.fanOutClaimed(
+            fresh: AlertRouting.freshEntries([alert], keys),
+            rules: const [
+              RoutingRule(
+                id: 'xchan',
+                channels: {AlertChannel.telegram},
+              ),
+            ],
+            enabled: {AlertChannel.telegram},
+            sender: sender,
+          );
+        }
+
+        final results = await Future.wait([rail(), rail()]);
+        final wins =
+            results.where((sent) => sent.isNotEmpty).length;
+        expect(wins, 1,
+            reason: 'simultaneous cross-rail fire must deliver exactly once');
+        expect(deliveries, hasLength(1));
+        // The single delivery carries the verbatim NotificationHook body.
+        expect(deliveries.single, contains('xchan-host'));
+        expect(
+          deliveries.single.split(':').sublist(1).join(':'),
+          NotificationHook.build(
+            'MyControlPanel alert',
+            ['disk / at 97% on xchan-host (xchan-host)'],
+          )['body'],
+        );
+        // Sequential follow-up on the now-shared set stays silent on every
+        // rail: no second toast, no second channel message.
+        final again = await AlertWatch.claimFreshTitles(
+          keys,
+          [alert],
+          const [],
+          lockFile: lockFile,
+        );
+        expect(again, isEmpty);
+        final refan = await AlertRoutingFanout.fanOutClaimed(
+          fresh: const [],
+          rules: const [
+            RoutingRule(id: 'xchan', channels: {AlertChannel.telegram})
+          ],
+          enabled: {AlertChannel.telegram},
+          sender: sender,
+        );
+        expect(refan, isEmpty);
+        expect(deliveries, hasLength(1));
+      } finally {
+        try {
+          await dir.delete(recursive: true);
+        } catch (_) {}
       }
     });
   });
