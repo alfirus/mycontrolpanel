@@ -35,6 +35,7 @@ import '../services/log_tail_service.dart';
 import '../services/metrics_history.dart';
 import '../services/chart_downsample.dart';
 import '../services/host_snapshot_cache.dart';
+import '../services/alert_routing.dart';
 import '../services/alert_watch.dart';
 import '../services/alert_notifications.dart';
 import '../services/background_alerts.dart';
@@ -518,6 +519,15 @@ class _ControlCenterScreenState extends State<ControlCenterScreen>
         } else {
           unawaited(AlertNotifications.showFresh(fresh));
         }
+        // Outbound channels (WhatsApp / Telegram / email): winner-only
+        // fan-out of the SAME claimed batch — one delivery, N presentations.
+        // The claim above gates every rail, so a concurrent background tick
+        // that lost the claim stays silent here too (AM-X1). Failed CI runs
+        // stay toast-only in this slice (routing matches AlertEntry).
+        unawaited(AlertRoutingFanout.fanOut(
+          fresh: AlertRouting.freshEntries(
+              _realAlerts, keys.difference(seenBefore)),
+        ));
       }
     } catch (_) {}
   }

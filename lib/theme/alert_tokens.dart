@@ -271,6 +271,7 @@ abstract class AlertSettingsOrder {
     'background_alerts', // shared consent toggle (existing, default OFF)
     'severity_filter', // which severities toast: critical-only | all
     'quiet_hours', // QuietHours window (default OFF)
+    'channel_routing', // WhatsApp/Telegram/email opt-ins + rules (each OFF)
     'per_metric_thresholds', // disk warn/crit, brute-force counts (Nurul)
     'battery_prompt', // Android explainer (existing copy)
     'last_checked', // stale-tolerant status line (existing, read-only)
