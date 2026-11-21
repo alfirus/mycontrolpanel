@@ -7,6 +7,7 @@ import '../models/server_connection.dart';
 import 'agent_service.dart';
 import 'github_service.dart';
 import 'gitlab_service.dart';
+import 'run_actions.dart';
 
 /// Tool-calling for the AI assistant (Stage 2).
 /// Read tools run immediately. Write tools are `gated` — the UI must show
@@ -150,6 +151,51 @@ class AiTools {
         {
           'type': 'function',
           'function': {
+            'name': 'prune_disk',
+            'description':
+                'REQUIRES USER APPROVAL. Free disk on a server: clears package caches, unused docker layers, and /tmp files older than 7 days. Reports disk before/after.',
+            'parameters': {
+              'type': 'object',
+              'properties': {
+                'server': {'type': 'string', 'description': 'Exact server name.'},
+              },
+              'required': ['server'],
+            },
+          },
+        },
+        {
+          'type': 'function',
+          'function': {
+            'name': 'vacuum_journal',
+            'description':
+                'REQUIRES USER APPROVAL. Vacuum systemd journals on a server to 200M / 14 days. Reports reclaimed space.',
+            'parameters': {
+              'type': 'object',
+              'properties': {
+                'server': {'type': 'string', 'description': 'Exact server name.'},
+              },
+              'required': ['server'],
+            },
+          },
+        },
+        {
+          'type': 'function',
+          'function': {
+            'name': 'clear_queue',
+            'description':
+                'REQUIRES USER APPROVAL. Shed load on a server: resets failed units and cancels queued systemd jobs (they re-trigger normally). Reports remaining queued jobs.',
+            'parameters': {
+              'type': 'object',
+              'properties': {
+                'server': {'type': 'string', 'description': 'Exact server name.'},
+              },
+              'required': ['server'],
+            },
+          },
+        },
+        {
+          'type': 'function',
+          'function': {
             'name': 'create_github_issue',
             'description': 'REQUIRES USER APPROVAL. File a GitHub issue in a tracked repo (e.g. from an alert). Keep title short, body factual.',
             'parameters': {
@@ -169,7 +215,7 @@ class AiTools {
         },
       ];
 
-  static const gated = {'restart_service', 'run_ssh_command', 'rerun_workflow', 'retry_gitlab_pipeline', 'create_github_issue'};
+  static const gated = {'restart_service', 'run_ssh_command', 'rerun_workflow', 'retry_gitlab_pipeline', 'prune_disk', 'vacuum_journal', 'clear_queue', 'create_github_issue'};
 
   /// Allowlist for run_ssh_command. Units: [a-zA-Z0-9@._:-]+, lines 1-200,
   /// ls restricted to absolute paths (no .., no ~, no $() or backticks).
@@ -333,6 +379,25 @@ Future<ToolResult> executeTool(String name, Map<String, dynamic> args, ToolDeps 
         return ToolResult('Retry accepted for $project pipeline $pipelineId ✓ (check CI/CD for progress).');
       } catch (e) {
         return ToolResult('Retry failed: ${e.toString().replaceFirst('Exception: ', '').split('\n').first}');
+      }
+    }
+    case 'prune_disk':
+    case 'vacuum_journal':
+    case 'clear_queue': {
+      final s = d.findServer(args['server']?.toString());
+      if (s == null) return ToolResult('Unknown server "${args['server']}". Known: ${d.servers.map((e) => e.name).join(', ')}');
+      // Same pure policy/commands as the alert UI ([HostFixes]) so both
+      // surfaces run exactly the same fix for the same problem.
+      final action = switch (name) {
+        'prune_disk' => HostFixAction.pruneDisk,
+        'vacuum_journal' => HostFixAction.vacuumJournal,
+        _ => HostFixAction.clearQueue,
+      };
+      try {
+        final out = await d.agent.runCommand(s, HostFixes.commandFor(action));
+        return ToolResult('${HostFixes.label(action)} on ${s.name}:\n$out');
+      } catch (e) {
+        return ToolResult('${HostFixes.label(action).toLowerCase()} failed: ${e.toString().split('\n').first}');
       }
     }
     case 'create_github_issue': {
